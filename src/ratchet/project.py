@@ -89,7 +89,7 @@ class Project:
         """Returns the patterns that agents may never change, which always include .ratchet."""
         return [*self.config.frozen, f"{FOLDER}/**"]
 
-    def settings(self, command: str, model: type[SettingsT]) -> SettingsT:
+    def command_settings(self, command: str, model: type[SettingsT]) -> SettingsT:
         """Returns one command's section of config.toml, checked against that command's model.
         A section left out of config.toml takes the model's defaults.
 
@@ -109,11 +109,11 @@ class Project:
         except ValidationError as exc:
             raise ProjectError(
                 f"{self.folder / 'config.toml'} has settings that are wrong:\n"
-                f"{_readable(exc, prefix=command)}"
+                f"{_format_errors(exc, prefix=command)}"
             ) from exc
 
 
-def _readable(error: ValidationError, prefix: str = "") -> str:
+def _format_errors(error: ValidationError, prefix: str = "") -> str:
     """Returns pydantic's errors as one line per wrong setting.
 
     Args:
@@ -196,7 +196,7 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
     try:
         config = Config.model_validate(shared)
     except ValidationError as exc:
-        raise ProjectError(f"{config_path} has settings that are wrong:\n{_readable(exc)}") from exc
+        raise ProjectError(f"{config_path} has settings that are wrong:\n{_format_errors(exc)}") from exc
 
     comments = read_markdown(folder, "comments.md") if (folder / "comments.md").exists() else None
     return Project(

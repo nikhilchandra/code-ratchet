@@ -51,7 +51,7 @@ def load_settings(project: Project) -> RefactorSettings:
     Raises:
         ProjectError: The section holds a wrong setting.
     """
-    return project.settings(COMMAND, RefactorSettings)
+    return project.command_settings(COMMAND, RefactorSettings)
 
 
 def read_problems(project: Project) -> str:

@@ -56,7 +56,7 @@ def test_a_complete_folder_loads(tmp_path: Path) -> None:
 
 def test_a_commands_section_is_checked_against_its_own_settings(tmp_path: Path) -> None:
     """Proves a command gets its own section, with defaults for what the section leaves out."""
-    settings = load(make_folder(tmp_path)).settings("demo", DemoSettings)
+    settings = load(make_folder(tmp_path)).command_settings("demo", DemoSettings)
 
     assert (settings.limit, settings.label) == (4, "none")
 
@@ -64,7 +64,7 @@ def test_a_commands_section_is_checked_against_its_own_settings(tmp_path: Path) 
 def test_a_missing_section_takes_the_defaults(tmp_path: Path) -> None:
     """Proves a command with no section in config.toml still runs, with its defaults."""
     config = 'test_command = ["pytest"]\neditable = ["src/**"]\n'
-    settings = load(make_folder(tmp_path, config=config)).settings("demo", DemoSettings)
+    settings = load(make_folder(tmp_path, config=config)).command_settings("demo", DemoSettings)
 
     assert settings == DemoSettings()
 
@@ -165,7 +165,7 @@ def test_a_wrong_command_setting_is_named_with_its_command(
     project = load(make_folder(tmp_path, config=config))
 
     with pytest.raises(ProjectError, match=named.replace(".", r"\.")):
-        project.settings("demo", DemoSettings)
+        project.command_settings("demo", DemoSettings)
 
 
 @pytest.mark.parametrize("missing", ["test_command", "editable"])

@@ -28,7 +28,7 @@ class Role(StrEnum):
     REVIEWER = "reviewer"
 
 
-def _patterns(patterns: list[str]) -> str:
+def _format_patterns(patterns: list[str]) -> str:
     """Returns path patterns as a list for a prompt, such as "`src/**` or `tests/**`".
 
     Args:
@@ -43,7 +43,7 @@ def _patterns(patterns: list[str]) -> str:
     return ", ".join(quoted[:-1]) + " or " + quoted[-1]
 
 
-def _command(words: list[str]) -> str:
+def _format_command(words: list[str]) -> str:
     """Returns a command as it would be typed, such as 'uv run pytest -m ""'.
 
     Args:
@@ -72,9 +72,9 @@ def build_profile(project: Project, role: Role) -> str:
     values = {
         "rules": project.rules.strip(),
         "comments": comments,
-        "editable": _patterns(project.config.editable),
-        "frozen": _patterns(project.frozen),
-        "test_command": _command(project.config.test_command),
+        "editable": _format_patterns(project.config.editable),
+        "frozen": _format_patterns(project.frozen),
+        "test_command": _format_command(project.config.test_command),
     }
     parts = [PROMPTS / "shared.md", PROMPTS / f"{role}.md"]
     return "\n\n".join(

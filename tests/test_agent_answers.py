@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ratchet.refactor.answers import ImplementerAnswer, Plan, Review, Status, Verdict
+from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review, Status, Verdict
 
 ANSWERS = Path(__file__).parent / "answers"
 

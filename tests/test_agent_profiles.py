@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from ratchet.project import Project, load_project
-from ratchet.refactor.answers import Plan
-from ratchet.refactor.profiles import NO_COMMENT_RULES, Role, build_profile, write_profile
+from ratchet.refactor.agent_answers import Plan
+from ratchet.refactor.agent_profiles import NO_COMMENT_RULES, Role, build_profile, write_profile
 from ratchet.refactor.settings import COMMAND
 from rooster import Agent
 
