@@ -2,7 +2,7 @@
 name = "ratchet-rooster"
 version = "0.1.0"
 description = "Hands a coding goal to a team of agents that work in small, tested, committed steps."
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "agent-rooster",
     "pydantic>=2",

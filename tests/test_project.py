@@ -76,6 +76,27 @@ def test_the_ratchet_folder_is_always_frozen(tmp_path: Path) -> None:
     assert project.frozen == ["**/*.feature", ".ratchet/**"]
 
 
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        ("src/app.py", True),
+        ("src/deep/down/app.py", True),
+        ("tests\\test_app.py", True),
+        ("tests/features/login.feature", False),
+        ("login.feature", False),
+        (".ratchet/rules.md", False),
+        ("pyproject.toml", False),
+        ("src", False),
+    ],
+)
+def test_may_change_follows_the_editable_and_frozen_patterns(
+    tmp_path: Path, path: str, allowed: bool
+) -> None:
+    """Proves a file may change only when it matches an editable pattern and no frozen one,
+    where ** stands for any number of folders, none included."""
+    assert load(make_folder(tmp_path)).may_change(path) is allowed
+
+
 def test_the_state_folder_sits_inside_the_ratchet_folder(tmp_path: Path) -> None:
     """Proves the ledger and the jobs are kept in .ratchet/state."""
     assert load(make_folder(tmp_path)).state_dir == tmp_path / ".ratchet" / "state"

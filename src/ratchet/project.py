@@ -19,7 +19,7 @@ from __future__ import annotations
 import tomllib
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -88,6 +88,21 @@ class Project:
     def frozen(self) -> list[str]:
         """Returns the patterns that agents may never change, which always include .ratchet."""
         return [*self.config.frozen, f"{FOLDER}/**"]
+
+    def may_change(self, path: str) -> bool:
+        """Answers whether agents may change a file, which must match an editable pattern and no
+        frozen one.
+
+        Args:
+            path: The file's path relative to the project, with forward or back slashes.
+
+        Returns:
+            True when the file matches 'editable' and does not match 'frozen'.
+        """
+        file = PurePosixPath(path.replace("\\", "/"))
+        return any(file.full_match(pattern) for pattern in self.config.editable) and not any(
+            file.full_match(pattern) for pattern in self.frozen
+        )
 
     def command_settings(self, command: str, model: type[SettingsT]) -> SettingsT:
         """Returns one command's section of config.toml, checked against that command's model.
