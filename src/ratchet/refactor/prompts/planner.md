@@ -58,6 +58,7 @@ Answer with one JSON object and nothing else. Every field is always present. For
   "stop": false,
   "reason": "",
   "step_title": "one short line in the style of a commit message, lowercase, no period",
+  "summary": "the step in at most 60 characters, such as: line totals come from pricing",
   "problems": ["P19"],
   "completes": ["P19"],
   "why_now": "why this step comes next, in one or two sentences",

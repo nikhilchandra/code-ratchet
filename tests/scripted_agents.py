@@ -41,6 +41,7 @@ class ScriptedAgent:
 def plan(**changes: object) -> dict:
     """Returns a plan with one check, with any field changed."""
     return {"stop": False, "reason": "", "step_title": "rename the comment in add",
+            "summary": "rename the comment in add",
             "problems": ["P1"], "completes": ["P1"], "why_now": "", "changes": [], "added": [],
             "removed": [], "moved": [], "tests_affected": [],
             "checks": ["src/app.py defines add"], "risks": ""} | changes

@@ -69,9 +69,11 @@ class Plan(_Answer):
     # True when nothing more can be planned, with the reason. A plan has False and "".
     stop: bool
     reason: str
-    # A short title in the style of a commit message, the problem ids the step works on, and
-    # the problem ids it finishes.
+    # A title in the style of a commit message, which becomes the step's commit message, and a
+    # label of at most 60 characters, which the console shows. Then the problem ids the step
+    # works on, and the problem ids it finishes.
     step_title: str
+    summary: str
     problems: list[str]
     completes: list[str]
     why_now: str

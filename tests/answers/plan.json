@@ -2,6 +2,7 @@
   "stop": false,
   "reason": "",
   "step_title": "compute line totals in pricing instead of report",
+  "summary": "line totals come from pricing",
   "problems": [
     "P3"
   ],
