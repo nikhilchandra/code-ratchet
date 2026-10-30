@@ -6,6 +6,9 @@ The folder always holds two files:
         followed by one section per command, such as [refactor].
     rules.md: what the project's code must become, which every agent reads.
 
+It may also hold comments.md, the project's rules for comments and docstrings. Without it,
+agents follow no comment style beyond keeping comments true.
+
 Each command reads its own markdown files from the folder, such as problems.md for refactor,
 and checks its own section of config.toml. ratchet keeps its own records in .ratchet/state,
 which the project should not commit.
@@ -65,8 +68,9 @@ class Project:
     # The project's own folder, which holds .ratchet.
     root: Path
     config: Config
-    # The text of rules.md.
+    # The text of rules.md, and of comments.md or None when the project has no comments.md.
     rules: str
+    comments: str | None = None
     # Each command's section of config.toml, unchecked until the command asks for it.
     sections: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
 
@@ -160,8 +164,8 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
         The project's shared settings and rules, with each command's section kept for later.
 
     Raises:
-        ProjectError: The folder or one of its files is missing, rules.md is empty, or
-            config.toml is not valid TOML, holds a wrong shared setting or has a section that
+        ProjectError: The folder or one of its files is missing, rules.md is empty,
+            comments.md is there but empty, or config.toml is not valid TOML, holds a wrong shared setting or has a section that
             no command reads.
     """
     root = Path(root)
@@ -194,4 +198,11 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
     except ValidationError as exc:
         raise ProjectError(f"{config_path} has settings that are wrong:\n{_readable(exc)}") from exc
 
-    return Project(root=root, config=config, rules=read_markdown(folder, "rules.md"), sections=sections)
+    comments = read_markdown(folder, "comments.md") if (folder / "comments.md").exists() else None
+    return Project(
+        root=root,
+        config=config,
+        rules=read_markdown(folder, "rules.md"),
+        comments=comments,
+        sections=sections,
+    )

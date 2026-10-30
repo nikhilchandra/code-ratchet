@@ -103,6 +103,24 @@ def test_empty_rules_are_refused(tmp_path: Path) -> None:
         load(make_folder(tmp_path, rules="  \n"))
 
 
+def test_comment_rules_are_read_when_the_project_has_them(tmp_path: Path) -> None:
+    """Proves comments.md is optional, and read when it is there."""
+    make_folder(tmp_path)
+    assert load(tmp_path).comments is None
+
+    (tmp_path / ".ratchet" / "comments.md").write_text("Use American spelling.", encoding="utf-8")
+    assert load(tmp_path).comments == "Use American spelling."
+
+
+def test_empty_comment_rules_are_refused(tmp_path: Path) -> None:
+    """Proves an empty comments.md is caught, since it was most likely meant to hold rules."""
+    make_folder(tmp_path)
+    (tmp_path / ".ratchet" / "comments.md").write_text("\n", encoding="utf-8")
+
+    with pytest.raises(ProjectError, match="comments.md is empty"):
+        load(tmp_path)
+
+
 def test_broken_toml_names_the_file(tmp_path: Path) -> None:
     """Proves a syntax error in config.toml is reported as such."""
     make_folder(tmp_path, config='test_command = ["pytest"\n')
