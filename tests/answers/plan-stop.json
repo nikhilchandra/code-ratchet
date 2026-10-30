@@ -1,0 +1,15 @@
+{
+  "stop": true,
+  "reason": "There is nothing left to plan, so I am stopping. The ledger marks P2, P3 and P4 as done, and the problem list has no other open entries. P5, which asks for a money type in place of Decimal, is parked as a question for the owner, so it is outside the loop. I checked the code as it is now. Line totals come only from pricing.line_total, which invoice.py, tax.py and report.py all call. If the owner wants more done, the next step needs a new entry in the problem list first.",
+  "step_title": "",
+  "problems": [],
+  "completes": [],
+  "why_now": "",
+  "changes": [],
+  "added": [],
+  "removed": [],
+  "moved": [],
+  "tests_affected": [],
+  "checks": [],
+  "risks": ""
+}

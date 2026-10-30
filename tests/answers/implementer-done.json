@@ -1,0 +1,15 @@
+{
+  "status": "done",
+  "summary": "I added pricing.line_total and moved CENTS into pricing.py. Invoice.subtotal now sums line_total over the lines, and the report's line table calls it too. I removed _discounted_amount from report.py. line_total does not round, so the subtotals are the same as before.",
+  "deviations": [
+    "The plan did not say how report.py should import pricing. I imported the module and not the function, to match how invoice.py imports it."
+  ],
+  "tests_changed": [
+    {
+      "file": "tests/test_report.py",
+      "change": "test_discounted_row now patches pricing.line_total instead of report._discounted_amount. The expected rows are the same.",
+      "why": "report._discounted_amount no longer exists."
+    }
+  ],
+  "blocked_reason": ""
+}

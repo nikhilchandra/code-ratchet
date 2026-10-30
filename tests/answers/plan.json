@@ -1,0 +1,68 @@
+{
+  "stop": false,
+  "reason": "",
+  "step_title": "compute line totals in pricing instead of report",
+  "problems": [
+    "P3"
+  ],
+  "completes": [
+    "P3"
+  ],
+  "why_now": "P3 is the last problem that blocks P4. The report and the invoice each work out a line's total on their own, and P4 needs one place to change when discounts gain a cap.",
+  "changes": [
+    {
+      "file": "src/invoices/pricing.py",
+      "what": "Add line_total, which applies the line's discount to its quantity times its unit price. Take CENTS from report.py."
+    },
+    {
+      "file": "src/invoices/invoice.py",
+      "what": "Invoice.subtotal sums pricing.line_total over the lines instead of running its own loop."
+    },
+    {
+      "file": "src/invoices/report.py",
+      "what": "The line table calls pricing.line_total. Remove _discounted_amount and the CENTS constant."
+    }
+  ],
+  "added": [
+    {
+      "kind": "method",
+      "name": "line_total",
+      "file": "src/invoices/pricing.py",
+      "requirement": "Invoice.subtotal and the report's line table both need the total of one line after its discount.",
+      "why_not_simpler": "pricing.apply_discount works on an amount and not on a line, so each caller would still multiply the quantity by the unit price itself, which is the repeated code that P3 names."
+    }
+  ],
+  "removed": [
+    {
+      "kind": "method",
+      "name": "_discounted_amount",
+      "file": "src/invoices/report.py"
+    }
+  ],
+  "moved": [
+    {
+      "name": "CENTS",
+      "from": "src/invoices/report.py",
+      "to": "src/invoices/pricing.py"
+    }
+  ],
+  "tests_affected": [
+    {
+      "file": "tests/test_report.py",
+      "why": "It patches report._discounted_amount to fake a discount on one row.",
+      "allowed_change": "Patch pricing.line_total instead, with the same expected rows."
+    },
+    {
+      "file": "tests/test_invoice.py",
+      "why": "It checks Invoice.subtotal on a two line invoice with a discount.",
+      "allowed_change": "None is needed, since the totals stay the same."
+    }
+  ],
+  "checks": [
+    "`grep -rn _discounted_amount src/` finds nothing",
+    "`pricing.line_total` in `src/invoices/pricing.py` is the only code in `src/` that multiplies a line's quantity by its unit price",
+    "`CENTS` is defined in `src/invoices/pricing.py` and nowhere else in `src/`",
+    "`Invoice.subtotal` in `src/invoices/invoice.py` sums `pricing.line_total` over the invoice's lines"
+  ],
+  "risks": "report.py rounds each row to cents before it shows it, while Invoice.subtotal rounds only the sum. If line_total rounds as well, an invoice with many small lines could change its subtotal by a cent. Compare the subtotals in tests/test_invoice.py before and after the step."
+}

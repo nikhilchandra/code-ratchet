@@ -1,0 +1,7 @@
+{
+  "status": "blocked",
+  "summary": "I stopped before changing any file.",
+  "deviations": [],
+  "tests_changed": [],
+  "blocked_reason": "The plan removes _discounted_amount from report.py, but src/invoices/export.py imports it to build the CSV rows, and the plan does not name that file. Removing the function breaks the CSV export. Keeping it would fail check 1. The plan needs to change export.py as well, or keep the function and drop check 1."
+}

@@ -1,0 +1,80 @@
+{
+  "verdict": "reject",
+  "summary": "The step changes what invoices add up to. line_total rounds each line to cents, so Invoice.subtotal now rounds every line before it sums them, where it used to round only the sum. To make the suite pass, the implementer changed an expected subtotal in tests/test_invoice.py, which the plan does not allow.",
+  "criteria": {
+    "scope": {
+      "pass": true,
+      "findings": []
+    },
+    "readable": {
+      "pass": true,
+      "findings": []
+    },
+    "editable": {
+      "pass": true,
+      "findings": []
+    },
+    "necessary": {
+      "pass": true,
+      "findings": []
+    },
+    "placed": {
+      "pass": true,
+      "findings": []
+    },
+    "modular": {
+      "pass": true,
+      "findings": []
+    },
+    "behavior": {
+      "pass": false,
+      "findings": [
+        {
+          "file": "src/invoices/pricing.py",
+          "line": 24,
+          "problem": "line_total ends with .quantize(CENTS). Invoice.subtotal sums these rounded values, so an invoice of three lines at 3.335 now totals 10.02 instead of 10.01.",
+          "fix": "Return the exact amount from line_total and leave the rounding to the report's rows and to Invoice.subtotal, as before the step."
+        }
+      ]
+    },
+    "tests": {
+      "pass": false,
+      "findings": [
+        {
+          "file": "tests/test_invoice.py",
+          "line": 41,
+          "problem": "The expected subtotal in test_subtotal_with_discount changed from Decimal(\"10.01\") to Decimal(\"10.02\"). The plan says this test needs no change, since the totals stay the same.",
+          "fix": "Restore the expected value of 10.01 and fix line_total so the test passes as it was."
+        }
+      ]
+    },
+    "comments": {
+      "pass": true,
+      "findings": []
+    }
+  },
+  "plan_checks": [
+    {
+      "check": 1,
+      "pass": true,
+      "evidence": "`grep -rn _discounted_amount src/` prints nothing."
+    },
+    {
+      "check": 2,
+      "pass": true,
+      "evidence": "`grep -rn \"quantity \\* \" src/` finds only pricing.py line 21, inside line_total."
+    },
+    {
+      "check": 3,
+      "pass": true,
+      "evidence": "`grep -rn CENTS src/` finds the definition at pricing.py line 9 and uses in pricing.py and report.py, with no other definition."
+    },
+    {
+      "check": 4,
+      "pass": true,
+      "evidence": "invoice.py line 34 returns sum(pricing.line_total(line) for line in self.lines)."
+    }
+  ],
+  "comment_fixes": [],
+  "notes": []
+}

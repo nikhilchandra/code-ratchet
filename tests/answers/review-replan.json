@@ -1,0 +1,73 @@
+{
+  "verdict": "replan",
+  "summary": "The implementer carried out the plan as written, but the plan missed a third copy of the line math. tax.tax_for_line still multiplies the quantity by the unit price and applies the discount itself, so check 2 cannot hold. The fault is in the plan, which does not name src/invoices/tax.py.",
+  "criteria": {
+    "scope": {
+      "pass": true,
+      "findings": []
+    },
+    "readable": {
+      "pass": true,
+      "findings": []
+    },
+    "editable": {
+      "pass": false,
+      "findings": [
+        {
+          "file": "src/invoices/tax.py",
+          "line": 31,
+          "problem": "tax_for_line works out the line's discounted amount on its own, so a change to discounts in P4 would still need edits in pricing.py and tax.py. The plan does not name tax.py, so the implementer could not fix this without leaving the plan.",
+          "fix": "Plan the step again with src/invoices/tax.py in its changes, so tax_for_line takes its amount from pricing.line_total, and name tests/test_tax.py in tests_affected."
+        }
+      ]
+    },
+    "necessary": {
+      "pass": true,
+      "findings": []
+    },
+    "placed": {
+      "pass": true,
+      "findings": []
+    },
+    "modular": {
+      "pass": true,
+      "findings": []
+    },
+    "behavior": {
+      "pass": true,
+      "findings": []
+    },
+    "tests": {
+      "pass": true,
+      "findings": []
+    },
+    "comments": {
+      "pass": true,
+      "findings": []
+    }
+  },
+  "plan_checks": [
+    {
+      "check": 1,
+      "pass": true,
+      "evidence": "`grep -rn _discounted_amount src/` prints nothing."
+    },
+    {
+      "check": 2,
+      "pass": false,
+      "evidence": "`grep -rn \"quantity \\* \" src/` finds pricing.py line 21 and also tax.py line 31, inside tax_for_line."
+    },
+    {
+      "check": 3,
+      "pass": true,
+      "evidence": "`grep -rn CENTS src/` finds the definition at pricing.py line 9 and uses in pricing.py and report.py, with no other definition."
+    },
+    {
+      "check": 4,
+      "pass": true,
+      "evidence": "invoice.py line 34 returns sum(pricing.line_total(line) for line in self.lines)."
+    }
+  ],
+  "comment_fixes": [],
+  "notes": []
+}

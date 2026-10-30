@@ -1,0 +1,68 @@
+{
+  "verdict": "accept",
+  "summary": "The step does what the plan says and keeps behavior the same. Invoice.subtotal and the report's line table both call pricing.line_total, CENTS lives in pricing.py, and _discounted_amount is gone. The subtotals in tests/test_invoice.py are unchanged.",
+  "criteria": {
+    "scope": {
+      "pass": true,
+      "findings": []
+    },
+    "readable": {
+      "pass": true,
+      "findings": []
+    },
+    "editable": {
+      "pass": true,
+      "findings": []
+    },
+    "necessary": {
+      "pass": true,
+      "findings": []
+    },
+    "placed": {
+      "pass": true,
+      "findings": []
+    },
+    "modular": {
+      "pass": true,
+      "findings": []
+    },
+    "behavior": {
+      "pass": true,
+      "findings": []
+    },
+    "tests": {
+      "pass": true,
+      "findings": []
+    },
+    "comments": {
+      "pass": true,
+      "findings": []
+    }
+  },
+  "plan_checks": [
+    {
+      "check": 1,
+      "pass": true,
+      "evidence": "`grep -rn _discounted_amount src/` prints nothing."
+    },
+    {
+      "check": 2,
+      "pass": true,
+      "evidence": "`grep -rn \"quantity \\* \" src/` finds only pricing.py line 21, inside line_total."
+    },
+    {
+      "check": 3,
+      "pass": true,
+      "evidence": "`grep -rn CENTS src/` finds the definition at pricing.py line 9 and uses in pricing.py and report.py, with no other definition."
+    },
+    {
+      "check": 4,
+      "pass": true,
+      "evidence": "invoice.py line 34 returns sum(pricing.line_total(line) for line in self.lines)."
+    }
+  ],
+  "comment_fixes": [],
+  "notes": [
+    "line_total could take the discount as a parameter for P4, but the plan leaves that to P4, which is right."
+  ]
+}
