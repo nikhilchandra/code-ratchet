@@ -1,0 +1,159 @@
+"""Runs refactor jobs one after another on the newest problem list, keeping its ledger.
+
+A run first checks the project: the working tree must be clean, and the whole suite must pass,
+since that run becomes the baseline that every job's tests are compared with. It then starts one
+job after another, recording each in the ledger, until the planner finds nothing left, the run
+reaches its most jobs, or a job halts.
+
+Everything a run makes goes in the problem list's own folder, .ratchet/state/<list name>/: the
+ledger, the run's log, the baseline, the agents' profiles and logs, and every job.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+from rooster import Agent, JobStatus
+
+from ratchet.git import Repo
+from ratchet.project import Project
+from ratchet.pytest_runner import OutcomeKind, run_pytest
+from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
+from ratchet.refactor.ledger import (
+    JobRecord,
+    find_plan_refusal,
+    format_planner_view,
+    load_ledger,
+    record_job,
+    save_ledger,
+)
+from ratchet.refactor.problem_list import find_latest_problem_list
+from ratchet.refactor.settings import RefactorSettings, load_settings
+
+# A function that makes the three agents, with the arguments of make_agents().
+AgentMaker = Callable[[Project, RefactorSettings, str, Path], dict[str, Agent]]
+
+
+def count_of(number: int, noun: str) -> str:
+    """Returns a number with its noun, such as "1 test" or "3 tests".
+
+    Args:
+        number: How many there are.
+        noun: The noun in the singular.
+
+    Returns:
+        The number and the noun, with an s added unless the number is 1.
+    """
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
+@dataclass
+class RefactorRun:
+    """Holds what one run did."""
+
+    # The jobs that the run recorded in the ledger, in order.
+    jobs: list[JobRecord] = field(default_factory=list)
+    # Why the run ended, as one sentence.
+    end: str = ""
+    # What the run spent, in dollars, including a planner call that found nothing left.
+    cost_usd: float = 0.0
+
+
+def run_refactor(
+    project: Project,
+    *,
+    max_jobs: int = 1,
+    focus: str = "",
+    agent_maker: AgentMaker = make_agents,
+    say: Callable[[str], None] = print,
+) -> RefactorRun:
+    """Runs jobs on the newest problem list until nothing is left or 'max_jobs' have run.
+
+    Args:
+        project: The project, as read from its .ratchet folder.
+        max_jobs: The most jobs to run.
+        focus: A problem to ask the planner to take first, such as "P19", or "".
+        agent_maker: The function that makes the three agents.
+        say: The function that shows each line of progress. Every line also goes to the run's
+            log.
+
+    Returns:
+        The jobs that ran, why the run ended, and what it spent.
+
+    Raises:
+        ProjectError: The .ratchet folder or its problem list is wrong.
+        RefactorError: The working tree is not clean, the suite does not pass before the run,
+            or a job halted. A halted job's changes are undone first, so its problems stay
+            open.
+    """
+    settings = load_settings(project)
+    problem_list = find_latest_problem_list(project)
+    folder = project.state_dir / problem_list.name
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def log(line: str) -> None:
+        """Shows one line of progress and adds it to the run's log."""
+        say(line)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with (folder / "run.log").open("a", encoding="utf-8") as file:
+            file.write(f"{stamp} {line}\n")
+
+    repo = Repo(project.root)
+    changed = repo.changed_paths()
+    if changed:
+        raise RefactorError(f"the working tree has changes, so a job's commit would take them: "
+                            f"{', '.join(changed[:10])}")
+
+    log(f"run started on {repo.last_commit()}, with {problem_list.relative_path}")
+    baseline = run_pytest(project.config.test_command, project.root, folder / "baseline",
+                          project.config.test_timeout_s)
+    failing = [test_id for test_id, outcome in baseline.outcomes.items()
+               if outcome.kind in (OutcomeKind.FAILED, OutcomeKind.ERROR)]
+    if not baseline.outcomes or failing:
+        raise RefactorError(f"the suite does not pass before the run starts (pytest exit code "
+                            f"{baseline.code}), see {folder / 'baseline' / 'pytest.log'}")
+    log(f"baseline: {count_of(len(baseline.outcomes), 'test')}")
+
+    ledger_path = folder / "ledger.json"
+    ledger = load_ledger(ledger_path, problem_list.name)
+    agents = agent_maker(project, settings, problem_list.relative_path, folder)
+    graph = build_job_graph(
+        project, settings, agents, baseline.outcomes, folder,
+        check_plan=lambda plan: find_plan_refusal(ledger, plan, problem_list.ids),
+    )
+
+    run = RefactorRun()
+    for number in range(max_jobs):
+        slug = f"job-{len(ledger.jobs) + 1:03d}"
+        prompt = format_planner_view(ledger, problem_list.relative_path, focus if number == 0 else "")
+        log(f"{slug}: planning")
+        try:
+            job = graph.start(prompt, slug=slug)
+            if job.status == JobStatus.HALTED:
+                raise RefactorError(f"{job.slug} halted: {job.halt_reason}")
+        except Exception:
+            # a job cut off part way leaves no half-made change for the next run
+            if repo.changed_paths():
+                repo.undo()
+                log(f"{slug}: its changes were undone, and its problems are still open")
+            raise
+        run.cost_usd += job.cost_usd
+
+        if job.data["outcome"] == JobOutcome.STOPPED:
+            run.end = f"the planner found nothing left: {job.data['reason']}"
+            log(run.end)
+            return run
+        record = record_job(ledger, job.data, job.slug, job.cost_usd, settings.caps)
+        save_ledger(ledger, ledger_path)
+        run.jobs.append(record)
+        commit = f" as {record.commit}" if record.commit else ""
+        attempts = count_of(record.attempts, "attempt")
+        log(f"{record.id} {record.outcome}{commit}: {record.title} "
+            f"({', '.join(record.problems)}, {attempts}, ${record.cost_usd:.2f})")
+
+    run.end = f"the run reached its most jobs, {max_jobs}"
+    log(run.end)
+    return run
