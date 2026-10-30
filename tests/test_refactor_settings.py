@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ratchet.project import ProjectError, load_project
-from ratchet.refactor.settings import COMMAND, load_settings, read_problems
+from ratchet.refactor.settings import COMMAND, load_settings
 from rooster import Effort
 
 SHARED = 'test_command = ["pytest"]\neditable = ["src/**"]\n'
@@ -69,22 +69,3 @@ def test_a_wrong_setting_is_named(tmp_path: Path, section: str, named: str) -> N
     with pytest.raises(ProjectError, match=named.replace(".", r"\.")):
         settings_from(tmp_path, section + "\n")
 
-
-def test_the_problem_list_is_read(tmp_path: Path) -> None:
-    """Proves problems.md is read only when asked for, so a project may load without it."""
-    settings_from(tmp_path)
-    (tmp_path / ".ratchet" / "problems.md").write_text("## P1: too big", encoding="utf-8")
-
-    assert read_problems(load_project(tmp_path, commands=[COMMAND])) == "## P1: too big"
-
-
-def test_a_missing_or_empty_problem_list_is_named(tmp_path: Path) -> None:
-    """Proves a problems.md that is missing or blank is reported by name."""
-    settings_from(tmp_path)
-    project = load_project(tmp_path, commands=[COMMAND])
-
-    with pytest.raises(ProjectError, match="no problems.md"):
-        read_problems(project)
-    (tmp_path / ".ratchet" / "problems.md").write_text("\n", encoding="utf-8")
-    with pytest.raises(ProjectError, match="problems.md is empty"):
-        read_problems(project)

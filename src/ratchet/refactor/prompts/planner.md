@@ -7,7 +7,7 @@ the code as much as you need to make the plan accurate.
 
 The script appends the ledger to this prompt. It lists every step so far, the problems each
 advanced, and how each ended: committed, or abandoned with the reason and the last report.
-Read `.ratchet/problems.md` and the code yourself.
+Read `${problems_file}` and the code yourself.
 
 ## Choosing the next step
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import PROBLEM_LIST, PROBLEMS
 from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.refactor.agent_answers import ImplementerAnswer, Status
@@ -40,18 +41,18 @@ def test_a_file_outside_editable_and_a_frozen_file_are_named(
 
 
 def test_a_changed_ratchet_file_is_put_back_and_named(scratch: tuple[Project, Repo]) -> None:
-    """Proves a change to problems.md and the deletion of rules.md are undone and reported."""
+    """Proves a change to the problem list and the deletion of rules.md are undone and reported."""
     project, repo = scratch
     inputs = snapshot_ratchet_files(project)
-    (project.folder / "problems.md").write_text("## P1: done, trust me\n", encoding="utf-8")
+    (project.folder / PROBLEMS).write_text("## P1. done, trust me\n", encoding="utf-8")
     (project.folder / "rules.md").unlink()
     (project.root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
 
     report = check_rules(project, repo, answer(), inputs)
 
-    assert ".ratchet/problems.md was changed, and has been put back" in report
+    assert f".ratchet/{PROBLEMS} was changed, and has been put back" in report
     assert ".ratchet/rules.md was changed, and has been put back" in report
-    assert (project.folder / "problems.md").read_text(encoding="utf-8") == "## P1: too big\n"
+    assert (project.folder / PROBLEMS).read_text(encoding="utf-8") == PROBLEM_LIST
     assert (project.folder / "rules.md").is_file()
 
 

@@ -58,7 +58,9 @@ class JobOutcome(StrEnum):
     ABANDONED = "abandoned"
 
 
-def make_agents(project: Project, settings: RefactorSettings) -> dict[str, Agent]:
+def make_agents(
+    project: Project, settings: RefactorSettings, problems_file: str, folder: Path
+) -> dict[str, Agent]:
     """Returns the planner, the implementer and the reviewer, each set up from its settings.
 
     Each agent starts every turn fresh, so its prompt carries everything it needs. Only the
@@ -67,12 +69,15 @@ def make_agents(project: Project, settings: RefactorSettings) -> dict[str, Agent
     Args:
         project: The project, as read from its .ratchet folder.
         settings: The refactor command's settings.
+        problems_file: The problem list's path from the project's folder, which the prompts
+            name.
+        folder: The folder for the agents' profiles and logs.
 
     Returns:
         The three agents, keyed by their role's name.
     """
-    profiles = project.state_dir / COMMAND / "profiles"
-    logs = project.state_dir / COMMAND / "logs"
+    profiles = folder / "profiles"
+    logs = folder / "logs"
     roles = {
         Role.PLANNER: (settings.planner, Plan, {}),
         Role.IMPLEMENTER: (settings.implementer, ImplementerAnswer, {
@@ -87,7 +92,7 @@ def make_agents(project: Project, settings: RefactorSettings) -> dict[str, Agent
     for role, (role_settings, answer, permissions) in roles.items():
         agents[str(role)] = Agent(
             str(role),
-            write_profile(project, role, profiles),
+            write_profile(project, role, problems_file, profiles),
             cwd=project.root,
             log_dir=logs / role,
             model=role_settings.model,
@@ -169,6 +174,7 @@ def build_job_graph(
     settings: RefactorSettings,
     agents: dict[str, Agent],
     baseline: dict[str, Outcome],
+    folder: Path,
 ) -> AgentGraph:
     """Returns the graph that carries one refactor job through its eight steps.
 
@@ -182,11 +188,12 @@ def build_job_graph(
             make_agents() returns them.
         baseline: Each test's outcome before the run started, which every test run is
             compared with.
+        folder: The folder that the graph keeps its jobs in, under a folder named "refactor".
 
     Returns:
         The graph, ready to start jobs.
     """
-    graph = AgentGraph(COMMAND, agents, start="plan", state_dir=project.state_dir)
+    graph = AgentGraph(COMMAND, agents, start="plan", state_dir=folder)
     repo = Repo(project.root)
     caps = settings.caps
     planner = agents[Role.PLANNER]

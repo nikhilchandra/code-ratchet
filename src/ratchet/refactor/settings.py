@@ -1,5 +1,4 @@
-"""Holds the refactor command's own settings, read from the [refactor] section of config.toml,
-and reads the problem list it works from.
+"""Holds the refactor command's own settings, read from the [refactor] section of config.toml.
 
 A setting left out takes the default given here.
 """
@@ -8,11 +7,9 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ratchet.project import Project, RoleSettings, read_markdown
+from ratchet.project import Project, RoleSettings
 
 COMMAND = "refactor"
-# The file in .ratchet that lists the problems the planner works through.
-PROBLEMS = "problems.md"
 
 
 class Caps(BaseModel):
@@ -53,17 +50,3 @@ def load_settings(project: Project) -> RefactorSettings:
     """
     return project.command_settings(COMMAND, RefactorSettings)
 
-
-def read_problems(project: Project) -> str:
-    """Returns the problem list that the planner works through.
-
-    Args:
-        project: The project, as read from its .ratchet folder.
-
-    Returns:
-        The text of problems.md.
-
-    Raises:
-        ProjectError: problems.md is missing or holds nothing but blank space.
-    """
-    return read_markdown(project.folder, PROBLEMS)

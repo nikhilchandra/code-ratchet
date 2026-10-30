@@ -21,7 +21,7 @@ SKIP_MARKER = re.compile(r"\b(skip|skipif|xfail)\b")
 
 def snapshot_ratchet_files(project: Project) -> dict[Path, bytes]:
     """Returns the contents of the files directly in .ratchet, such as rules.md and
-    problems.md, so that a change to them can be found and put back.
+    the problem lists, so that a change to them can be found and put back.
 
     Args:
         project: The project, as read from its .ratchet folder.

@@ -43,7 +43,7 @@ only when its change to the code requires it:
 
 ## The problem list
 
-`.ratchet/problems.md` lists the problems, each with evidence and a simpler option. Work only on
+`${problems_file}` lists the problems, each with evidence and a simpler option. Work only on
 problems that the list presents as open. A section that the list marks as parked, dropped or
 outside the refactor, such as questions for the owner or bugs noticed along the way, is not
 worked on, and no step changes the code it names for its sake.

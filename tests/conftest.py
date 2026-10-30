@@ -30,6 +30,16 @@ def add(a, b):
     return a + b
 '''
 
+# The scratch project's problem list, with two problems.
+PROBLEMS = "problems-20261026-09h00m.md"
+PROBLEM_LIST = """\
+# Problems
+
+## P1. The comment in add says too little
+
+## P2. add has no type hints
+"""
+
 
 @pytest.fixture
 def scratch(tmp_path: Path) -> tuple[Project, Repo]:
@@ -51,7 +61,7 @@ def scratch(tmp_path: Path) -> tuple[Project, Repo]:
     (tmp_path / ".ratchet").mkdir()
     (tmp_path / ".ratchet" / "config.toml").write_text(CONFIG, encoding="utf-8")
     (tmp_path / ".ratchet" / "rules.md").write_text("Keep it small.\n", encoding="utf-8")
-    (tmp_path / ".ratchet" / "problems.md").write_text("## P1: too big\n", encoding="utf-8")
+    (tmp_path / ".ratchet" / PROBLEMS).write_text(PROBLEM_LIST, encoding="utf-8")
     git("add", "-A")
     git("commit", "-q", "-m", "start")
     return load_project(tmp_path, commands=[COMMAND]), Repo(tmp_path)

@@ -56,12 +56,14 @@ def _format_command(words: list[str]) -> str:
     return " ".join(f'"{word}"' if not word or " " in word else word for word in words)
 
 
-def build_profile(project: Project, role: Role) -> str:
+def build_profile(project: Project, role: Role, problems_file: str) -> str:
     """Returns one agent's instructions, with the project's rules and settings filled in.
 
     Args:
         project: The project, as read from its .ratchet folder.
         role: The agent the instructions are for.
+        problems_file: The problem list's path from the project's folder, such as
+            ".ratchet/problems-20261026-14h32m.md".
 
     Returns:
         The shared prompt and the role's prompt, joined by a blank line.
@@ -75,6 +77,7 @@ def build_profile(project: Project, role: Role) -> str:
         "editable": _format_patterns(project.config.editable),
         "frozen": _format_patterns(project.frozen),
         "test_command": _format_command(project.config.test_command),
+        "problems_file": problems_file,
     }
     parts = [PROMPTS / "shared.md", PROMPTS / f"{role}.md"]
     return "\n\n".join(
@@ -82,12 +85,13 @@ def build_profile(project: Project, role: Role) -> str:
     ) + "\n"
 
 
-def write_profile(project: Project, role: Role, folder: Path) -> Path:
+def write_profile(project: Project, role: Role, problems_file: str, folder: Path) -> Path:
     """Writes one agent's instructions to a file, which an Agent takes as its profile.
 
     Args:
         project: The project, as read from its .ratchet folder.
         role: The agent the instructions are for.
+        problems_file: The problem list's path from the project's folder.
         folder: The folder to write the file in, which is made if it does not exist.
 
     Returns:
@@ -95,5 +99,5 @@ def write_profile(project: Project, role: Role, folder: Path) -> Path:
     """
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{role}.md"
-    path.write_text(build_profile(project, role), encoding="utf-8")
+    path.write_text(build_profile(project, role, problems_file), encoding="utf-8")
     return path
