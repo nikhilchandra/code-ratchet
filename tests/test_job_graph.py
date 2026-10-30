@@ -4,6 +4,7 @@ tests really run."""
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 import pytest
 
@@ -37,12 +38,13 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
                           project.config.test_timeout_s).outcomes
     assert baseline, "the scratch project's tests must run"
 
-    def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = ()):
+    def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
+            check_plan: Callable[[Plan], str] = lambda plan: ""):
         agents = {"planner": ScriptedAgent("planner", Plan, planner),
                   "implementer": ScriptedAgent("implementer", ImplementerAnswer, implementer),
                   "reviewer": ScriptedAgent("reviewer", Review, reviewer)}
         graph = build_job_graph(project, RefactorSettings(), agents, baseline,
-                                project.state_dir / "list")
+                                project.state_dir / "list", check_plan)
         return graph.start("plan the next step", slug="job"), agents, graph
 
     return run
@@ -234,6 +236,12 @@ def test_an_implementer_with_no_answer_halts_the_job_with_the_tree_as_before(
         run_job([plan()], [cut_off])
 
     assert repo.changed_paths() == []
+
+
+def test_a_refused_plan_halts_the_job_before_any_change(scratch, run_job) -> None:
+    """Proves a plan that check_plan refuses halts the job without calling the implementer."""
+    with pytest.raises(RefactorError, match="the plan was refused: P9 is not on the list"):
+        run_job([plan()], check_plan=lambda plan: "P9 is not on the list")
 
 
 def test_the_diagram_draws_every_arrow_of_the_table(scratch, run_job) -> None:

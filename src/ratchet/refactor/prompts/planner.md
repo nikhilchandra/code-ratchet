@@ -5,9 +5,11 @@ the code as much as you need to make the plan accurate.
 
 ## What you are given
 
-The script appends the ledger to this prompt. It lists every step so far, the problems each
-advanced, and how each ended: committed, or abandoned with the reason and the last report.
-Read `${problems_file}` and the code yourself.
+The script appends the ledger to this prompt. It gives the status of every problem that a step
+has worked on, and the last ten steps: the problems each advanced, and how each ended, either
+committed, or set aside with the reason and the last report. A problem that the ledger does
+not name is open, and no step has worked on it yet. Read `${problems_file}` and the code
+yourself.
 
 ## Choosing the next step
 

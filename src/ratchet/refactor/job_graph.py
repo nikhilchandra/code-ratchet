@@ -20,6 +20,7 @@ and job.data["reason"] says why for an outcome other than committed.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 
@@ -175,6 +176,7 @@ def build_job_graph(
     agents: dict[str, Agent],
     baseline: dict[str, Outcome],
     folder: Path,
+    check_plan: Callable[[Plan], str] = lambda plan: "",
 ) -> AgentGraph:
     """Returns the graph that carries one refactor job through its eight steps.
 
@@ -189,6 +191,8 @@ def build_job_graph(
         baseline: Each test's outcome before the run started, which every test run is
             compared with.
         folder: The folder that the graph keeps its jobs in, under a folder named "refactor".
+        check_plan: A function that returns why a plan may not go ahead, or "" when it may.
+            A plan it refuses halts the job before any code changes.
 
     Returns:
         The graph, ready to start jobs.
@@ -237,6 +241,9 @@ def build_job_graph(
         if answer.stop:
             job.data.update(outcome=JobOutcome.STOPPED, reason=answer.reason)
             return None
+        refusal = check_plan(answer)
+        if refusal:
+            raise RefactorError(f"the plan was refused: {refusal}")
         return "implement"
 
     @graph.step("implement", next=("check-rules", "undo"))
