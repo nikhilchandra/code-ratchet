@@ -33,9 +33,10 @@ class ScriptedAgent:
         turn = self.turns.pop(0)
         answer = turn(prompt) if callable(turn) else turn
         if answer is None:
-            return {"ok": False, "data": None, "failure": "timed out after 1 s"}
+            return {"ok": False, "data": None, "failure": "timed out after 1 s", "cost_usd": 0.0}
         self.total_cost_usd += 0.5
-        return {"ok": True, "data": self.schema.model_validate(answer), "failure": None}
+        return {"ok": True, "data": self.schema.model_validate(answer), "failure": None,
+                "cost_usd": 0.5}
 
 
 def plan(**changes: object) -> dict:
@@ -65,10 +66,12 @@ def review(verdict: str, *, failing: tuple[str, ...] = (), check_passes: bool = 
 
 
 def edit(old: str, new: str) -> Callable[[str], dict]:
-    """Returns a turn that replaces 'old' with 'new' in src/app.py and answers done."""
+    """Returns a turn that replaces 'old' with 'new' in src/app.py and answers done, keeping the
+    file's Unix line endings so that an edit undone by hand matches the commit again."""
     def turn(prompt: str) -> dict:
         path = Path.cwd() / "src" / "app.py"
-        path.write_text(path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+        text = path.read_text(encoding="utf-8").replace(old, new)
+        path.write_text(text, encoding="utf-8", newline="\n")
         return done()
     return turn
 

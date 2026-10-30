@@ -39,12 +39,17 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
     assert baseline, "the scratch project's tests must run"
 
     def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
-            check_plan: Callable[[Plan], str] = lambda plan: ""):
+            check_plan: Callable[[Plan], str] = lambda plan: "", reports: list | None = None):
         agents = {"planner": ScriptedAgent("planner", Plan, planner),
                   "implementer": ScriptedAgent("implementer", ImplementerAnswer, implementer),
                   "reviewer": ScriptedAgent("reviewer", Review, reviewer)}
+
+        def report(job, step: str, text: str, **extras) -> None:
+            if reports is not None:
+                reports.append((step, text, extras))
+
         graph = build_job_graph(project, RefactorSettings(), agents, baseline,
-                                project.state_dir / "list", check_plan)
+                                project.state_dir / "list", check_plan, report)
         return graph.start("plan the next step", slug="job"), agents, graph
 
     return run
@@ -242,6 +247,67 @@ def test_a_refused_plan_halts_the_job_before_any_change(scratch, run_job) -> Non
     """Proves a plan that check_plan refuses halts the job without calling the implementer."""
     with pytest.raises(RefactorError, match="the plan was refused: P9 is not on the list"):
         run_job([plan()], check_plan=lambda plan: "P9 is not on the list")
+
+
+def test_each_step_reports_what_happened(scratch, run_job) -> None:
+    """Proves a smooth job reports its plan's summary and problems, each attempt, the tests and
+    the verdict, with each agent call's cost."""
+    reports: list = []
+
+    run_job([plan()], [edit(*GOOD)], [review("accept")], reports=reports)
+
+    assert [(step, text) for step, text, _ in reports] == [
+        ("plan", "rename the comment in add"), ("implement", "attempt 1"),
+        ("test", "passed (1 test)"), ("review", "accept")]
+    assert reports[0][2] == {"problems": "P1", "cost_usd": 0.5}
+    assert reports[2][2] == {}
+
+
+def test_each_failure_reports_its_culprit_and_where_the_job_goes(scratch, run_job) -> None:
+    """Proves a test failure names the failing test, a broken rule and a rejection say why, and
+    comment fixes are counted, each with the attempt that follows."""
+    reports: list = []
+    fix = {"file": "src/app.py", "old": "# adds a to b", "new": "# adds a and b"}
+
+    run_job([plan()],
+            [edit(*BREAK), edit(BREAK[1], BREAK[0]), edit(*GOOD), done()],
+            [review("reject", failing=("scope",), check_passes=False),
+             review("accept_after_comment_fixes", failing=("comments",), fixes=[fix])],
+            reports=reports)
+
+    lines = [(step, text) for step, text, _ in reports]
+    assert ("test", "1 newly failing: test_app::test_add -> attempt 2") in lines
+    assert ("check-rules", "broke 1 rule -> attempt 3") in lines
+    assert ("review", "reject: scope; check 1 unmet -> attempt 4") in lines
+    assert ("review", "accept after 1 comment fix") in lines
+    assert lines[-1] == ("fix-comments", "1 fix made")
+    details = {step: extras.get("detail") for step, _, extras in reports if extras.get("detail")}
+    assert details == {"check-rules": "the implementer says that it is done, but nothing changed",
+                       "review": "the verdict is reject"}
+
+
+def test_an_overruled_accept_and_a_cap_say_so(scratch, run_job) -> None:
+    """Proves an accept with an unmet check is reported as overruled, and the last failure
+    names the cap that undoes the step."""
+    reports: list = []
+
+    run_job([plan()], [edit(*GOOD), done(), done()],
+            [review("accept", check_passes=False), review("reject", failing=("scope",)),
+             review("reject", failing=("scope",))], reports=reports)
+
+    texts = [text for step, text, _ in reports if step == "review"]
+    assert texts[0] == "reject: check 1 unmet; overruling the reviewer's accept -> attempt 2"
+    assert texts[-1] == "reject: scope -> undo, at the cap of 3 rejections"
+
+
+def test_a_blocked_attempt_reports_its_reason(scratch, run_job) -> None:
+    """Proves a blocked answer is reported with the implementer's reason beneath it."""
+    reports: list = []
+
+    run_job([plan()], [done(status="blocked", blocked_reason="needs a new class")], reports=reports)
+
+    assert reports[-1][:2] == ("implement", "attempt 1 blocked -> undo")
+    assert reports[-1][2]["detail"] == "needs a new class"
 
 
 def test_the_diagram_draws_every_arrow_of_the_table(scratch, run_job) -> None:

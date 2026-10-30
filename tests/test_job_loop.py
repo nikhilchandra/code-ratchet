@@ -3,6 +3,8 @@ the ledger carried between them, and the checks before a run starts."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from ratchet.git import Repo
@@ -57,7 +59,12 @@ def test_jobs_run_until_the_planner_finds_nothing_left(scratch, run) -> None:
     assert ledger_of(project).status_of("P1") == ProblemStatus.DONE
     second = agents["planner"].prompts[1]
     assert "- P1: done" in second and '"rename the comment in add"' in second
-    assert any(line.startswith("J01 committed as ") for line in lines)
+    # the step's column starts after the time (7), the job (9) and the problems (7)
+    steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]
+    assert steps == ["plan", "implement", "test", "review", "commit", "plan"]
+    commit = next(line for line in lines if " commit " in line)
+    assert re.fullmatch(
+        r"\d\d:\d\d  job-001 +commit +[0-9a-f]{7} \| J01 \| job \$1\.50 \| run \$1\.50", commit)
     assert (project.state_dir / LIST / "run.log").read_text(encoding="utf-8").count("\n") == len(lines)
 
 

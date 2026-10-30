@@ -33,6 +33,7 @@ from ratchet.pytest_runner import Outcome, find_regressions, format_failure_repo
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review, Status, Verdict
 from ratchet.refactor.agent_profiles import Role, write_profile
 from ratchet.refactor.comment_fixes import apply_comment_fixes
+from ratchet.refactor.progress_lines import count_of, name_tests
 from ratchet.refactor.review_reports import (
     find_unmet_checks,
     format_checks_record,
@@ -40,6 +41,16 @@ from ratchet.refactor.review_reports import (
 )
 from ratchet.refactor.rule_checks import check_rules, snapshot_ratchet_files
 from ratchet.refactor.settings import COMMAND, RefactorSettings
+
+
+# A function that shows what one step of a job did. It takes the job, the step's name and what
+# happened in a few words, and as keywords the job's problems, the cost in dollars of the step's
+# agent call, and a longer detail, as progress_lines.format_step_lines() takes them.
+StepReport = Callable[..., None]
+
+
+def _report_nothing(job: Job, step: str, text: str, **extras: object) -> None:
+    """Shows nothing, for a graph that runs without a console."""
 
 
 class RefactorError(RuntimeError):
@@ -106,8 +117,8 @@ def make_agents(
     return agents
 
 
-def _ask(agent: Agent, prompt: str, folder: Path) -> BaseModel:
-    """Runs one agent turn and returns its answer, saving the prompt beside the attempt.
+def _ask(agent: Agent, prompt: str, folder: Path) -> tuple[BaseModel, float]:
+    """Runs one agent turn and returns its answer and cost, saving the prompt beside the attempt.
 
     Args:
         agent: The agent to run.
@@ -115,7 +126,7 @@ def _ask(agent: Agent, prompt: str, folder: Path) -> BaseModel:
         folder: The folder that the prompt is saved in, as <agent name>-prompt.md.
 
     Returns:
-        The agent's answer, as an instance of its schema.
+        The agent's answer, as an instance of its schema, and what the turn cost, in dollars.
 
     Raises:
         RefactorError: The turn did not complete, or its answer did not fit the schema.
@@ -125,7 +136,7 @@ def _ask(agent: Agent, prompt: str, folder: Path) -> BaseModel:
     result = agent.run(prompt)
     if not result["ok"]:
         raise RefactorError(f"the {agent.name} gave no answer: {result['failure']}")
-    return result["data"]
+    return result["data"], result["cost_usd"]
 
 
 def _format_implementer_prompt(job: Job, settings: RefactorSettings, diff: str) -> str:
@@ -177,11 +188,13 @@ def build_job_graph(
     baseline: dict[str, Outcome],
     folder: Path,
     check_plan: Callable[[Plan], str] = lambda plan: "",
+    report: StepReport = _report_nothing,
 ) -> AgentGraph:
     """Returns the graph that carries one refactor job through its eight steps.
 
     The job's prompt is the planner's prompt. Each job keeps its prompts, reports, diffs and
-    test logs in a folder named after it, beside its saved file.
+    test logs in a folder named after it, beside its saved file. Every step except commit and
+    undo reports what it did through 'report', and check-rules reports only a broken rule.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -193,6 +206,7 @@ def build_job_graph(
         folder: The folder that the graph keeps its jobs in, under a folder named "refactor".
         check_plan: A function that returns why a plan may not go ahead, or "" when it may.
             A plan it refuses halts the job before any code changes.
+        report: The function that shows what each step did, as StepReport describes.
 
     Returns:
         The graph, ready to start jobs.
@@ -222,27 +236,40 @@ def build_job_graph(
         job.data["reason"] = reason
         return "undo"
 
-    def send_back(job: Job, report: str) -> str:
+    def send_back(job: Job, report_text: str) -> str:
         """Records a rejection with its report, and returns the step that follows it."""
-        (attempt_folder(job) / "report.md").write_text(report, encoding="utf-8")
-        job.data["report"] = report
+        (attempt_folder(job) / "report.md").write_text(report_text, encoding="utf-8")
+        job.data["report"] = report_text
         job.data["rejections"] += 1
         if job.data["rejections"] >= caps.rejections:
-            return end(job, JobOutcome.ABANDONED, report)
+            return end(job, JobOutcome.ABANDONED, report_text)
         return "implement"
+
+    def where_next(job: Job, after: str) -> str:
+        """Returns where the job goes after a failure, such as "-> attempt 2" or "-> undo"."""
+        if after == "implement":
+            return f"-> attempt {job.data['attempt'] + 1}"
+        if job.data.get("outcome") != JobOutcome.ABANDONED:
+            return "-> undo"
+        if job.data["test_failures"] >= caps.test_failures:
+            return f"-> undo, at the cap of {count_of(caps.test_failures, 'test failure')}"
+        return f"-> undo, at the cap of {count_of(caps.rejections, 'rejection')}"
 
     @graph.step("plan", next=("implement", None))
     def plan(job: Job) -> str | None:
-        answer = _ask(planner, job.prompt, job_folder(job))
+        answer, cost = _ask(planner, job.prompt, job_folder(job))
         job.data.update(plan=answer.model_dump(mode="json", by_alias=True), attempt=0,
                         rejections=0, test_failures=0, report="")
         (job_folder(job) / "plan.json").write_text(json.dumps(job.data["plan"], indent=2),
                                                     encoding="utf-8")
         if answer.stop:
+            report(job, "plan", "nothing left to plan", cost_usd=cost, detail=answer.reason)
             job.data.update(outcome=JobOutcome.STOPPED, reason=answer.reason)
             return None
+        report(job, "plan", answer.summary, problems=", ".join(answer.problems), cost_usd=cost)
         refusal = check_plan(answer)
         if refusal:
+            report(job, "plan", f"refused: {refusal}")
             raise RefactorError(f"the plan was refused: {refusal}")
         return "implement"
 
@@ -252,23 +279,34 @@ def build_job_graph(
         diff = repo.diff() if job.data["report"] else ""
         work = repo.save_work()
         try:
-            answer = _ask(implementer, _format_implementer_prompt(job, settings, diff),
-                          attempt_folder(job))
-        except RefactorError:
+            answer, cost = _ask(implementer, _format_implementer_prompt(job, settings, diff),
+                                attempt_folder(job))
+        except RefactorError as error:
             # the cut-off turn's edits are dropped, so that a resumed job starts this attempt clean
             repo.restore_work(work)
+            report(job, "implement", f"attempt {job.data['attempt']} gave no answer",
+                   detail=str(error))
             job.data["attempt"] -= 1
             raise
         job.data["answer"] = answer.model_dump(mode="json")
         if answer.status == Status.BLOCKED:
+            report(job, "implement", f"attempt {job.data['attempt']} blocked -> undo",
+                   cost_usd=cost, detail=answer.blocked_reason)
             return end(job, JobOutcome.BLOCKED, answer.blocked_reason)
+        report(job, "implement", f"attempt {job.data['attempt']}", cost_usd=cost)
         return "check-rules"
 
     @graph.step("check-rules", next=("test", "implement", "undo"))
     def check_rules_step(job: Job) -> str:
         answer = ImplementerAnswer.model_validate(job.data["answer"])
-        report = check_rules(project, repo, answer, ratchet_files)
-        return send_back(job, report) if report else "test"
+        broken = check_rules(project, repo, answer, ratchet_files)
+        if not broken:
+            return "test"
+        rules = [line[2:] for line in broken.splitlines() if line.startswith("- ")]
+        after = send_back(job, broken)
+        report(job, "check-rules", f"broke {count_of(len(rules), 'rule')} {where_next(job, after)}",
+               detail="; ".join(rules))
+        return after
 
     @graph.step("test", next=("review", "implement", "undo"))
     def test(job: Job) -> str:
@@ -277,15 +315,20 @@ def build_job_graph(
                          project.config.test_timeout_s)
         worse = find_regressions(baseline, run.outcomes) if run.outcomes else {}
         if not worse and run.outcomes:
+            report(job, "test", f"passed ({count_of(len(run.outcomes), 'test')})")
             return "review"
-        report = format_failure_report(worse, run, folder / "pytest.log")
-        (folder / "report.md").write_text(report, encoding="utf-8")
-        job.data["report"] = report
+        failure = format_failure_report(worse, run, folder / "pytest.log")
+        (folder / "report.md").write_text(failure, encoding="utf-8")
+        job.data["report"] = failure
         job.data["rejections"] = 0
         job.data["test_failures"] += 1
+        after = "implement"
         if job.data["test_failures"] >= caps.test_failures:
-            return end(job, JobOutcome.ABANDONED, report)
-        return "implement"
+            after = end(job, JobOutcome.ABANDONED, failure)
+        what = (f"{len(worse)} newly failing: {name_tests(list(worse))}" if worse
+                else "the test process crashed")
+        report(job, "test", f"{what} {where_next(job, after)}")
+        return after
 
     @graph.step("review", next=("commit", "fix-comments", "implement", "undo"))
     def review(job: Job) -> str:
@@ -293,12 +336,15 @@ def build_job_graph(
         diff = repo.diff()
         (folder / "diff.patch").write_text(diff, encoding="utf-8")
         the_plan = Plan.model_validate(job.data["plan"])
-        verdict = _ask(reviewer, _format_reviewer_prompt(job, diff), folder)
+        verdict, cost = _ask(reviewer, _format_reviewer_prompt(job, diff), folder)
         (folder / "checks.md").write_text(format_checks_record(the_plan, verdict), encoding="utf-8")
+        said = verdict.summary
 
         # an accept with a check that the reviewer did not confirm becomes a reject
         unmet = find_unmet_checks(the_plan, verdict)
-        if unmet and verdict.verdict in (Verdict.ACCEPT, Verdict.ACCEPT_AFTER_COMMENT_FIXES):
+        overruled = bool(unmet) and verdict.verdict in (Verdict.ACCEPT,
+                                                        Verdict.ACCEPT_AFTER_COMMENT_FIXES)
+        if overruled:
             numbers = ", ".join(str(number) for number in unmet)
             verdict.verdict = Verdict.REJECT
             verdict.summary = (f"The reviewer accepted the step, but the script rejected it, "
@@ -307,13 +353,28 @@ def build_job_graph(
         job.data["notes"] = verdict.notes
 
         if verdict.verdict == Verdict.ACCEPT:
+            report(job, "review", "accept", cost_usd=cost)
             return "commit"
         if verdict.verdict == Verdict.ACCEPT_AFTER_COMMENT_FIXES:
+            fixes = count_of(len(verdict.comment_fixes), "comment fix", "comment fixes")
+            report(job, "review", f"accept after {fixes}", cost_usd=cost)
             return "fix-comments"
-        report = format_review_report(the_plan, verdict)
+
+        faults = [name for name, criterion in verdict.criteria if not criterion.passed]
+        if unmet:
+            checks = ", ".join(str(number) for number in unmet)
+            faults.append(f"{'check' if len(unmet) == 1 else 'checks'} {checks} unmet")
+        if overruled:
+            faults.append("overruling the reviewer's accept")
+        report_text = format_review_report(the_plan, verdict)
         if verdict.verdict == Verdict.REPLAN:
-            return end(job, JobOutcome.REPLAN, report)
-        return send_back(job, report)
+            after = end(job, JobOutcome.REPLAN, report_text)
+        else:
+            after = send_back(job, report_text)
+        named = "; ".join(faults) or "no fault named"
+        report(job, "review", f"{verdict.verdict}: {named} {where_next(job, after)}",
+               cost_usd=cost, detail=said)
+        return after
 
     @graph.step("fix-comments", next=("commit", "implement", "undo"))
     def fix_comments(job: Job) -> str:
@@ -322,11 +383,15 @@ def build_job_graph(
         if not failure:
             (attempt_folder(job) / "comment-fixes.patch").write_text(repo.diff(), encoding="utf-8")
             job.data["comment_fixes"] = len(verdict.comment_fixes)
+            made = count_of(len(verdict.comment_fixes), "fix", "fixes")
+            report(job, "fix-comments", f"{made} made")
             return "commit"
-        report = format_review_report(Plan.model_validate(job.data["plan"]), verdict)
-        report += (f"\nThe script could not make the comment fixes, because {failure}. "
-                   "Make them yourself.\n")
-        return send_back(job, report)
+        report_text = format_review_report(Plan.model_validate(job.data["plan"]), verdict)
+        report_text += (f"\nThe script could not make the comment fixes, because {failure}. "
+                        "Make them yourself.\n")
+        after = send_back(job, report_text)
+        report(job, "fix-comments", f"refused {where_next(job, after)}", detail=failure)
+        return after
 
     @graph.step("commit", next=(None,))
     def commit(job: Job) -> None:

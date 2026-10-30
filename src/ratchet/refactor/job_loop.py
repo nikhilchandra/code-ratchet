@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from rooster import Agent, JobStatus
+from rooster import Agent, Job, JobStatus
 
 from ratchet.git import Repo
 from ratchet.project import Project
@@ -31,23 +31,14 @@ from ratchet.refactor.ledger import (
     save_ledger,
 )
 from ratchet.refactor.problem_list import find_latest_problem_list
+from ratchet.refactor.progress_lines import console_width, count_of, format_step_lines
 from ratchet.refactor.settings import RefactorSettings, load_settings
 
 # A function that makes the three agents, with the arguments of make_agents().
 AgentMaker = Callable[[Project, RefactorSettings, str, Path], dict[str, Agent]]
 
-
-def count_of(number: int, noun: str) -> str:
-    """Returns a number with its noun, such as "1 test" or "3 tests".
-
-    Args:
-        number: How many there are.
-        noun: The noun in the singular.
-
-    Returns:
-        The number and the noun, with an s added unless the number is 1.
-    """
-    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+# The width of the time that starts each console line, such as "14:25  ".
+TIME_WIDTH = 7
 
 
 @dataclass
@@ -69,8 +60,12 @@ def run_refactor(
     focus: str = "",
     agent_maker: AgentMaker = make_agents,
     say: Callable[[str], None] = print,
+    width: int | None = None,
 ) -> RefactorRun:
     """Runs jobs on the newest problem list until nothing is left or 'max_jobs' have run.
+
+    Each step of a job shows one line, and each job ends with a line that says whether it was
+    committed or undone, and what it and the run have spent.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -79,6 +74,8 @@ def run_refactor(
         agent_maker: The function that makes the three agents.
         say: The function that shows each line of progress. Every line also goes to the run's
             log.
+        width: The console's width in characters, which the lines are fitted to. None measures
+            the console.
 
     Returns:
         The jobs that ran, why the run ended, and what it spent.
@@ -93,13 +90,23 @@ def run_refactor(
     problem_list = find_latest_problem_list(project)
     folder = project.state_dir / problem_list.name
     folder.mkdir(parents=True, exist_ok=True)
+    width = width or console_width()
 
-    def log(line: str) -> None:
-        """Shows one line of progress and adds it to the run's log."""
-        say(line)
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def log(*lines: str) -> None:
+        """Shows lines of progress, the first after the time, and adds them to the run's log."""
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d %H:%M:%S  ")
+        say(now.strftime("%H:%M  ") + lines[0])
+        for line in lines[1:]:
+            say(" " * TIME_WIDTH + line)
         with (folder / "run.log").open("a", encoding="utf-8") as file:
-            file.write(f"{stamp} {line}\n")
+            file.write(stamp + lines[0] + "\n")
+            for line in lines[1:]:
+                file.write(" " * len(stamp) + line + "\n")
+
+    def report(job: Job, step: str, text: str, **extras: object) -> None:
+        """Shows what one step of a job did, as one aligned line and its detail."""
+        log(*format_step_lines(job.slug, step, text, width=width, indent=TIME_WIDTH, **extras))
 
     repo = Repo(project.root)
     changed = repo.changed_paths()
@@ -123,13 +130,13 @@ def run_refactor(
     graph = build_job_graph(
         project, settings, agents, baseline.outcomes, folder,
         check_plan=lambda plan: find_plan_refusal(ledger, plan, problem_list.ids),
+        report=report,
     )
 
     run = RefactorRun()
     for number in range(max_jobs):
         slug = f"job-{len(ledger.jobs) + 1:03d}"
         prompt = format_planner_view(ledger, problem_list.relative_path, focus if number == 0 else "")
-        log(f"{slug}: planning")
         try:
             job = graph.start(prompt, slug=slug)
             if job.status == JobStatus.HALTED:
@@ -138,7 +145,8 @@ def run_refactor(
             # a job cut off part way leaves no half-made change for the next run
             if repo.changed_paths():
                 repo.undo()
-                log(f"{slug}: its changes were undone, and its problems are still open")
+                log(*format_step_lines(slug, "undo", "halted, so its problems are still open",
+                                       width=width, indent=TIME_WIDTH))
             raise
         run.cost_usd += job.cost_usd
 
@@ -149,10 +157,13 @@ def run_refactor(
         record = record_job(ledger, job.data, job.slug, job.cost_usd, settings.caps)
         save_ledger(ledger, ledger_path)
         run.jobs.append(record)
-        commit = f" as {record.commit}" if record.commit else ""
-        attempts = count_of(record.attempts, "attempt")
-        log(f"{record.id} {record.outcome}{commit}: {record.title} "
-            f"({', '.join(record.problems)}, {attempts}, ${record.cost_usd:.2f})")
+        spent = f"job ${record.cost_usd:.2f} | run ${run.cost_usd:.2f}"
+        if record.commit:
+            log(*format_step_lines(job.slug, "commit", f"{record.commit} | {record.id} | {spent}",
+                                   width=width, indent=TIME_WIDTH))
+        else:
+            log(*format_step_lines(job.slug, "undo", f"{record.outcome} | {record.id} | {spent}",
+                                   width=width, indent=TIME_WIDTH))
 
     run.end = f"the run reached its most jobs, {max_jobs}"
     log(run.end)

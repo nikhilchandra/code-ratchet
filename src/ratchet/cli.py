@@ -11,7 +11,8 @@ from rooster import AgentError, GraphError
 from ratchet.git import GitError
 from ratchet.project import ProjectError, load_project
 from ratchet.refactor.job_graph import RefactorError
-from ratchet.refactor.job_loop import count_of, run_refactor
+from ratchet.refactor.job_loop import run_refactor
+from ratchet.refactor.progress_lines import count_of
 from ratchet.refactor.settings import COMMAND as REFACTOR
 
 # Every command, which are also the sections that config.toml may have.
