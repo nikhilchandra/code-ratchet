@@ -23,6 +23,7 @@ import json
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 from rooster import Agent, AgentGraph, Command, Job, Tool
@@ -33,6 +34,7 @@ from ratchet.pytest_runner import Outcome, find_regressions, format_failure_repo
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review, Status, Verdict
 from ratchet.refactor.agent_profiles import Role, write_profile
 from ratchet.refactor.comment_fixes import apply_comment_fixes
+from ratchet.refactor.problem_list import ProblemList
 from ratchet.refactor.progress_lines import count_of, name_tests
 from ratchet.refactor.review_reports import (
     find_unmet_checks,
@@ -41,6 +43,13 @@ from ratchet.refactor.review_reports import (
 )
 from ratchet.refactor.rule_checks import check_rules, snapshot_ratchet_files
 from ratchet.refactor.settings import COMMAND, RefactorSettings
+
+# ledger.py imports JobOutcome from this module, so Ledger is imported here only for type checkers
+if TYPE_CHECKING:
+    from ratchet.refactor.ledger import Ledger
+
+# How many of the latest jobs the planner sees.
+RECENT_JOBS = 10
 
 
 # A function that shows what one step of a job did. It takes the job, the step's name and what
@@ -139,6 +148,42 @@ def _ask(agent: Agent, prompt: str, folder: Path) -> tuple[BaseModel, float]:
     return result["data"], result["cost_usd"]
 
 
+def _format_planner_prompt(job: Job, ledger: Ledger, problems_file: str) -> str:
+    """Returns the planner's prompt: the status of every touched problem, the latest jobs, and
+    any request from the person running ratchet.
+
+    Args:
+        job: The job, whose prompt is a problem the person asks to be planned next, such as
+            "P19", or "".
+        ledger: The ledger of the problem list.
+        problems_file: The problem list's path from the project's folder.
+
+    Returns:
+        The prompt as markdown.
+    """
+    count = len(ledger.jobs)
+    lines = ["# The ledger", "",
+             f"The problem list is `{problems_file}`. Jobs run on it so far: {count}.", "",
+             "## The problems that jobs have worked on", ""]
+    if not ledger.problems:
+        lines.append("None yet. Every problem on the list is open.")
+    for problem_id, problem in ledger.problems.items():
+        times = "time" if problem.sendbacks == 1 else "times"
+        sent_back = f", sent back {problem.sendbacks} {times}" if problem.sendbacks else ""
+        lines.append(f"- {problem_id}: {problem.status}{sent_back}")
+    recent = ledger.jobs[-RECENT_JOBS:]
+    lines += ["", f"## The last {len(recent)} jobs", ""]
+    if recent:
+        shown = [record.model_dump(mode="json", exclude={"slug", "cost_usd"}) for record in recent]
+        lines += ["```json", json.dumps(shown, indent=2), "```"]
+    else:
+        lines.append("None yet.")
+    if job.prompt:
+        lines += ["", "# A request from the person running ratchet", "",
+                  f"Plan a step for {job.prompt} next, if the rules for ordering allow it."]
+    return "\n".join(lines) + "\n"
+
+
 def _format_implementer_prompt(job: Job, settings: RefactorSettings, diff: str) -> str:
     """Returns the implementer's prompt: the plan, the attempt, and on a later attempt the last
     report with the diff as it stands.
@@ -187,14 +232,16 @@ def build_job_graph(
     agents: dict[str, Agent],
     baseline: dict[str, Outcome],
     folder: Path,
-    check_plan: Callable[[Plan], str] = lambda plan: "",
+    ledger: Ledger,
+    problem_list: ProblemList,
     report: StepReport = _report_nothing,
 ) -> AgentGraph:
     """Returns the graph that carries one refactor job through its eight steps.
 
-    The job's prompt is the planner's prompt. Each job keeps its prompts, reports, diffs and
-    test logs in a folder named after it, beside its saved file. Every step except commit and
-    undo reports what it did through 'report', and check-rules reports only a broken rule.
+    The job's prompt is a problem that the person running ratchet asks to be planned next, such
+    as "P19", or "". Each job keeps its prompts, reports, diffs and test logs in a folder named
+    after it, beside its saved file. Every step except commit and undo reports what it did
+    through 'report', and check-rules reports only a broken rule.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -204,8 +251,9 @@ def build_job_graph(
         baseline: Each test's outcome before the run started, which every test run is
             compared with.
         folder: The folder that the graph keeps its jobs in, under a folder named "refactor".
-        check_plan: A function that returns why a plan may not go ahead, or "" when it may.
-            A plan it refuses halts the job before any code changes.
+        ledger: The ledger of the problem list, which the planner's prompt is made from. A
+            plan that the ledger refuses halts the job before any code changes.
+        problem_list: The problem list that the jobs work on.
         report: The function that shows what each step did, as StepReport describes.
 
     Returns:
@@ -257,7 +305,8 @@ def build_job_graph(
 
     @graph.step("plan", next=("implement", None))
     def plan(job: Job) -> str | None:
-        answer, cost = _ask(planner, job.prompt, job_folder(job))
+        prompt = _format_planner_prompt(job, ledger, problem_list.relative_path)
+        answer, cost = _ask(planner, prompt, job_folder(job))
         job.data.update(plan=answer.model_dump(mode="json", by_alias=True), attempt=0,
                         rejections=0, test_failures=0, report="")
         (job_folder(job) / "plan.json").write_text(json.dumps(job.data["plan"], indent=2),
@@ -267,7 +316,7 @@ def build_job_graph(
             job.data.update(outcome=JobOutcome.STOPPED, reason=answer.reason)
             return None
         report(job, "plan", answer.summary, problems=", ".join(answer.problems), cost_usd=cost)
-        refusal = check_plan(answer)
+        refusal = ledger.find_plan_refusal(answer, problem_list.ids)
         if refusal:
             report(job, "plan", f"refused: {refusal}")
             raise RefactorError(f"the plan was refused: {refusal}")

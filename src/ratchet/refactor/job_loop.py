@@ -22,14 +22,7 @@ from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.pytest_runner import OutcomeKind, run_pytest
 from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
-from ratchet.refactor.ledger import (
-    JobRecord,
-    find_plan_refusal,
-    format_planner_view,
-    load_ledger,
-    record_job,
-    save_ledger,
-)
+from ratchet.refactor.ledger import JobRecord, load_ledger, record_job, save_ledger
 from ratchet.refactor.problem_list import find_latest_problem_list
 from ratchet.refactor.progress_lines import console_width, count_of, format_step_lines
 from ratchet.refactor.settings import RefactorSettings, load_settings
@@ -127,18 +120,14 @@ def run_refactor(
     ledger_path = folder / "ledger.json"
     ledger = load_ledger(ledger_path, problem_list.name)
     agents = agent_maker(project, settings, problem_list.relative_path, folder)
-    graph = build_job_graph(
-        project, settings, agents, baseline.outcomes, folder,
-        check_plan=lambda plan: find_plan_refusal(ledger, plan, problem_list.ids),
-        report=report,
-    )
+    graph = build_job_graph(project, settings, agents, baseline.outcomes, folder, ledger,
+                            problem_list, report=report)
 
     run = RefactorRun()
     for number in range(max_jobs):
         slug = f"job-{len(ledger.jobs) + 1:03d}"
-        prompt = format_planner_view(ledger, problem_list.relative_path, focus if number == 0 else "")
         try:
-            job = graph.start(prompt, slug=slug)
+            job = graph.start(focus if number == 0 else "", slug=slug)
             if job.status == JobStatus.HALTED:
                 raise RefactorError(f"{job.slug} halted: {job.halt_reason}")
         except Exception:

@@ -4,7 +4,6 @@ tests really run."""
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 
 import pytest
 
@@ -13,7 +12,9 @@ from ratchet.project import Project
 from ratchet.pytest_runner import run_pytest
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review
 from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
-from ratchet.refactor.settings import RefactorSettings
+from ratchet.refactor.ledger import Ledger, record_job
+from ratchet.refactor.problem_list import find_latest_problem_list
+from ratchet.refactor.settings import Caps, RefactorSettings
 from rooster import Agent, JobStatus
 from scripted_agents import (
     BREAK,
@@ -38,8 +39,10 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
                           project.config.test_timeout_s).outcomes
     assert baseline, "the scratch project's tests must run"
 
+    problem_list = find_latest_problem_list(project)
+
     def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
-            check_plan: Callable[[Plan], str] = lambda plan: "", reports: list | None = None):
+            ledger: Ledger | None = None, focus: str = "", reports: list | None = None):
         agents = {"planner": ScriptedAgent("planner", Plan, planner),
                   "implementer": ScriptedAgent("implementer", ImplementerAnswer, implementer),
                   "reviewer": ScriptedAgent("reviewer", Review, reviewer)}
@@ -49,8 +52,10 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
                 reports.append((step, text, extras))
 
         graph = build_job_graph(project, RefactorSettings(), agents, baseline,
-                                project.state_dir / "list", check_plan, report)
-        return graph.start("plan the next step", slug="job"), agents, graph
+                                project.state_dir / "list",
+                                ledger or Ledger(problem_list=problem_list.name), problem_list,
+                                report)
+        return graph.start(focus, slug="job"), agents, graph
 
     return run
 
@@ -244,9 +249,41 @@ def test_an_implementer_with_no_answer_halts_the_job_with_the_tree_as_before(
 
 
 def test_a_refused_plan_halts_the_job_before_any_change(scratch, run_job) -> None:
-    """Proves a plan that check_plan refuses halts the job without calling the implementer."""
-    with pytest.raises(RefactorError, match="the plan was refused: P9 is not on the list"):
-        run_job([plan()], check_plan=lambda plan: "P9 is not on the list")
+    """Proves a plan that the ledger refuses halts the job without calling the implementer."""
+    match = "the plan was refused: it names problems that the list does not hold: P9"
+    with pytest.raises(RefactorError, match=match):
+        run_job([plan(problems=["P9"])])
+
+
+def test_the_planner_sees_the_statuses_and_only_the_last_ten_jobs(scratch, run_job) -> None:
+    """Proves the planner's prompt lists each touched problem's status and the latest ten jobs,
+    and leaves out the older ones."""
+    project, _ = scratch
+    ledger = Ledger(problem_list=find_latest_problem_list(project).name)
+    for number in range(12):
+        data = {"plan": plan(problems=[f"P{number}"], step_title=f"step {number}"),
+                "outcome": JobOutcome.BLOCKED, "reason": "it was blocked", "attempt": 1}
+        record_job(ledger, data, f"job-{number}", 1.0, Caps())
+
+    _, agents, _ = run_job([plan(stop=True)], ledger=ledger)
+
+    prompt = agents["planner"].prompts[0]
+    assert "The problem list is `.ratchet/problems-20261026-09h00m.md`." in prompt
+    assert "Jobs run on it so far: 12." in prompt
+    assert "- P0: open, sent back 1 time\n" in prompt
+    assert "## The last 10 jobs" in prompt
+    assert '"step 2"' in prompt and '"step 1"' not in prompt
+    assert "cost_usd" not in prompt and "A request" not in prompt
+
+
+def test_an_empty_ledger_says_everything_is_open_and_carries_the_focus(run_job) -> None:
+    """Proves the first job's planner prompt says no problem is touched yet, and passes on the
+    focus."""
+    _, agents, _ = run_job([plan(stop=True)], focus="P2")
+
+    prompt = agents["planner"].prompts[0]
+    assert "None yet. Every problem on the list is open." in prompt
+    assert "Plan a step for P2 next, if the rules for ordering allow it." in prompt
 
 
 def test_each_step_reports_what_happened(scratch, run_job) -> None:
