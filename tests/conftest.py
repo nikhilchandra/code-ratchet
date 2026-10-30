@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,10 @@ from ratchet.git import Repo
 from ratchet.project import Project, load_project
 from ratchet.refactor.settings import COMMAND
 
-CONFIG = """\
-test_command = ["pytest", "-q"]
+# The scratch project's tests run on this Python's pytest, without a cache folder.
+PYTHON = sys.executable.replace("\\", "/")
+CONFIG = f"""\
+test_command = ["{PYTHON}", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 editable = ["src/**", "tests/**"]
 frozen = ["**/*.feature"]
 """
@@ -43,6 +46,8 @@ def scratch(tmp_path: Path) -> tuple[Project, Repo]:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_app.py").write_text(
         "from app import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n", encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\npythonpath = src\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("__pycache__/\n.ratchet/state/\n", encoding="utf-8")
     (tmp_path / ".ratchet").mkdir()
     (tmp_path / ".ratchet" / "config.toml").write_text(CONFIG, encoding="utf-8")
     (tmp_path / ".ratchet" / "rules.md").write_text("Keep it small.\n", encoding="utf-8")
