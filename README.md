@@ -1,4 +1,4 @@
-# ratchet
+# code-ratchet
 
 Hand a coding goal to a team of AI agents, and let them work in small steps that are each
 tested, reviewed and committed. Like a ratchet, the work only moves forward: a step that
@@ -70,6 +70,9 @@ The run stops when the planner finds nothing left, after `--max-jobs` jobs, or o
 Each job's prompts, diffs, test logs and reports are kept in the list's state folder.
 
 ## Install
+
+The project is named `code-ratchet`, which is its name on PyPI. Its Python package and its
+command are both `ratchet`, so code imports `from ratchet ...` and you type `ratchet refactor`.
 
 ratchet uses agent-rooster from the folder beside it, as an editable path. agent-rooster must
 be on its `new` branch, because ratchet needs the API that exists only there.
