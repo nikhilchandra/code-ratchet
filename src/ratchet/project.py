@@ -171,7 +171,8 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
     """Reads a target project's .ratchet folder.
 
     Args:
-        root: The project's own folder, which holds .ratchet.
+        root: The project's own folder, which holds .ratchet. A relative path is taken from
+            the current folder and made absolute.
         commands: The names of ratchet's commands. Only these may have a section in
             config.toml, so that a misspelled section is caught.
 
@@ -183,7 +184,7 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
             comments.md is there but empty, or config.toml is not valid TOML, holds a wrong shared setting or has a section that
             no command reads.
     """
-    root = Path(root)
+    root = Path(root).resolve()
     folder = root / FOLDER
     if not folder.is_dir():
         raise ProjectError(

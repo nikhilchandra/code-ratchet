@@ -102,6 +102,20 @@ def test_the_state_folder_sits_inside_the_ratchet_folder(tmp_path: Path) -> None
     assert load(make_folder(tmp_path)).state_dir == tmp_path / ".ratchet" / "state"
 
 
+def test_a_relative_folder_is_made_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves a project named by a relative path, such as ../target, gets a full path, so its
+    files resolve the same from any folder that a step runs a command in."""
+    (tmp_path / "target").mkdir()
+    (tmp_path / "here").mkdir()
+    make_folder(tmp_path / "target")
+    monkeypatch.chdir(tmp_path / "here")
+
+    project = load(Path("..") / "target")
+
+    assert project.root == (tmp_path / "target").resolve()
+    assert project.state_dir.is_absolute()
+
+
 def test_a_project_without_the_folder_is_refused(tmp_path: Path) -> None:
     """Proves a missing .ratchet folder names the folder and the files it needs."""
     with pytest.raises(ProjectError, match=r"no \.ratchet folder.*config\.toml and rules\.md"):
