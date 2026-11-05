@@ -1,0 +1,11 @@
+# The command that runs the whole test suite, and the longest it may take, in seconds.
+test_command = ["python", "-m", "pytest", "-q"]
+test_timeout_s = 900
+
+# Path patterns, relative to the project, that agents may change, and patterns they may never
+# change, even inside 'editable'.
+editable = ["src/**", "tests/**"]
+frozen = []
+
+# Settings for ratchet refactor. Every one has a default, so this section may stay empty.
+# [refactor]

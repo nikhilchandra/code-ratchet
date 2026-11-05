@@ -189,12 +189,12 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
     if not folder.is_dir():
         raise ProjectError(
             f"{root} has no {FOLDER} folder. ratchet needs {FOLDER}/config.toml and rules.md "
-            "there."
+            "there. Run `ratchet init` to make them."
         )
 
     config_path = folder / "config.toml"
     if not config_path.is_file():
-        raise ProjectError(f"{folder} has no config.toml")
+        raise ProjectError(f"{folder} has no config.toml. Run `ratchet init` to make it.")
     try:
         settings = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
@@ -214,6 +214,8 @@ def load_project(root: Path, *, commands: Collection[str]) -> Project:
     except ValidationError as exc:
         raise ProjectError(f"{config_path} has settings that are wrong:\n{_format_errors(exc)}") from exc
 
+    if not (folder / "rules.md").is_file():
+        raise ProjectError(f"{folder} has no rules.md. Run `ratchet init` to make it.")
     comments = read_markdown(folder, "comments.md") if (folder / "comments.md").exists() else None
     return Project(
         root=root,
