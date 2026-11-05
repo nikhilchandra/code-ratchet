@@ -31,6 +31,7 @@ from ratchet.audit.agent_answers import (
 from ratchet.audit.code_facts import InventoryItem
 from ratchet.audit.grouping import Group, Item, PairCandidate
 from ratchet.audit.settings import AuditSettings
+from ratchet.git import Repo
 from ratchet.project import Project, RoleSettings
 from ratchet.refactor.agent_profiles import STANDARD
 
@@ -98,8 +99,10 @@ def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict
     """Returns the audit's agents, each set up from its settings and working in the project.
 
     No agent may edit, none may leave the project folder with a file tool, and none may read the
-    .ratchet folder, git's own files or a path that matches a pattern of the hide setting. All
-    but the pair judge may read the project's git
+    .ratchet folder, git's own files, a file or folder that git ignores, or a path that matches a
+    pattern of the hide setting. Every agent loads no Claude settings files, so the allow rules of
+    the user's and the project's settings cannot approve a call, and their env, apiKeyHelper and
+    model settings do not reach the agents. All but the pair judge may read the project's git
     history, with the options in FORBIDDEN_OPTIONS refused. The blind audit's agent has the
     auditor's profile and settings, and is keyed "fresh".
 
@@ -121,7 +124,7 @@ def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict
         Role.PAIR_JUDGE: (settings.pair_judge, PairAnswer),
         Role.CHECKER: (settings.checker, CheckAnswer),
     }
-    hidden = _hidden_paths(settings.hide)
+    hidden = hidden_paths(project, settings)
     agents = {}
     for role, (role_settings, answer) in answers.items():
         profile = write_profile(project, role, profiles)
@@ -131,14 +134,33 @@ def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict
     return agents
 
 
-def _hidden_paths(hide: list[str]) -> tuple[str, ...]:
-    """Returns the patterns that keep the agents away from the old problem lists, the ledger and
-    git's own files, and from the paths in the [audit] hide setting.
+def hidden_paths(project: Project, settings: AuditSettings) -> tuple[str, ...]:
+    """Returns the patterns that keep the agents away from the old problem lists, the ledger,
+    git's own files, the files that git ignores and the paths in the [audit] hide setting.
 
-    Each folder is listed bare and with everything under it, so a Grep or Glob aimed at the folder
-    itself is denied too. All the patterns are relative to the project.
+    Ignored files such as .env may hold secrets. Each folder is listed bare and with everything
+    under it, so a Grep or Glob aimed at the folder itself is denied too. All the patterns are
+    relative to the project, and none repeats.
+
+    An ignored name that holds a wildcard character, or a comma, is not matched exactly by the
+    Read rule, and rooster's hook skips a wildcard name, so such a file may stay readable.
+
+    Args:
+        project: The project, whose root git is asked for the ignored paths.
+        settings: The audit command's settings.
+
+    Returns:
+        The patterns, in a fixed order.
     """
-    return (".ratchet", ".ratchet/**", ".git", ".git/**", *hide)
+    ignored = []
+    for path in Repo(project.root).ignored_paths():
+        if path.endswith("/"):
+            ignored += [path.rstrip("/"), path.rstrip("/") + "/**"]
+        else:
+            ignored.append(path)
+    return tuple(dict.fromkeys(
+        (".ratchet", ".ratchet/**", ".git", ".git/**", *ignored, *settings.hide)
+    ))
 
 
 def _make_agent(
@@ -183,6 +205,8 @@ def _make_agent(
         tools=Tool.INSPECT,
         hidden=hidden,
         confined_to=root,
+        # a settings file's allow rules could approve calls that the audit's rules refuse
+        setting_sources=(),
         **permissions,
     )
 

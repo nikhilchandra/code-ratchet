@@ -290,6 +290,7 @@ def test_forbidden_calls_find_allowed_file_tool_calls_that_land_outside_or_in_gi
          True, True),
         ("fatal: path has been denied this tool", True, False),
         ("grep: x: Permission to use was refused", True, False),
+        ("grep: PreToolUse:Read hook error: x", True, False),
         (CLI_DENIAL, False, False),
     ],
 )
@@ -302,3 +303,54 @@ def test_only_a_result_that_opens_with_denial_wording_is_a_denial(
     )
 
     assert [call.denied for call in read_tool_calls(log)] == [denied]
+
+
+# The text that the CLI logs for a Bash call that rooster's hook refused for a forbidden option.
+BASH_HOOK_ERROR = ("PreToolUse:Bash hook error: the option --no-index is forbidden here, because "
+                   "it reaches outside the project")
+# The text that the CLI logs for a Read call that rooster's hook refused for its path.
+READ_HOOK_ERROR = "PreToolUse:Read hook error: the path ../x is outside C:/p, so it is refused"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "text"),
+    [
+        ("Bash", {"command": "git diff --no-index a b"}, BASH_HOOK_ERROR),
+        ("Read", {"file_path": "../x"}, READ_HOOK_ERROR),
+    ],
+)
+@pytest.mark.parametrize("as_blocks", [False, True])
+def test_a_hook_refusal_logged_by_the_cli_is_a_denial(
+    tmp_path, name, arguments, text, as_blocks
+):
+    """Proves a call whose error result opens with the CLI's 'PreToolUse:<Tool> hook error: '
+    prefix, given as a plain string or as a list of text blocks, is marked denied."""
+    content = [{"type": "text", "text": text}] if as_blocks else text
+    log = write_results_log(
+        tmp_path / "turn.log", [(name, arguments, {"content": content, "is_error": True})]
+    )
+
+    assert [call.denied for call in read_tool_calls(log)] == [True]
+
+
+def test_forbidden_calls_find_an_allowed_read_of_a_hidden_path(tmp_path):
+    """Proves an allowed Read of a plain hidden path, and of a file below a 'folder/**' hidden
+    pattern, is found when the hidden paths are given, and that a Read of any other file is not.
+    With no hidden paths given, the Read of .env is not found."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    hidden = (".env", ".venv", ".venv/**")
+    calls = [
+        ("Read", {"file_path": ".env"}, None),
+        ("Read", {"file_path": ".venv/lib/x.py"}, None),
+        ("Read", {"file_path": "src/a.py"}, None),
+    ]
+    log = write_results_log(tmp_path / "turn.log", calls)
+
+    forbidden = turn_logs.forbidden_calls(log, (), root, hidden)
+
+    assert [(call.arguments, call.denied) for call in forbidden] == [
+        ({"file_path": ".env"}, False),
+        ({"file_path": ".venv/lib/x.py"}, False),
+    ]
+    assert turn_logs.forbidden_calls(log, (), root) == []

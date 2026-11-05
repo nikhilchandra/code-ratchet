@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,7 +42,9 @@ CONFIG = 'test_command = ["pytest"]\neditable = ["src/**"]\n'
 
 
 def make_project(root: Path) -> Project:
-    """Writes a .ratchet folder into 'root' and returns the project read from it."""
+    """Makes 'root' a git repository, writes a .ratchet folder into it and returns the project
+    read from it."""
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
     folder = root / ".ratchet"
     folder.mkdir()
     (folder / "config.toml").write_text(CONFIG, encoding="utf-8")
@@ -311,3 +315,51 @@ def test_audit_agents_are_confined_to_the_project(tmp_path: Path) -> None:
         matchers = agent._options().hooks["PreToolUse"]
         assert len(matchers) == 1, name
         assert matchers[0].matcher is None, name
+
+
+def test_audit_agents_load_no_settings_files(tmp_path: Path) -> None:
+    """Proves every audit agent, the blind audit's included, loads no Claude settings files, so
+    no allow rule in the user's or the project's settings can approve a call."""
+    project = make_project(tmp_path)
+
+    agents = make_agents(project, load_settings(project), tmp_path / "audit")
+
+    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    for name, agent in agents.items():
+        assert agent._options().setting_sources == [], name
+
+
+def test_an_ignored_env_is_hidden_and_refused_by_the_hook(tmp_path: Path) -> None:
+    """Proves a .env file that the project's git ignores is hidden from every audit agent, the
+    blind audit's included, is denied Read by its rules, and is refused by its PreToolUse hook."""
+    project = make_project(tmp_path)
+    (tmp_path / ".gitignore").write_text(".env\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("KEY=secret\n", encoding="utf-8")
+
+    agents = make_agents(project, load_settings(project), tmp_path / "audit")
+
+    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    for name, agent in agents.items():
+        assert ".env" in agent.hidden, name
+        assert "Read(.env)" in agent._options().disallowed_tools, name
+        hook = agent._options().hooks["PreToolUse"][0].hooks[0]
+        call = {"hook_event_name": "PreToolUse", "tool_name": "Read",
+                "tool_input": {"file_path": ".env"}, "tool_use_id": "t", "session_id": "s",
+                "transcript_path": "", "cwd": str(agent.cwd)}
+        answer = asyncio.run(hook(call, "t", {"signal": None}))
+        assert answer["hookSpecificOutput"]["permissionDecision"] == "deny", name
+
+
+def test_an_ignored_folder_is_one_hidden_entry_and_both_patterns(tmp_path: Path) -> None:
+    """Proves a .venv folder that the project's git ignores is hidden as '.venv' and '.venv/**',
+    each once, and that no path below it is listed on its own."""
+    project = make_project(tmp_path)
+    (tmp_path / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    (tmp_path / ".venv" / "lib").mkdir(parents=True)
+    (tmp_path / ".venv" / "lib" / "x.py").write_text("x = 1\n", encoding="utf-8")
+
+    hidden = agent_profiles.hidden_paths(project, load_settings(project))
+
+    assert hidden.count(".venv") == 1
+    assert hidden.count(".venv/**") == 1
+    assert not [path for path in hidden if path.startswith(".venv/lib")]

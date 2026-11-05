@@ -142,3 +142,56 @@ def test_diff_has_no_color_when_the_owner_forces_it(tmp_path: Path, setting: str
 
     assert "\x1b[" not in diff
     assert "+x = 2" in diff
+
+
+def write(path: Path, text: str = "x\n") -> None:
+    """Writes 'text' to 'path', making its folders first."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def commit_all(repo: Repo, message: str) -> None:
+    """Stages every file that git does not ignore and commits it."""
+    repo.run("add", "-A")
+    repo.run("commit", "-q", "-m", message)
+
+
+def test_ignored_paths_list_an_ignored_file_and_a_folder_as_one_entry(tmp_path: Path) -> None:
+    """Proves an ignored .env is listed as itself and an ignored .venv folder as the one entry
+    '.venv/', and that nothing in .ratchet is listed, though git ignores it too."""
+    repo = make_repo(tmp_path)
+    write(tmp_path / ".gitignore", ".env\n.venv/\n.ratchet/\n")
+    commit_all(repo, "ignore")
+    write(tmp_path / ".env", "KEY=secret\n")
+    write(tmp_path / ".venv" / "lib" / "x.py")
+    write(tmp_path / ".ratchet" / "audits" / "a.json")
+
+    assert repo.ignored_paths() == [".env", ".venv/"]
+
+
+def test_ignored_paths_are_relative_to_a_project_in_a_subfolder(tmp_path: Path) -> None:
+    """Proves the ignored paths of a project in the subfolder proj are relative to proj, and
+    that its ignored .ratchet folder is left out."""
+    repo = make_repo(tmp_path)
+    write(tmp_path / "proj" / "a.py")
+    write(tmp_path / "proj" / ".gitignore", ".env\n.ratchet/\n")
+    commit_all(repo, "add proj")
+    write(tmp_path / "proj" / ".env", "KEY=secret\n")
+    write(tmp_path / "proj" / ".ratchet" / "rules.md")
+
+    assert Repo(tmp_path / "proj").ignored_paths() == [".env"]
+
+
+def test_ignored_paths_never_lists_the_project_itself(tmp_path: Path) -> None:
+    """Proves a project folder proj2 that holds only ignored files is not listed as './', '.'
+    or '', which would hide the whole project, and that its ignored .env is listed."""
+    repo = make_repo(tmp_path)
+    write(tmp_path / ".gitignore", ".env\n.ratchet/\n")
+    commit_all(repo, "ignore")
+    write(tmp_path / "proj2" / ".env", "KEY=secret\n")
+    write(tmp_path / "proj2" / ".ratchet" / "rules.md")
+
+    ignored = Repo(tmp_path / "proj2").ignored_paths()
+
+    assert not {"./", ".", ""} & set(ignored)
+    assert ignored == [".env"]

@@ -1,6 +1,6 @@
 """The module contains the functions that read an agent's turn log and report which tool calls the
-agent made, which of them name .ratchet, reach into .ratchet or .git or out of the project through
-a file tool, or use a git option that reaches outside the project, and which inventory files the
+agent made, which of them name .ratchet, reach into .ratchet or .git, a hidden path or out of the
+project through a file tool, or use a git option that reaches outside the project, and which inventory files the
 agent never opened.
 
 The audit uses them as a backstop after a turn: the agents' permission rules and rooster's list of
@@ -46,6 +46,8 @@ DENIAL_STARTS = (
     "the option ",
     "the path ",
 )
+# The prefix that the CLI puts on the result of a call that a PreToolUse hook refused.
+HOOK_ERROR = re.compile(r"PreToolUse:\w+ hook error: ")
 # The tag that the CLI wraps around a refusal that the permission rules or an input check made.
 ERROR_TAG = "<tool_use_error>"
 # The characters that start a wildcard in a Glob pattern.
@@ -112,23 +114,28 @@ def _is_denial(content: object) -> bool:
 
     Returns:
         True when the text, after an ERROR_TAG and an "Error: " prefix are removed, opens with one
-        of DENIAL_STARTS. The same wording in the middle of an error, as in a message from a
+        of DENIAL_STARTS or with the CLI's HOOK_ERROR prefix. The same wording in the middle of an error, as in a message from a
         command that was run, does not count.
     """
     if isinstance(content, list):
         content = " ".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
     text = str(content).strip().removeprefix(ERROR_TAG).removeprefix("Error: ")
-    return text.startswith(DENIAL_STARTS)
+    return text.startswith(DENIAL_STARTS) or HOOK_ERROR.match(text) is not None
 
 
-def forbidden_calls(log_path: Path, options: tuple[str, ...], root: Path) -> list[ToolCall]:
+def forbidden_calls(
+    log_path: Path, options: tuple[str, ...], root: Path, hidden: tuple[str, ...] = ()
+) -> list[ToolCall]:
     """Lists the tool calls in a turn that name .ratchet, use a forbidden git option, or reach
-    through a file tool into .ratchet or .git or out of the project.
+    through a file tool into .ratchet, .git or a hidden path, or out of the project.
 
     Args:
         log_path: The log file that the agent wrote for the turn.
         options: The option words that no Bash command may contain, such as ("--no-index", "-C").
         root: The project's folder, which relative paths are read from.
+        hidden: The hidden path patterns, relative to 'root'. A plain pattern, and a pattern that
+            is a plain path followed by "/**", are checked as folders or files. Any other
+            pattern is left to the permission rules.
 
     Returns:
         Each such call in the order made, with its denied flag. A denied call was stopped by the
@@ -138,7 +145,7 @@ def forbidden_calls(log_path: Path, options: tuple[str, ...], root: Path) -> lis
     for call in read_tool_calls(log_path):
         command = call.arguments.get("command")
         uses_option = call.name == "Bash" and isinstance(command, str) and _forbidden_option(command, options)
-        if uses_option or _names_ratchet(call) or _lands_out_of_bounds(call, root):
+        if uses_option or _names_ratchet(call) or _lands_out_of_bounds(call, root, hidden):
             found.append(call)
     return found
 
@@ -175,22 +182,44 @@ def _is_below(place: str, folder: str) -> bool:
     return place == folder or place.startswith(folder if folder.endswith(os.sep) else folder + os.sep)
 
 
-def _lands_out_of_bounds(call: ToolCall, root: Path) -> bool:
-    """Tells whether a file tool call reaches, by where its paths really are, into .ratchet or
-    .git or out of the project.
+def _plain_hidden_places(hidden: tuple[str, ...], base: str) -> list[str]:
+    """Resolves the hidden patterns that name one folder or file, as rooster's hook does.
+
+    Args:
+        hidden: The hidden path patterns.
+        base: The folder that a relative pattern is read from.
+
+    Returns:
+        The real place of each pattern that holds no wildcard once a trailing "/**" is removed.
+    """
+    places = []
+    for pattern in hidden:
+        for ending in ("/**", "\\**"):
+            if pattern.endswith(ending):
+                pattern = pattern[: -len(ending)]
+                break
+        if pattern and not any(mark in pattern for mark in WILDCARDS):
+            places.append(_real_place(pattern, base))
+    return places
+
+
+def _lands_out_of_bounds(call: ToolCall, root: Path, hidden: tuple[str, ...] = ()) -> bool:
+    """Tells whether a file tool call reaches, by where its paths really are, into .ratchet,
+    .git or a hidden path, or out of the project.
 
     Args:
         call: One tool call.
         root: The project's folder, which relative paths are read from.
+        hidden: The hidden path patterns, as for forbidden_calls.
 
     Returns:
         True when a path field, or the leading folders of a Glob pattern, resolves to a place
-        outside 'root' or inside its .ratchet or .git folder. A call with no path field works in
+        outside 'root' or inside its .ratchet or .git folder or a hidden place. A call with no path field works in
         'root', so it is in bounds, and so is a call that is not a file tool.
     """
     base = str(root)
     folder = _real_place(base, base)
-    hidden = [_real_place(name, base) for name in HIDDEN_FOLDERS]
+    barred = [_real_place(name, base) for name in HIDDEN_FOLDERS] + _plain_hidden_places(hidden, base)
     checks = [(value, base) for field in PATH_FIELDS if isinstance(value := call.arguments.get(field), str)]
     pattern = call.arguments.get("pattern")
     if call.name == "Glob" and isinstance(pattern, str):
@@ -203,7 +232,7 @@ def _lands_out_of_bounds(call: ToolCall, root: Path) -> bool:
             checks.append((leading, _real_place(path, base) if isinstance(path, str) else base))
     for value, start in checks:
         place = _real_place(value, start)
-        if not _is_below(place, folder) or any(_is_below(place, name) for name in hidden):
+        if not _is_below(place, folder) or any(_is_below(place, name) for name in barred):
             return True
     return False
 

@@ -87,6 +87,25 @@ class Repo:
                 index += 1
         return paths
 
+    def ignored_paths(self) -> list[str]:
+        """Returns the files and folders that git ignores, which .ratchet is left out of.
+
+        The paths are relative to root, and a folder that is wholly ignored ends in '/'.
+        """
+        printed = self.run(
+            "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"
+        )
+        paths = []
+        for entry in printed.split("\0"):
+            # git prints './' when everything in the folder is ignored, and that would hide the whole project
+            if entry in ("", ".", "./"):
+                continue
+            # git prints '.ratchet/' even when a ':(exclude).ratchet' pathspec is given
+            if entry == FOLDER or entry.startswith(FOLDER + "/"):
+                continue
+            paths.append(entry)
+        return paths
+
     def diff(self, *paths: str) -> str:
         """Returns the diff of every change outside .ratchet against the last commit, new files
         included.

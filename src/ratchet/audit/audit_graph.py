@@ -69,6 +69,7 @@ from ratchet.audit.agent_profiles import (
     format_pair_prompt,
     format_recheck_prompt,
     format_review_prompt,
+    hidden_paths,
     make_agents,
 )
 from ratchet.audit.citations import CitationResult, check_citations, render_report
@@ -707,17 +708,18 @@ def build_audit_graph(
         and the files of the inventory that the turn never opened."""
         if log_path is None or not log_path.is_file():
             return
-        calls = forbidden_calls(log_path, FORBIDDEN_OPTIONS, project.root)
+        calls = forbidden_calls(log_path, FORBIDDEN_OPTIONS, project.root,
+                                tuple(job.data.get("hidden", ())))
         ran = [_call_text(call) for call in calls if not call.denied]
         if ran:
             who = "blind audit" if name == FRESH else name
             raise AuditError(f"the {who} ran a tool call that names {FOLDER} or .git, leaves the "
-                             f"project, or uses a forbidden git option, so it may have seen the old problem lists: "
+                             f"project, reads a hidden path or uses a forbidden git option, so it may have seen the old problem lists or a secret: "
                              f"{'; '.join(ran[:3])}")
         refused = [_call_text(call) for call in calls if call.denied]
         if refused:
             note(job, f"the permission rules refused {len(refused)} calls of the {name} that name "
-                      f"{FOLDER} or .git, leave the project, or use a forbidden git option, such as {'; '.join(refused[:3])}")
+                      f"{FOLDER} or .git, leave the project, read a hidden path or use a forbidden git option, such as {'; '.join(refused[:3])}")
         unopened = unopened_files(log_path, project.root, files or [])
         if unopened:
             note(job, f"the {name} never opened {len(unopened)} files of the inventory, such as "
@@ -750,6 +752,7 @@ def build_audit_graph(
         _write_json(folder / "code-findings.json", check_architecture(project, design))
         _write_json(folder / "inventory.json", build_inventory(project, design))
         job.data.update(head=repo.run("rev-parse", "HEAD").strip(), reaudit=reaudit, notes=[],
+                        hidden=list(hidden_paths(project, settings)),
                         old_list="", published="",
                         ratchet_commit=_oldest_ratchet_commit(repo) if reaudit else "")
         if reaudit:

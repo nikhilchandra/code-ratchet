@@ -1546,3 +1546,64 @@ def test_a_checker_answer_for_no_group_is_noted_in_the_verdicts(
 
     verdicts = (audit_folder(audit_project) / "verdicts.md").read_text(encoding="utf-8")
     assert "- note: the checker answered for G999, which is not a group" in verdicts
+
+
+def ignore_env(project: Project) -> None:
+    """Adds .env to the project's .gitignore, commits that, and writes a .env file that holds a
+    secret."""
+    ignore = project.root / ".gitignore"
+    ignore.write_text(ignore.read_text(encoding="utf-8") + ".env\n", encoding="utf-8")
+    git(project.root, "add", ".gitignore")
+    git(project.root, "commit", "-q", "-m", "ignore .env")
+    (project.root / ".env").write_text("KEY=secret\n", encoding="utf-8")
+
+
+def test_a_hook_refused_read_of_an_ignored_env_is_noted_not_halted(
+    audit_project: Project, start
+) -> None:
+    """Proves an auditor's Read of the ignored .env, which rooster's hook refused and the CLI
+    logged as a 'PreToolUse:Read hook error', does not stop the job, and is noted for the owner
+    in the draft as a call that would read a hidden path."""
+    ignore_env(audit_project)
+    refusal = "PreToolUse:Read hook error: the path .env is hidden from this agent, so it is refused"
+    auditor = calling_tools("auditor", [("Read", {"file_path": ".env"}, refusal)],
+                            auditor_turn(audit_project))
+
+    job, agents, graph = start(default_turns(audit_project) | {"auditor": [auditor]})
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    draft = (audit_folder(audit_project) / "draft.md").read_text(encoding="utf-8")
+    assert "the permission rules refused" in draft
+    assert "read a hidden path" in draft
+
+
+def test_an_allowed_read_of_an_ignored_env_halts_the_audit(audit_project: Project, start) -> None:
+    """Proves an auditor's Read of the ignored .env that got through stops the job, with a
+    reason that names the auditor and says it may have seen a secret."""
+    ignore_env(audit_project)
+    auditor = calling_tools("auditor", [("Read", {"file_path": ".env"}, None)],
+                            auditor_turn(audit_project))
+
+    with pytest.raises(AuditError) as caught:
+        start(default_turns(audit_project) | {"auditor": [auditor]})
+
+    assert "auditor" in str(caught.value)
+    assert "a secret" in str(caught.value)
+    assert not (audit_folder(audit_project) / "review-a.json").exists()
+
+
+def test_a_hook_refused_forbidden_option_is_noted_not_halted(
+    audit_project: Project, start
+) -> None:
+    """Proves an auditor's 'git diff --no-index', which rooster's hook refused and the CLI logged
+    as a 'PreToolUse:Bash hook error', does not stop the job, and is noted for the owner."""
+    refusal = ("PreToolUse:Bash hook error: the option --no-index is forbidden here, because it "
+               "reaches outside the project")
+    auditor = calling_tools("auditor", [("Bash", {"command": "git diff --no-index a b"}, refusal)],
+                            auditor_turn(audit_project))
+
+    job, agents, graph = start(default_turns(audit_project) | {"auditor": [auditor]})
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    draft = (audit_folder(audit_project) / "draft.md").read_text(encoding="utf-8")
+    assert "the permission rules refused" in draft
