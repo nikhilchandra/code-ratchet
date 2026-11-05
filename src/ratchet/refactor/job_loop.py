@@ -11,6 +11,7 @@ ledger, the run's log, the baseline, the agents' profiles and logs, and every jo
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,9 +19,11 @@ from pathlib import Path
 
 from rooster import Agent, Job, JobStatus
 
-from ratchet.git import Repo
+from ratchet.git import GitError, Repo
+from ratchet.problem_history import publish_time
 from ratchet.project import Project
 from ratchet.pytest_runner import OutcomeKind, run_pytest
+from ratchet.records import commit_records, has_records
 from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
 from ratchet.refactor.ledger import JobRecord, load_ledger, record_job, save_ledger
 from ratchet.refactor.problem_list import find_latest_problem_list
@@ -33,6 +36,9 @@ AgentMaker = Callable[[Project, RefactorSettings, str, Path], dict[str, Agent]]
 # The width of the time that starts each console line, such as "14:25  ".
 TIME_WIDTH = 7
 
+# The number of commits since a list was published from which a run suggests a re-audit.
+REAUDIT_COMMITS = 10
+
 
 @dataclass
 class RefactorRun:
@@ -44,6 +50,10 @@ class RefactorRun:
     end: str = ""
     # What the run spent, in dollars, including a planner call that found nothing left.
     cost_usd: float = 0.0
+    # The short hash of the records commit that took the run's ledger, or "" when there was none.
+    records_commit: str = ""
+    # The commits that landed in the project since the problem list was published.
+    commits_since_list: int = 0
 
 
 def run_refactor(
@@ -71,10 +81,13 @@ def run_refactor(
             the console.
 
     Returns:
-        The jobs that ran, why the run ended, and what it spent.
+        The jobs that ran, why the run ended, what it spent, the short hash of the records
+        commit that took the ledger ("" when .ratchet is not its own repository), and the number
+        of commits since the problem list was published.
 
     Raises:
         ProjectError: The .ratchet folder or its problem list is wrong.
+        GitError: The records commit failed, or git could not count the commits since the list.
         RefactorError: The working tree is not clean, the suite does not pass before the run,
             or a job halted.
         NoAnswerError: An agent gave no answer during a job. As with a halted job, the job's
@@ -102,6 +115,24 @@ def run_refactor(
         """Shows what one step of a job did, as one aligned line and its detail."""
         log(*format_step_lines(job.slug, step, text, width=width, indent=TIME_WIDTH, **extras))
 
+    def end_run(run: RefactorRun) -> RefactorRun:
+        """Commits the ledger to the records repository, then says how old the list is."""
+        run.records_commit = save_records(run)
+        run.commits_since_list = commits_since(
+            repo, publish_time(project, problem_list.name, problem_list.created))
+        text = f"{count_of(run.commits_since_list, 'commit')} since {problem_list.name} was published"
+        if run.commits_since_list >= REAUDIT_COMMITS:
+            text += ", consider `ratchet audit`"
+        log(text)
+        return run
+
+    def save_records(run: RefactorRun) -> str:
+        """Commits the ledger and the other tracked records, when the records repository exists."""
+        if not has_records(project.root):
+            return ""
+        return commit_records(project.root, f"refactor: {count_of(len(run.jobs), 'job')} on "
+                                            f"{problem_list.name}") or ""
+
     repo = Repo(project.root)
     changed = repo.changed_paths()
     if changed:
@@ -109,6 +140,8 @@ def run_refactor(
                             f"{', '.join(changed[:10])}")
 
     log(f"run started on {repo.last_commit()}, with {problem_list.relative_path}")
+    if not has_records(project.root):
+        log("records are not committed: run `ratchet init` to set up .ratchet as its own repository")
     baseline = run_pytest(project.config.test_command, project.root, folder / "baseline",
                           project.config.test_timeout_s)
     failing = [test_id for test_id, outcome in baseline.outcomes.items()
@@ -137,13 +170,16 @@ def run_refactor(
                 repo.undo()
                 log(*format_step_lines(slug, "undo", "halted, so its problems are still open",
                                        width=width, indent=TIME_WIDTH))
+            # commit the records, ignoring a git error
+            with contextlib.suppress(GitError):
+                save_records(run)
             raise
         run.cost_usd += job.cost_usd
 
         if job.data["outcome"] == JobOutcome.STOPPED:
             run.end = f"the planner found nothing left: {job.data['reason']}"
             log(run.end)
-            return run
+            return end_run(run)
         record = record_job(ledger, job.data, job.slug, job.cost_usd, settings.caps)
         save_ledger(ledger, ledger_path)
         run.jobs.append(record)
@@ -157,4 +193,20 @@ def run_refactor(
 
     run.end = f"the run reached its most jobs, {max_jobs}"
     log(run.end)
-    return run
+    return end_run(run)
+
+
+def commits_since(repo: Repo, when: str) -> int:
+    """Counts the commits that landed in a project after a time.
+
+    Args:
+        repo: The project's git helper.
+        when: The time, such as "2026-11-02 14:05".
+
+    Returns:
+        The number of commits reachable from HEAD that are newer than 'when'.
+
+    Raises:
+        GitError: Git could not count the commits.
+    """
+    return int(repo.run("rev-list", "--count", f"--since={when}", "HEAD").strip() or 0)

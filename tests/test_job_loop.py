@@ -10,8 +10,10 @@ import pytest
 from ratchet.agent_calls import NoAnswerError
 from ratchet.git import Repo
 from ratchet.project import Project
+from ratchet.records import commit_records, init_records, records_log, records_repo
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review
 from ratchet.refactor.job_graph import JobOutcome, RefactorError
+from ratchet.refactor import job_loop
 from ratchet.refactor.job_loop import run_refactor
 from ratchet.refactor.ledger import ProblemStatus, load_ledger
 from scripted_agents import GOOD, ScriptedAgent, Turn, edit, plan, review
@@ -161,3 +163,80 @@ def test_a_halted_job_leaves_job_started_in_the_ledger_file(scratch, run) -> Non
 
     events = ledger_of(project).problems["P1"].events
     assert [event.kind for event in events] == ["job_started"]
+
+
+def test_a_run_commits_its_ledger_to_the_records_repository(scratch, run) -> None:
+    """Proves a run's ledger goes into one records commit when .ratchet is its own repository."""
+    project, _ = scratch
+    init_records(project.root)
+    commit_records(project.root, "first records")
+
+    result, _, _ = run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert result.records_commit == records_log(project.root)[0].split()[0]
+    assert records_log(project.root)[0].endswith(f"refactor: 1 job on {LIST}")
+
+
+def test_a_halted_job_commits_the_records(scratch, run) -> None:
+    """Proves a job that halts still has its ledger committed to the records repository."""
+    project, _ = scratch
+    init_records(project.root)
+    commit_records(project.root, "first records")
+
+    with pytest.raises(NoAnswerError, match="the reviewer gave no answer"):
+        run([plan()], [edit(*GOOD)], [lambda prompt: None])
+
+    assert records_log(project.root)[0].endswith(f"refactor: 0 jobs on {LIST}")
+    committed = records_repo(project.root).run("show", f"HEAD:state/{LIST}/ledger.json")
+    assert "job_started" in committed
+
+
+def test_a_run_with_no_records_repository_makes_no_records_commit(scratch, run) -> None:
+    """Proves refactor only skips the records commit when init has not run."""
+    result, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert result.records_commit == ""
+    assert any("records are not committed: run `ratchet init`" in line for line in lines)
+
+
+def test_a_run_counts_the_commits_since_the_list_was_published(scratch, run) -> None:
+    """Proves the last line counts the commits since the list was published, with no suggestion
+    below the set number."""
+    result, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert result.commits_since_list == 2
+    assert lines[-1].endswith(f"2 commits since {LIST} was published")
+
+
+def test_a_run_suggests_a_re_audit_at_the_set_number_of_commits(
+        scratch, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves the suggestion appears when the count equals the set number, and not when the set
+    number is one higher."""
+    monkeypatch.setattr(job_loop, "REAUDIT_COMMITS", 3)
+    _, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
+    assert lines[-1].endswith(f"2 commits since {LIST} was published")
+
+    _, _, lines = run([plan(problems=["P2"], completes=["P2"])], [edit("a + b", "b + a")],
+                      [review("accept")])
+
+    assert lines[-1].endswith(f"3 commits since {LIST} was published, consider `ratchet audit`")
+
+
+def test_commits_since_counts_only_the_commits_after_the_time(
+        tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves commits_since leaves out the commits dated before the time it is given."""
+    repo = Repo(tmp_path)
+    repo.run("init", "-q", "-b", "main")
+    repo.run("config", "user.email", "ratchet@example.com")
+    repo.run("config", "user.name", "ratchet")
+    dates = ["2020-01-01T12:00:00", "2020-01-02T12:00:00", "2020-03-01T12:00:00",
+             "2020-03-02T12:00:00", "2020-03-03T12:00:00"]
+    for number, date in enumerate(dates):
+        monkeypatch.setenv("GIT_AUTHOR_DATE", date)
+        monkeypatch.setenv("GIT_COMMITTER_DATE", date)
+        (tmp_path / f"file{number}.txt").write_text("x\n", encoding="utf-8")
+        repo.commit(f"commit {number}")
+
+    assert job_loop.commits_since(repo, "2020-02-01 00:00") == 3
+    assert job_loop.commits_since(repo, "2020-03-02 00:00") == 2
+    assert job_loop.commits_since(repo, "2021-01-01 00:00") == 0
