@@ -14,6 +14,7 @@ from ratchet.audit.audit_run import APPROVE, DISCARD, settle_audit, start_audit
 from ratchet.audit.code_copy import CopyError
 from ratchet.audit.settings import COMMAND as AUDIT
 from ratchet.git import GitError
+from ratchet.graph_lock import LockError
 from ratchet.init_project import InitError, init_project
 from ratchet.problems_view import show_history, show_lists, show_problem
 from ratchet.project import ProjectError, load_project
@@ -129,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project = load_project(args.project, commands=COMMANDS)
         run = run_refactor(project, max_jobs=args.max_jobs, focus=args.focus)
-    except (ProjectError, RefactorError, NoAnswerError, GitError, AgentError, GraphError) as error:
+    except (
+        ProjectError, RefactorError, NoAnswerError, GitError, AgentError, GraphError, LockError,
+    ) as error:
         print(f"ratchet: {error}", file=sys.stderr)
         return 1
     committed = sum(1 for record in run.jobs if record.commit)
@@ -195,7 +198,7 @@ def run_audit(args: argparse.Namespace) -> int:
             run = start_audit(project, args.prompt, fresh=args.fresh)
     except (
         ProjectError, AuditError, CopyError, TargetDesignError, NoAnswerError, GitError,
-        AgentError, GraphError,
+        AgentError, GraphError, LockError,
     ) as error:
         print(f"ratchet: {error}", file=sys.stderr)
         return 1

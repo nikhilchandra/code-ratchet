@@ -16,7 +16,7 @@ Tests: tests/test_init_project.py::test_the_init_command_prints_what_it_did (thr
 ## The first audit
 
 1. `ratchet.cli.run_audit` loads the project with `ratchet.project.load_project` and calls `ratchet.audit.audit_run.start_audit`.
-2. `ratchet.audit.audit_run.start_audit` refuses while another audit waits, while rules.md is the template, or before init, and builds the graph with `ratchet.audit.audit_graph.build_audit_graph`. It deletes the copies that earlier audits left behind, and its own copy unless it waits.
+2. `ratchet.audit.audit_run.start_audit` takes the graph lock with `ratchet.graph_lock.take_lock`, which refuses while another graph runs or an audit waits, and refuses while rules.md is the template, or before init, and builds the graph with `ratchet.audit.audit_graph.build_audit_graph`. It deletes the copies that earlier audits left behind, and its own copy and the lock unless it waits.
 3. `ratchet.audit.audit_graph.build_audit_graph.prepare` checks for a clean tree and an ignored .ratchet, writes the code findings and the inventory, and makes the copy of the code with `ratchet.audit.code_copy.make_copy`. A toml block in rules.md that `ratchet.target_design.read_target_design` cannot read, stops the audit, and `ratchet.cli.run_audit` prints one `ratchet: ...` line and exits with 1.
 4. `ratchet.audit.audit_graph.build_audit_graph.audit` asks the auditor, and `ratchet.audit.audit_graph.build_audit_graph.review` asks list reviewers A and B together. Every agent turn is checked, and one that passes --output to git halts the audit.
 5. `ratchet.audit.audit_graph.build_audit_graph.group` makes items, groups them, and asks the pair judge about the pairs that rules cannot settle.
@@ -53,7 +53,7 @@ Tests: tests/test_audit_graph.py::test_a_problem_done_in_the_old_ledger_is_reope
 ## A refactor run
 
 1. `ratchet.cli.main` loads the project with `ratchet.project.load_project` and calls `ratchet.refactor.job_loop.run_refactor`.
-2. `ratchet.refactor.job_loop.run_refactor` refuses a tree with changes, and runs the suite once with `ratchet.pytest_runner.run_pytest`. It asks `ratchet.pytest_runner.has_pytest_cov` whether coverage can run, and says once "coverage is not checked" when it cannot.
+2. `ratchet.refactor.job_loop.run_refactor` takes the graph lock with `ratchet.graph_lock.take_lock`, which undoes and halts a refactor that stopped without a word, then refuses a tree with changes, and runs the suite once with `ratchet.pytest_runner.run_pytest`. It asks `ratchet.pytest_runner.has_pytest_cov` whether coverage can run, and says once "coverage is not checked" when it cannot.
 3. It finds the newest list with `ratchet.refactor.problem_list.find_latest_problem_list` and loads the ledger with `ratchet.refactor.ledger.load_ledger`.
 4. For each job it starts the graph from `ratchet.refactor.job_graph.build_job_graph`. `ratchet.refactor.job_graph.build_job_graph.plan` asks the planner for one step, which names the functions, classes and module code it changes (as `package.module.qualname` and `package.module.<module>`), and the job ends there if the planner has nothing left.
 5. `ratchet.refactor.job_graph.build_job_graph.super_plan` builds the pathway map of those functions with `ratchet.pathways.build_map`, lists the names the plan adds or moves to as new with `ratchet.pathways.describe`, and asks the super-planner. A revise goes back to plan at most `ratchet.refactor.settings.Caps.revisions` times, and an approve goes to write-tests or implement.
@@ -72,7 +72,7 @@ Tests: tests/test_job_loop.py::test_jobs_run_until_the_planner_finds_nothing_lef
 ## A refactor job that halts
 
 1. A step raises, such as an agent that gives no answer.
-2. `ratchet.refactor.job_loop.run_refactor` catches it and calls `ratchet.git.Repo.undo` if the tree has changes, so the job leaves no half-made change.
+2. `ratchet.refactor.job_loop.run_refactor` catches it, even Ctrl-C, calls `ratchet.git.Repo.undo` if the tree has changes, marks the job halted with `ratchet.graph_lock.halt_job_file`, and releases the lock with `ratchet.graph_lock.release_lock`.
 3. The ledger keeps the job_started events that `ratchet.refactor.job_graph.build_job_graph.plan` saved, so the problem stays open.
 4. `ratchet.refactor.job_loop.run_refactor.save_records` commits the ledger, and the error is raised again.
 5. `ratchet.cli.main` prints it on one line and returns 1.

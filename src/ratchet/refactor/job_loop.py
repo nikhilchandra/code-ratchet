@@ -1,6 +1,8 @@
 """Runs refactor jobs one after another on the newest problem list, keeping its ledger.
 
-A run first checks the project: the working tree must be clean, and the whole suite must pass,
+A run first takes the project's graph lock, so that only one graph runs at a time, and releases it
+when it ends or is cut off. A refactor that stopped without a word is undone and halted first. It
+then checks the project: the working tree must be clean, and the whole suite must pass,
 since that run becomes the baseline that every job's tests are compared with. It then starts one
 job after another, recording each in the ledger, until the planner finds nothing left, the run
 reaches its most jobs, or a job halts.
@@ -20,6 +22,7 @@ from pathlib import Path
 from rooster import Agent, Job, JobStatus
 
 from ratchet.git import GitError, Repo
+from ratchet.graph_lock import free_job_slug, halt_job_file, release_lock, set_lock_job, take_lock
 from ratchet.problem_history import publish_time
 from ratchet.project import Project
 from ratchet.pytest_runner import OutcomeKind, has_pytest_cov, run_pytest
@@ -28,7 +31,7 @@ from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_grap
 from ratchet.refactor.ledger import JobRecord, load_ledger, record_job, save_ledger
 from ratchet.refactor.problem_list import find_latest_problem_list
 from ratchet.refactor.progress_lines import console_width, count_of, format_step_lines
-from ratchet.refactor.settings import RefactorSettings, load_settings
+from ratchet.refactor.settings import COMMAND, RefactorSettings, load_settings
 
 # A function that makes the five agents, with the arguments of make_agents().
 AgentMaker = Callable[[Project, RefactorSettings, str, Path], dict[str, Agent]]
@@ -88,6 +91,7 @@ def run_refactor(
         of commits since the problem list was published and the number of jobs committed on it.
 
     Raises:
+        LockError: Another graph is running or an audit waits, or the lock cannot be read.
         ProjectError: The .ratchet folder or its problem list is wrong.
         GitError: The records commit failed, or git could not count the commits since the list.
         RefactorError: The working tree is not clean, the suite does not pass before the run,
@@ -141,70 +145,82 @@ def run_refactor(
         return commit_records(project.root, f"refactor: {count_of(len(run.jobs), 'job')} on "
                                             f"{problem_list.name}") or ""
 
-    repo = Repo(project.root)
-    changed = repo.changed_paths()
-    if changed:
-        raise RefactorError(f"the working tree has changes, so a job's commit would take them: "
-                            f"{', '.join(changed[:10])}")
-
-    log(f"run started on {repo.last_commit()}, with {problem_list.relative_path}")
-    if not has_records(project.root):
-        log("records are not committed: run `ratchet init` to set up .ratchet as its own repository")
-    baseline = run_pytest(project.config.test_command, project.root, folder / "baseline",
-                          project.config.test_timeout_s)
-    failing = [test_id for test_id, outcome in baseline.outcomes.items()
-               if outcome.kind in (OutcomeKind.FAILED, OutcomeKind.ERROR)]
-    if not baseline.outcomes or failing:
-        raise RefactorError(f"the suite does not pass before the run starts (pytest exit code "
-                            f"{baseline.code}), see {folder / 'baseline' / 'pytest.log'}")
-    log(f"baseline: {count_of(len(baseline.outcomes), 'test')}")
-    covered = has_pytest_cov(project.config.test_command, project.root, project.config.test_timeout_s)
-    if not covered:
-        log("coverage is not checked: pytest-cov does not load in the project's test environment")
-
+    # the lock comes before the tree check, so a refactor that stopped without a word is undone first
     ledger_path = folder / "ledger.json"
     ledger = load_ledger(ledger_path, problem_list.name)
-    agents = agent_maker(project, settings, problem_list.relative_path, folder)
-    graph = build_job_graph(project, settings, agents, baseline.outcomes, folder, ledger,
-                            ledger_path, problem_list, report=report, coverage=covered)
+    jobs_folder = folder / COMMAND
+    first_slug = free_job_slug(jobs_folder, f"job-{ledger.next_job_number():03d}")
+    take_lock(project, graph=COMMAND, job=first_slug, job_file=jobs_folder / f"{first_slug}.json",
+              say=log)
+    try:
+        repo = Repo(project.root)
+        changed = repo.changed_paths()
+        if changed:
+            raise RefactorError(f"the working tree has changes, so a job's commit would take them: "
+                                f"{', '.join(changed[:10])}")
 
-    run = RefactorRun()
-    for number in range(max_jobs):
-        slug = f"job-{ledger.next_job_number():03d}"
-        try:
-            job = graph.start(focus if number == 0 else "", slug=slug)
-            if job.status == JobStatus.HALTED:
-                raise RefactorError(f"{job.slug} halted: {job.halt_reason}")
-        except Exception:
-            # a job cut off part way leaves no half-made change for the next run
-            if repo.changed_paths():
-                repo.undo()
-                log(*format_step_lines(slug, "undo", "halted, so its problems are still open",
+        log(f"run started on {repo.last_commit()}, with {problem_list.relative_path}")
+        if not has_records(project.root):
+            log("records are not committed: run `ratchet init` to set up .ratchet as its own repository")
+        baseline = run_pytest(project.config.test_command, project.root, folder / "baseline",
+                              project.config.test_timeout_s)
+        failing = [test_id for test_id, outcome in baseline.outcomes.items()
+                   if outcome.kind in (OutcomeKind.FAILED, OutcomeKind.ERROR)]
+        if not baseline.outcomes or failing:
+            raise RefactorError(f"the suite does not pass before the run starts (pytest exit code "
+                                f"{baseline.code}), see {folder / 'baseline' / 'pytest.log'}")
+        log(f"baseline: {count_of(len(baseline.outcomes), 'test')}")
+        covered = has_pytest_cov(project.config.test_command, project.root, project.config.test_timeout_s)
+        if not covered:
+            log("coverage is not checked: pytest-cov does not load in the project's test environment")
+
+        agents =agent_maker(project, settings, problem_list.relative_path, folder)
+        graph = build_job_graph(project, settings, agents, baseline.outcomes, folder, ledger,
+                                ledger_path, problem_list, report=report, coverage=covered)
+
+        run = RefactorRun()
+        for number in range(max_jobs):
+            # name the job as rooster will, so the lock and the halt find the file it writes
+            slug = free_job_slug(graph.state_dir, f"job-{ledger.next_job_number():03d}")
+            job_file = graph.state_dir / f"{slug}.json"
+            set_lock_job(project, slug, job_file)
+            try:
+                job = graph.start(focus if number == 0 else "", slug=slug)
+                if job.status == JobStatus.HALTED:
+                    raise RefactorError(f"{job.slug} halted: {job.halt_reason}")
+            except BaseException:
+                # a job cut off part way, even by Ctrl-C, leaves no half-made change for the next run
+                halt_job_file(job_file)
+                if repo.changed_paths():
+                    repo.undo()
+                    log(*format_step_lines(slug, "undo", "halted, so its problems are still open",
+                                           width=width, indent=TIME_WIDTH))
+                # commit the records, ignoring a git error
+                with contextlib.suppress(GitError):
+                    save_records(run)
+                raise
+            run.cost_usd += job.cost_usd
+
+            if job.data["outcome"] == JobOutcome.STOPPED:
+                run.end = f"the planner found nothing left: {job.data['reason']}"
+                log(run.end)
+                return end_run(run)
+            record = record_job(ledger, job.data, job.slug, job.cost_usd, settings.caps)
+            save_ledger(ledger, ledger_path)
+            run.jobs.append(record)
+            spent = f"job ${record.cost_usd:.2f} | run ${run.cost_usd:.2f}"
+            if record.commit:
+                log(*format_step_lines(job.slug, "commit", f"{record.commit} | {record.id} | {spent}",
                                        width=width, indent=TIME_WIDTH))
-            # commit the records, ignoring a git error
-            with contextlib.suppress(GitError):
-                save_records(run)
-            raise
-        run.cost_usd += job.cost_usd
+            else:
+                log(*format_step_lines(job.slug, "undo", f"{record.outcome} | {record.id} | {spent}",
+                                       width=width, indent=TIME_WIDTH))
 
-        if job.data["outcome"] == JobOutcome.STOPPED:
-            run.end = f"the planner found nothing left: {job.data['reason']}"
-            log(run.end)
-            return end_run(run)
-        record = record_job(ledger, job.data, job.slug, job.cost_usd, settings.caps)
-        save_ledger(ledger, ledger_path)
-        run.jobs.append(record)
-        spent = f"job ${record.cost_usd:.2f} | run ${run.cost_usd:.2f}"
-        if record.commit:
-            log(*format_step_lines(job.slug, "commit", f"{record.commit} | {record.id} | {spent}",
-                                   width=width, indent=TIME_WIDTH))
-        else:
-            log(*format_step_lines(job.slug, "undo", f"{record.outcome} | {record.id} | {spent}",
-                                   width=width, indent=TIME_WIDTH))
-
-    run.end = f"the run reached its most jobs, {max_jobs}"
-    log(run.end)
-    return end_run(run)
+        run.end = f"the run reached its most jobs, {max_jobs}"
+        log(run.end)
+        return end_run(run)
+    finally:
+        release_lock(project)
 
 
 def commits_since(repo: Repo, when: str) -> int:

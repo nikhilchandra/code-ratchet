@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from functools import partial
 from importlib.metadata import entry_points
 from pathlib import Path
 
 import pytest
 
+from ratchet import cli
 from ratchet.cli import main
 from ratchet.project import Project
+from lock_files import FAKE_PID, LIST, write_job_file, write_lock
 from test_audit_graph import audit_project  # noqa: F401
 
 
@@ -134,3 +137,48 @@ def test_audit_with_a_malformed_rules_block_prints_one_line(
     assert code == 1
     assert len(err.splitlines()) == 1
     assert err.startswith("ratchet: the toml block in rules.md is not valid")
+
+
+def refuse_agents(*args: object) -> dict:
+    """Stands in for the agent maker, so that a run the lock fails to stop calls no real agent."""
+    raise AssertionError("the run asked for its agents, so the lock did not stop it")
+
+
+@pytest.fixture
+def no_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Has the command line start audits and refactors with refuse_agents as their agent maker."""
+    monkeypatch.setattr(cli, "start_audit", partial(cli.start_audit, agent_maker=refuse_agents))
+    monkeypatch.setattr(cli, "run_refactor", partial(cli.run_refactor, agent_maker=refuse_agents))
+
+
+def test_audit_against_a_running_refactor_prints_one_line(
+    audit_project: Project, capsys: pytest.CaptureFixture[str], no_agents  # noqa: F811
+) -> None:
+    """Proves an audit started while a refactor runs in a live process exits with 1 and one
+    message that names the refactor's job."""
+    write_job_file(audit_project.state_dir / LIST / "refactor" / "job-012.json", "running",
+                   "implement")
+    write_lock(audit_project)
+
+    code = main(["audit", "--project", str(audit_project.root)])
+
+    assert code == 1
+    assert capsys.readouterr().err.splitlines() == [
+        "ratchet: A refactor (job-012) is running. Wait for it to finish."]
+
+
+def test_refactor_against_a_waiting_audit_prints_one_line(
+    scratch, capsys: pytest.CaptureFixture[str], no_agents
+) -> None:
+    """Proves a refactor started while an audit waits for the owner's answers exits with 1 and
+    one message that names the audit."""
+    project, _ = scratch
+    write_job_file(project.state_dir / "audits" / "audit-x.json", "waiting", "check")
+    write_lock(project, graph="audit", job="audit-x", job_file="audits/audit-x.json",
+               pid=FAKE_PID, state="waiting", gate="questions")
+
+    code = main(["refactor", "--project", str(project.root)])
+
+    assert code == 1
+    assert capsys.readouterr().err.splitlines() == [
+        "ratchet: Audit audit-x is waiting for your answers. Finish or discard it first."]

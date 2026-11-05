@@ -4,7 +4,9 @@ of each job."""
 
 from __future__ import annotations
 
+import inspect
 import re
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +25,7 @@ from ratchet.refactor.job_graph import JobOutcome, RefactorError
 from ratchet.refactor import job_loop
 from ratchet.refactor.job_loop import run_refactor
 from ratchet.refactor.ledger import ProblemStatus, load_ledger
+from lock_files import FAKE_PID, LIST, lock_path, read_job_file, write_job_file, write_lock
 from scripted_agents import (
     GOOD,
     ScriptedAgent,
@@ -44,7 +47,6 @@ from scripted_agents import (
     write_test,
 )
 
-LIST = "problems-20261026-09h00m"
 
 # A test that the test writer writes, which passes on the scratch project's code.
 PASSING = "from app import add\n\n\ndef test_more():\n    assert add(2, 2) == 4\n"
@@ -457,3 +459,175 @@ def test_a_function_the_plan_adds_is_not_reviewed_from_run_refactor(scratch, run
     assert "review-map" not in steps
     assert len(agents["super_planner"].prompts) == 1
     assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+
+
+def lock_is_gone(project: Project) -> bool:
+    """Returns whether the project has no graph lock."""
+    return not lock_path(project).exists()
+
+
+def run_log(project: Project) -> list[str]:
+    """Returns the lines of the run's log on the scratch project's problem list."""
+    return (project.state_dir / LIST / "run.log").read_text(encoding="utf-8").splitlines()
+
+
+def interrupt(prompt: str) -> dict:
+    """Stands in for a turn that the owner cuts off with Ctrl-C."""
+    raise KeyboardInterrupt
+
+
+def test_a_run_releases_the_lock(scratch, run) -> None:
+    """Proves a run that committed its job leaves no lock behind."""
+    project, _ = scratch
+
+    result, _, _ = run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+    assert lock_is_gone(project)
+
+
+def test_a_halted_job_releases_the_lock(scratch, run) -> None:
+    """Proves a job cut off by an agent that gave no answer is halted and leaves no lock."""
+    project, _ = scratch
+
+    with pytest.raises(NoAnswerError, match="the reviewer gave no answer"):
+        run([plan()], [edit(*GOOD)], [lambda prompt: None])
+
+    assert read_job_file(project.state_dir / LIST / "refactor" / "job-001.json")["status"] == "halted"
+    assert lock_is_gone(project)
+
+
+def test_ctrl_c_in_a_job_undoes_it_marks_it_halted_and_releases_the_lock(scratch, run) -> None:
+    """Proves Ctrl-C in a step, which is not an Exception, still undoes the job's changes, halts
+    its job file and removes the lock, and its problem stays open."""
+    project, repo = scratch
+
+    with pytest.raises(KeyboardInterrupt):
+        run([plan()], [edit(*GOOD)], [interrupt])
+
+    assert repo.changed_paths() == []
+    assert read_job_file(project.state_dir / LIST / "refactor" / "job-001.json")["status"] == "halted"
+    assert any(" undo " in line and "job-001" in line for line in run_log(project))
+    assert ledger_of(project).status_of("P1") == ProblemStatus.OPEN
+    assert lock_is_gone(project)
+
+
+def test_a_dirty_tree_refusal_releases_the_lock(scratch, run) -> None:
+    """Proves a run refused on a dirty tree leaves no lock behind."""
+    project, _ = scratch
+    (project.root / "src" / "extra.py").write_text("x = 1\n", encoding="utf-8")
+
+    with pytest.raises(RefactorError, match="the working tree has changes"):
+        run([plan()])
+
+    assert lock_is_gone(project)
+
+
+def test_a_run_is_refused_while_an_audit_waits(scratch, run) -> None:
+    """Proves a run does not start while an audit waits for the owner's answers, and asks the
+    planner nothing."""
+    from ratchet.graph_lock import LockError
+
+    project, _ = scratch
+    write_job_file(project.state_dir / "audits" / "audit-x.json", "waiting", "check")
+    write_lock(project, graph="audit", job="audit-x", job_file="audits/audit-x.json",
+               pid=FAKE_PID, state="waiting", gate="questions")
+    asked: list[str] = []
+
+    with pytest.raises(LockError) as refused:
+        run([lambda prompt: asked.append(prompt) or plan()])
+
+    assert str(refused.value) == ("Audit audit-x is waiting for your answers. Finish or discard "
+                                  "it first.")
+    assert asked == []
+    assert lock_path(project).exists()
+
+
+def test_a_stale_refactor_lock_is_rolled_back_by_the_next_run(scratch, run) -> None:
+    """Proves a run after a refactor whose process is gone undoes that job's changes, halts it,
+    says so, and goes on to commit its own job."""
+    project, repo = scratch
+    app = project.root / "src" / "app.py"
+    app.write_text(app.read_text(encoding="utf-8") + "\nX = 1\n", encoding="utf-8", newline="\n")
+    old = write_job_file(project.state_dir / LIST / "refactor" / "job-001.json", "running", "review")
+    write_lock(project, job="job-001", job_file=f"{LIST}/refactor/job-001.json", pid=FAKE_PID)
+
+    result, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert [record.id for record in result.jobs] == ["J01"]
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+    undone = "The last refactor (job-001) stopped without finishing. Its changes were undone."
+    assert sum(undone in line for line in lines) == 1
+    assert read_job_file(old)["status"] == "halted"
+    assert "X = 1" not in repo.run("show", "HEAD:src/app.py")
+    assert lock_is_gone(project)
+
+
+def test_a_taken_job_name_gets_a_counter_in_the_lock_and_the_halt(scratch, run) -> None:
+    """Proves a job whose name is taken by an earlier job file is locked, halted and undone under
+    the name that rooster gives it, and the earlier file is left alone."""
+    from ratchet.graph_lock import read_lock
+
+    project, repo = scratch
+    folder = project.state_dir / LIST / "refactor"
+    taken = write_job_file(folder / "job-001.json", "done", None)
+    taken_before = taken.read_bytes()
+    locked: list[str] = []
+
+    def implement(prompt: str) -> dict:
+        locked.append(read_lock(project).job)
+        return edit(*GOOD)(prompt)
+
+    with pytest.raises(KeyboardInterrupt):
+        run([plan()], [implement], [interrupt])
+
+    assert locked == ["job-001-2"]
+    assert read_job_file(folder / "job-001-2.json")["status"] == "halted"
+    assert taken.read_bytes() == taken_before
+    assert any(" undo " in line and "job-001-2" in line for line in run_log(project))
+    assert repo.changed_paths() == []
+
+
+def test_the_first_slug_given_to_the_lock_counts_past_a_taken_name(
+        scratch, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves the lock that a run takes before its first job names the job file that rooster will
+    write, when an earlier job file already holds the plain name."""
+    project, _ = scratch
+    write_job_file(project.state_dir / LIST / "refactor" / "job-001.json", "done", None)
+    real_take = job_loop.take_lock
+    asked_for: list[str] = []
+
+    def recording_take(*args, **kwargs):
+        # keep the job file of each call, then take the lock as the run would
+        asked_for.append(Path(inspect.signature(real_take).bind(*args, **kwargs)
+                              .arguments["job_file"]).stem)
+        return real_take(*args, **kwargs)
+
+    monkeypatch.setattr(job_loop, "take_lock", recording_take)
+
+    run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert asked_for[0] == "job-001-2"
+
+
+def test_a_job_that_halts_without_raising_is_undone_and_refused(
+        scratch, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves a job that rooster halts without an exception, here by a step cap, is undone and
+    ends the run with its halt reason, and the lock is released."""
+    project, repo = scratch
+    real_build = job_loop.build_job_graph
+
+    def capped_build(*args, **kwargs):
+        # a graph that may take one step only halts after the planner
+        graph = real_build(*args, **kwargs)
+        graph.max_steps = 1
+        return graph
+
+    monkeypatch.setattr(job_loop, "build_job_graph", capped_build)
+
+    with pytest.raises(RefactorError, match="job-001 halted: stopped after 1 steps"):
+        run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert repo.changed_paths() == []
+    assert read_job_file(project.state_dir / LIST / "refactor" / "job-001.json")["status"] == "halted"
+    assert lock_is_gone(project)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from ratchet.audit.audit_graph import AuditError, build_audit_graph
 from ratchet.audit.settings import AuditSettings
 from ratchet.project import Config, Project
 from ratchet.refactor.problem_list import find_latest_problem_list, find_problem_lists
+from lock_files import FAKE_PID, lock_path, read_job_file
 from scripted_agents import ScriptedAgent
 from test_audit_graph import (  # noqa: F401
     NOT_BLIND,
@@ -94,7 +96,9 @@ def test_an_audit_is_refused_while_another_waits(audit_project: Project) -> None
     waiting_run(audit_project)
     _, maker = scripted(audit_project)
 
-    with pytest.raises(AuditError, match="--approve"):
+    from ratchet.graph_lock import LockError
+
+    with pytest.raises(LockError, match="Finish or discard it first"):
         start_audit(audit_project, agent_maker=maker, interactive=False)
 
 
@@ -397,3 +401,144 @@ def test_a_reaudit_with_a_clean_history_runs_the_blind_audit(audit_project: Proj
 
     assert done.outcome == "published"
     assert "Not blind" not in find_latest_problem_list(audit_project).text
+
+
+def audit_job_file(project: Project) -> Path:
+    """Returns the job file of the only audit that the project has started."""
+    (path,) = (project.state_dir / "audits").glob("*.json")
+    return path
+
+
+def lock_of(project: Project):
+    """Returns the project's graph lock, as read_lock gives it."""
+    from ratchet.graph_lock import read_lock
+
+    return read_lock(project)
+
+
+def test_a_waiting_audit_holds_the_lock_at_its_draft(audit_project: Project) -> None:
+    """Proves an audit that waits for the owner's decision on its draft keeps the lock, which
+    names the audit and the draft gate."""
+    run = waiting_run(audit_project)
+
+    lock = lock_of(audit_project)
+    assert (lock.graph, lock.job, lock.state, lock.gate) == ("audit", run.slug, "waiting", "draft")
+
+
+def test_approving_or_discarding_releases_the_lock(audit_project: Project) -> None:
+    """Proves settling a waiting audit either way removes the lock."""
+    waiting_run(audit_project)
+    settle_audit(audit_project, DISCARD)
+
+    assert not lock_path(audit_project).exists()
+
+    waiting_run(audit_project)
+    settle_audit(audit_project, APPROVE)
+
+    assert not lock_path(audit_project).exists()
+
+
+def test_ctrl_c_while_asking_the_questions_keeps_the_audit_waiting(audit_project: Project) -> None:
+    """Proves Ctrl-C at the owner's prompt leaves the audit waiting at the questions gate, with
+    the lock kept for it."""
+    cut_off_at_questions(audit_project)
+
+    lock = lock_of(audit_project)
+    assert (lock.graph, lock.state, lock.gate) == ("audit", "waiting", "questions")
+    job = read_job_file(audit_job_file(audit_project))
+    assert job["status"] == "waiting" and lock.job == job["slug"]
+
+
+def test_ctrl_c_inside_a_resumed_step_halts_the_audit(audit_project: Project) -> None:
+    """Proves Ctrl-C in a step after the owner answered the questions halts the audit, which
+    rooster last saved as waiting, and removes the lock."""
+    question = {"kind": "rules", "title": "Is rounding twice deliberate",
+                "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
+                "what_would_settle": "A word from the owner."}
+
+    def interrupt(prompt: str) -> dict:
+        raise KeyboardInterrupt
+
+    turns = default_turns(audit_project) | {
+        "auditor": [auditor_turn(audit_project, questions=[question])], "checker": [interrupt]}
+    agents = {name: ScriptedAgent(name, schema, turns.get(name, []))
+              for name, schema in ANSWERS.items()}
+
+    with pytest.raises(KeyboardInterrupt):
+        start_audit(audit_project, agent_maker=lambda *_: agents, interactive=True,
+                    ask=lambda prompt: "yes, it is deliberate", show=lambda line: None)
+
+    assert len(agents["checker"].prompts) == 1
+    assert read_job_file(audit_job_file(audit_project))["status"] == "halted"
+    assert not lock_path(audit_project).exists()
+
+
+def test_a_refused_settle_keeps_the_waiting_lock(audit_project: Project) -> None:
+    """Proves approving after HEAD moved is refused with the lock left waiting, and discarding
+    afterwards still releases it."""
+    waiting_run(audit_project)
+    lock_before = lock_path(audit_project).read_bytes()
+    (audit_project.root / "later.txt").write_text("later\n", encoding="utf-8")
+    for command in (["add", "-A"], ["commit", "-q", "-m", "later"]):
+        subprocess.run(["git", *command], cwd=audit_project.root, check=True, capture_output=True)
+
+    with pytest.raises(AuditError, match="HEAD has moved"):
+        settle_audit(audit_project, APPROVE)
+
+    assert lock_path(audit_project).read_bytes() == lock_before
+    assert settle_audit(audit_project, DISCARD).outcome == "discarded"
+    assert not lock_path(audit_project).exists()
+
+
+def test_an_audit_killed_mid_publish_does_not_lock_the_project(audit_project: Project) -> None:
+    """Proves an audit whose process died while it was settled, leaving the lock waiting and the
+    job running, is halted by the next audit, which says so and reaches its own draft."""
+    old = waiting_run(audit_project)
+    job_file = audit_job_file(audit_project)
+    job = read_job_file(job_file)
+    job_file.write_text(json.dumps(job | {"status": "running"}), encoding="utf-8")
+    lock = json.loads(lock_path(audit_project).read_text(encoding="utf-8"))
+    lock_path(audit_project).write_text(json.dumps(lock | {"pid": FAKE_PID}), encoding="utf-8")
+    _, maker = scripted(audit_project)
+    shown: list[str] = []
+
+    run = start_audit(audit_project, agent_maker=maker, interactive=False, show=shown.append)
+
+    assert (f"The last audit ({old.slug}) stopped without finishing. It was halted."
+            in shown)
+    assert read_job_file(job_file)["status"] == "halted"
+    assert run.outcome == "waiting" and run.slug != old.slug
+    assert lock_of(audit_project).job == run.slug
+
+
+def test_with_no_terminal_an_audit_goes_through_the_questions_unanswered(
+    audit_project: Project,
+) -> None:
+    """Proves an audit that raises a question and has no terminal to ask resumes past the
+    questions gate with no answers, and waits at its draft."""
+    question = {"kind": "rules", "title": "Is rounding twice deliberate",
+                "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
+                "what_would_settle": "A word from the owner."}
+    turns = default_turns(audit_project) | {
+        "auditor": [auditor_turn(audit_project, questions=[question])],
+        "checker": [checker_turn()]}
+    agents = {name: ScriptedAgent(name, schema, turns.get(name, []))
+              for name, schema in ANSWERS.items()}
+
+    run = start_audit(audit_project, agent_maker=lambda *_: agents, interactive=False)
+
+    assert run.outcome == "waiting" and lock_of(audit_project).gate == "draft"
+
+
+def test_an_audit_job_waiting_with_no_lock_refuses_a_new_audit(audit_project: Project) -> None:
+    """Proves a waiting audit job from before the lock existed still refuses a new audit."""
+    from ratchet.audit.audit_run import AFTER_DRAFT
+    from lock_files import write_job_file
+
+    write_job_file(audit_project.state_dir / "audits" / "audit-old.json", "waiting", AFTER_DRAFT)
+    _, maker = scripted(audit_project)
+
+    with pytest.raises(AuditError, match="audit-old is waiting for a decision"):
+        start_audit(audit_project, agent_maker=maker, interactive=False)
+
+    assert not lock_path(audit_project).exists()

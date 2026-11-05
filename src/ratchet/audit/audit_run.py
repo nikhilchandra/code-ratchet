@@ -2,7 +2,8 @@
 that may not start, start the graph's job, ask the owner the questions and the approval in a
 terminal when there is one, and settle a waiting audit by approving or discarding its draft.
 
-At most one audit waits at a time. An audit that is waiting for approval is settled by
+At most one graph runs at a time, through the lock of ratchet.graph_lock. An audit that waits at a
+gate keeps the lock. An audit that is waiting for approval is settled by
 settle_audit(), which a later `ratchet audit --approve` or `--discard` calls.
 
 An audit that does not wait deletes its copy of the code, whether it halted, finished, or was cut
@@ -39,6 +40,18 @@ from ratchet.audit.list_markdown import (
 )
 from ratchet.audit.settings import load_settings
 from ratchet.git import Repo
+from ratchet.graph_lock import (
+    AUDIT,
+    DRAFT_GATE,
+    QUESTIONS_GATE,
+    RUNNING,
+    free_job_slug,
+    halt_job_file,
+    hold_at_gate,
+    read_lock,
+    release_lock,
+    take_lock,
+)
 from ratchet.owner_terminal import (
     ask_questions,
     is_interactive,
@@ -139,8 +152,47 @@ def _head(project: Project) -> str:
     return Repo(project.root).run("rev-parse", "HEAD").strip()
 
 
+def _hold_at_gate(project: Project, job: Job) -> None:
+    """Marks the graph lock as waiting at the gate where a job stopped.
+
+    Args:
+        project: The project.
+        job: The job as the graph returned it. A job that is not waiting leaves the lock alone.
+    """
+    if job.status == JobStatus.WAITING:
+        gate = QUESTIONS_GATE if job.next_step == AFTER_QUESTIONS else DRAFT_GATE
+        hold_at_gate(project, gate)
+
+
+def _resume_job(
+    project: Project, graph: AgentGraph, job: Job, data: dict | None = None,
+    say: Callable[[str], None] = print,
+) -> Job:
+    """Takes the graph lock back for a waiting job, resumes it, and holds the lock again if the
+    job waits at the next gate.
+
+    Args:
+        project: The project.
+        graph: The audit graph that holds the job.
+        job: The job that waits.
+        data: The decisions made at the gate, or None for none.
+        say: The function that shows a line saying that an earlier job was rolled back.
+
+    Returns:
+        The job after it has been resumed.
+
+    Raises:
+        LockError: Another graph holds the lock.
+    """
+    take_lock(project, graph=AUDIT, job=job.slug, job_file=graph.state_dir / f"{job.slug}.json",
+              resuming=True, say=say)
+    resumed = graph.resume(job.slug, data)
+    _hold_at_gate(project, resumed)
+    return resumed
+
+
 def _answer_questions(
-    graph: AgentGraph, job: Job, interactive: bool, ask: Callable[[str], str],
+    project: Project, graph: AgentGraph, job: Job, interactive: bool, ask: Callable[[str], str],
     show: Callable[[str], None],
 ) -> Job:
     """Resumes a job that waits at the questions gate.
@@ -148,6 +200,7 @@ def _answer_questions(
     The owner's answers are passed along when there is a terminal and none when there is not.
 
     Args:
+        project: The project that the job audits.
         graph: The audit graph that holds the job.
         job: The job that waits at the questions gate.
         interactive: Whether a terminal is available to ask the owner.
@@ -158,10 +211,11 @@ def _answer_questions(
         The job after it has been resumed.
     """
     if not interactive:
-        return graph.resume(job.slug)
+        return _resume_job(project, graph, job, say=show)
     questions = [DraftQuestion(row["id"], row["title"], row["text"])
                  for row in job.data.get("questions", [])]
-    return graph.resume(job.slug, {"answers": ask_questions(questions, ask, show)})
+    answers = ask_questions(questions, ask, show)
+    return _resume_job(project, graph, job, {"answers": answers}, show)
 
 
 def _approve_draft(
@@ -191,7 +245,7 @@ def _approve_draft(
         _load_draft(folder / "draft.json"), folder / "draft.md", done_ids(project),
         lambda: _head(project) != job.data["head"], ask, show, edit,
     )
-    return graph.resume(job.slug, decision) if decision else job
+    return _resume_job(project, graph, job, decision, show) if decision else job
 
 
 def _drop_copy(copy: Path) -> None:
@@ -249,12 +303,32 @@ def _new_slug(graph: AgentGraph, base: str) -> str:
         graph: The audit graph.
         base: The name asked for. A counter is added when a job of that name exists.
     """
-    if not (graph.state_dir / f"{base}.json").exists():
-        return base
-    n = 2
-    while (graph.state_dir / f"{base}-{n}.json").exists():
-        n += 1
-    return f"{base}-{n}"
+    return free_job_slug(graph.state_dir, base)
+
+
+def _end_audit(project: Project, graph: AgentGraph, slug: str) -> None:
+    """Closes an audit run: halts a job that was cut off, deletes its copy unless it waits, and
+    releases the graph lock unless the job waits.
+
+    A job cut off in a step, such as by an error or Ctrl-C, is saved as running, or as waiting
+    when it was resumed from a gate, in which case this run's lock still says running. Ctrl-C at
+    the owner's prompt leaves the job waiting and the lock waiting, so both are kept.
+
+    Args:
+        project: The project.
+        graph: The audit graph.
+        slug: The job's name. A job that was never saved holds nothing.
+    """
+    job_file = graph.state_dir / f"{slug}.json"
+    held = read_lock(project)
+    cut_off = held is not None and (held.job, held.state) == (slug, RUNNING)
+    status = json.loads(job_file.read_text(encoding="utf-8"))["status"] if job_file.is_file() else None
+    if status == JobStatus.RUNNING or (status == JobStatus.WAITING and cut_off):
+        halt_job_file(job_file)
+        status = JobStatus.HALTED
+    _clean_up(graph, slug)
+    if status != JobStatus.WAITING:
+        release_lock(project)
 
 
 def start_audit(
@@ -291,6 +365,7 @@ def start_audit(
         The run. Its outcome is "waiting" when the owner has yet to decide on the draft.
 
     Raises:
+        LockError: Another graph is running, or an audit waits at a gate and holds the lock.
         AuditError: The audit may not start or it halted. An audit may not start while another
             waits, while rules.md is the template, or before `ratchet init`.
         ProjectError: The [audit] section of config.toml is wrong.
@@ -302,25 +377,27 @@ def start_audit(
         interactive = is_interactive()
     settings = load_settings(project)
     graph = build_audit_graph(project, settings, agent_maker, fresh)
-    waiting = waiting_audit(graph)
-    if waiting:
-        raise AuditError(f"{waiting.slug} is waiting for a decision. Run `ratchet audit --approve` "
-                         "or `ratchet audit --discard` first.")
-    if is_template(project.rules):
-        raise AuditError("rules.md still has the template marker on its first line. Answer the "
-                         "essential questions, then delete that line.")
-    if not has_records(project.root):
-        raise AuditError("this project has not been set up yet. Run `ratchet init` first.")
-
-    # delete the copies of earlier halted or interrupted audits, then name this audit's job
-    _sweep_copies(graph)
     slug = _new_slug(graph, datetime.now().strftime("audit-%Y%m%d-%Hh%Mm"))
+    take_lock(project, graph=AUDIT, job=slug, job_file=graph.state_dir / f"{slug}.json", say=show)
     try:
+        waiting = waiting_audit(graph)
+        if waiting:
+            raise AuditError(f"{waiting.slug} is waiting for a decision. Run `ratchet audit "
+                             "--approve` or `ratchet audit --discard` first.")
+        if is_template(project.rules):
+            raise AuditError("rules.md still has the template marker on its first line. Answer "
+                             "the essential questions, then delete that line.")
+        if not has_records(project.root):
+            raise AuditError("this project has not been set up yet. Run `ratchet init` first.")
+
+        # delete the copies of earlier halted or interrupted audits
+        _sweep_copies(graph)
         job = graph.start(prompt, slug=slug)
+        _hold_at_gate(project, job)
         if job.data.get("ratchet_commit", ""):
             show(NOT_BLIND_NOTE.format(commit=job.data["ratchet_commit"]))
         if job.status == JobStatus.WAITING and job.next_step == AFTER_QUESTIONS:
-            job = _answer_questions(graph, job, interactive, ask, show)
+            job = _answer_questions(project, graph, job, interactive, ask, show)
         if job.status == JobStatus.WAITING and job.next_step == AFTER_DRAFT:
             job = _approve_draft(project, graph, job, interactive, ask, show, edit)
         run = _finish(job)
@@ -328,8 +405,9 @@ def start_audit(
             run.draft_path = str(graph.state_dir / job.slug / "draft.md")
         return run
     finally:
-        # delete the copy unless the job waits, including one cut off mid-step
-        _clean_up(graph, slug)
+        # halt a job cut off mid-step, delete its copy unless it waits, and release the lock
+        # unless it waits
+        _end_audit(project, graph, slug)
 
 
 def settle_audit(
@@ -348,6 +426,7 @@ def settle_audit(
         draft_path set. The owner reads the draft and approves again.
 
     Raises:
+        LockError: The waiting audit cannot take its lock back, because another graph holds it.
         AuditError: No audit waits, the draft cannot be published, HEAD has moved since the audit
             started so that the list would be out of date, or the records repository is missing
             or damaged.
@@ -366,10 +445,11 @@ def settle_audit(
     try:
         if job.next_step == AFTER_QUESTIONS and decision == APPROVE:
             # an audit cut off at the questions gate goes on with no answers and stops at the draft
-            run = _finish(graph.resume(job.slug))
+            run = _finish(_resume_job(project, graph, job))
             run.draft_path = str(graph.state_dir / job.slug / "draft.md")
             return run
-        return _finish(graph.resume(job.slug, {"decision": decision}))
+        return _finish(_resume_job(project, graph, job, {"decision": decision}))
     finally:
-        # delete the copy unless the job waits, including one cut off mid-step
-        _clean_up(graph, job.slug)
+        # halt a job cut off mid-step, delete its copy unless it waits, and release the lock
+        # unless it waits
+        _end_audit(project, graph, job.slug)
