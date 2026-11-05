@@ -36,8 +36,8 @@ AgentMaker = Callable[[Project, RefactorSettings, str, Path], dict[str, Agent]]
 # The width of the time that starts each console line, such as "14:25  ".
 TIME_WIDTH = 7
 
-# The number of commits since a list was published from which a run suggests a re-audit.
-REAUDIT_COMMITS = 10
+# The number of jobs committed on a list from which a run suggests a re-audit.
+REAUDIT_JOBS = 3
 
 
 @dataclass
@@ -54,6 +54,8 @@ class RefactorRun:
     records_commit: str = ""
     # The commits that landed in the project since the problem list was published.
     commits_since_list: int = 0
+    # The jobs committed on the problem list, by this run and every earlier one.
+    jobs_committed_on_list: int = 0
 
 
 def run_refactor(
@@ -83,7 +85,7 @@ def run_refactor(
     Returns:
         The jobs that ran, why the run ended, what it spent, the short hash of the records
         commit that took the ledger ("" when .ratchet is not its own repository), and the number
-        of commits since the problem list was published.
+        of commits since the problem list was published and the number of jobs committed on it.
 
     Raises:
         ProjectError: The .ratchet folder or its problem list is wrong.
@@ -116,13 +118,19 @@ def run_refactor(
         log(*format_step_lines(job.slug, step, text, width=width, indent=TIME_WIDTH, **extras))
 
     def end_run(run: RefactorRun) -> RefactorRun:
-        """Commits the ledger to the records repository, then says how old the list is."""
+        """Commits the ledger to the records repository, then says how old the list is.
+
+        The last line suggests `ratchet audit` once the ledger holds REAUDIT_JOBS or more
+        committed jobs. The ledger spans every run on the list, and abandoned jobs do not count.
+        """
         run.records_commit = save_records(run)
         run.commits_since_list = commits_since(
             repo, publish_time(project, problem_list.name, problem_list.created))
+        # count the committed jobs in the ledger, which holds earlier runs as well
+        run.jobs_committed_on_list = sum(1 for job in ledger.jobs if job.outcome == JobOutcome.COMMITTED)
         text = f"{count_of(run.commits_since_list, 'commit')} since {problem_list.name} was published"
-        if run.commits_since_list >= REAUDIT_COMMITS:
-            text += ", consider `ratchet audit`"
+        if run.jobs_committed_on_list >= REAUDIT_JOBS:
+            text += f", {count_of(run.jobs_committed_on_list, 'job')} committed on it, consider `ratchet audit`"
         log(text)
         return run
 

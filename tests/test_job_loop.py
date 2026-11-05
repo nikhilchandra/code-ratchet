@@ -275,25 +275,50 @@ def test_a_run_with_no_records_repository_makes_no_records_commit(scratch, run) 
 
 def test_a_run_counts_the_commits_since_the_list_was_published(scratch, run) -> None:
     """Proves the last line counts the commits since the list was published, with no suggestion
-    below the set number."""
+    below the set number of committed jobs."""
     result, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
 
     assert result.commits_since_list == 2
+    assert result.jobs_committed_on_list == 1
     assert lines[-1].endswith(f"2 commits since {LIST} was published")
+    assert "consider" not in lines[-1]
 
 
-def test_a_run_suggests_a_re_audit_at_the_set_number_of_commits(
+def test_a_run_suggests_an_audit_at_the_set_number_of_committed_jobs(
         scratch, run, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Proves the suggestion appears when the count equals the set number, and not when the set
-    number is one higher."""
-    monkeypatch.setattr(job_loop, "REAUDIT_COMMITS", 3)
+    """Proves the suggestion appears once the list's ledger holds the set number of committed
+    jobs, counting the jobs of earlier runs, and not before."""
+    monkeypatch.setattr(job_loop, "REAUDIT_JOBS", 2)
     _, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
     assert lines[-1].endswith(f"2 commits since {LIST} was published")
+    assert "consider" not in lines[-1]
 
-    _, _, lines = run([plan(problems=["P2"], completes=["P2"])], [edit("a + b", "b + a")],
-                      [review("accept")])
+    result, _, lines = run([plan(problems=["P2"], completes=["P2"])], [edit("a + b", "b + a")],
+                           [review("accept")])
 
-    assert lines[-1].endswith(f"3 commits since {LIST} was published, consider `ratchet audit`")
+    assert lines[-1].endswith(f"3 commits since {LIST} was published, 2 jobs committed on it, "
+                              "consider `ratchet audit`")
+    assert result.jobs_committed_on_list == 2
+
+
+def test_an_abandoned_job_does_not_count_toward_the_audit_suggestion(
+        scratch, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves only committed jobs count toward the suggestion, so an abandoned job leaves it out."""
+    monkeypatch.setattr(job_loop, "REAUDIT_JOBS", 2)
+
+    result, _, lines = run(
+        [plan()] * 3 + [plan(problems=["P2"], completes=["P2"])], [edit("a + b", "b + a")],
+        [review("accept")], super_planner=[revise("rename it")] * 3 + [approve()], max_jobs=2)
+
+    assert [record.outcome for record in result.jobs] == [JobOutcome.ABANDONED,
+                                                          JobOutcome.COMMITTED]
+    assert result.jobs_committed_on_list == 1
+    assert "consider" not in lines[-1]
+
+
+def test_the_audit_suggestion_waits_for_three_committed_jobs() -> None:
+    """Proves a run suggests a re-audit from three committed jobs on the list."""
+    assert job_loop.REAUDIT_JOBS == 3
 
 
 def test_commits_since_counts_only_the_commits_after_the_time(

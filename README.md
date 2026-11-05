@@ -11,9 +11,14 @@ tests, the checks between agents, and git.
 ## Commands
 
 - **`ratchet refactor`** improves a project's structure while keeping its behavior the same.
-  A planner picks the next step from the project's problem list, an implementer makes the
-  change, the test suite and code checks guard it, and a reviewer judges it. A step that
-  passes is committed, and one that fails is undone.
+  A planner picks the next step from the project's problem list. A super-planner checks the
+  plan against `rules.md` and the pathway map of the functions it changes, and may ask for
+  tests. A test writer writes those tests, which must pass on the current code and then stay
+  frozen. An implementer makes the change. A map check sends any function the plan did not
+  name back to the super-planner, and, when pytest-cov loads, a coverage check sends back any
+  line the change adds to src that no test runs. The test suite and code checks guard the
+  change, and a reviewer judges it. A step that passes is committed, and one that fails is
+  undone.
 - **`ratchet init`** sets up a project: it writes `.ratchet/config.toml` and `.ratchet/rules.md`
   from templates and makes `.ratchet` its own repository.
 - **`ratchet audit -p "..."`** writes the problem list that `refactor` works through. Agents
@@ -181,7 +186,24 @@ ratchet refactor --focus P19              # ask the planner to take P19 first
 The run stops when the planner finds nothing left, after `--max-jobs` jobs, or on any error.
 Each job's prompts, diffs, test logs and reports are kept in the list's state folder. When the
 run ends, its ledger is committed in the records repository, and ratchet prints how many commits
-have landed since the list was published, suggesting `ratchet audit` after ten or more.
+have landed since the list was published. Once three or more jobs have been committed on the
+list, across every run on it, ratchet also suggests `ratchet audit`.
+
+**Settings.** The `[refactor]` sections of `config.toml`:
+
+```toml
+[refactor.caps]
+rejections = 3                  # rejections in a row after which a job is undone
+test_failures = 3               # test failures after which a job is undone
+sendbacks = 2                   # blocked or replanned jobs after which a problem is set aside
+revisions = 2                   # sendbacks from the super-planner to the planner
+test_rewrites = 2               # refused test writes sent back to the test writer
+
+[refactor.super_planner]        # opus, $3, 1800 s
+[refactor.test_writer]          # sonnet, $5, 3600 s
+```
+
+The next sendback past `revisions` or `test_rewrites` abandons the job, and the run goes on.
 
 ## Install
 
