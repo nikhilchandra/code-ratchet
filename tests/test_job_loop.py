@@ -150,3 +150,14 @@ def test_a_failing_suite_is_refused(scratch, run) -> None:
 
     with pytest.raises(RefactorError, match="the suite does not pass before the run starts"):
         run([plan()])
+
+
+def test_a_halted_job_leaves_job_started_in_the_ledger_file(scratch, run) -> None:
+    """Proves the ledger on disk holds a job_started event for a job that halted."""
+    project, _ = scratch
+
+    with pytest.raises(NoAnswerError, match="the reviewer gave no answer"):
+        run([plan()], [edit(*GOOD)], [lambda prompt: None])
+
+    events = ledger_of(project).problems["P1"].events
+    assert [event.kind for event in events] == ["job_started"]

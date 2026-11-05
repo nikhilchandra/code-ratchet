@@ -13,7 +13,7 @@ from ratchet.project import Project
 from ratchet.pytest_runner import run_pytest
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review
 from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
-from ratchet.refactor.ledger import Ledger, record_job
+from ratchet.refactor.ledger import Ledger, ProblemEvent, ProblemRecord, load_ledger, record_job, save_ledger
 from ratchet.refactor.problem_list import find_latest_problem_list
 from ratchet.refactor.settings import Caps, RefactorSettings
 from rooster import Agent, JobStatus
@@ -54,8 +54,8 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
 
         graph = build_job_graph(project, RefactorSettings(), agents, baseline,
                                 project.state_dir / "list",
-                                ledger or Ledger(problem_list=problem_list.name), problem_list,
-                                report)
+                                ledger or Ledger(problem_list=problem_list.name),
+                                project.state_dir / "list" / "ledger.json", problem_list, report)
         return graph.start(focus, slug="job"), agents, graph
 
     return run
@@ -275,6 +275,53 @@ def test_the_planner_sees_the_statuses_and_only_the_last_ten_jobs(scratch, run_j
     assert "## The last 10 jobs" in prompt
     assert '"step 2"' in prompt and '"step 1"' not in prompt
     assert "cost_usd" not in prompt and "A request" not in prompt
+
+
+def test_a_halted_job_leaves_job_started_in_the_saved_ledger(scratch, run_job) -> None:
+    """Proves the plan step records job_started for each problem and saves the ledger, so a job
+    that halts afterward still leaves a trace."""
+    project, _ = scratch
+    ledger = Ledger(problem_list=find_latest_problem_list(project).name)
+
+    with pytest.raises(NoAnswerError):
+        run_job([plan()], [lambda prompt: None], ledger=ledger)
+
+    saved = load_ledger(project.state_dir / "list" / "ledger.json", ledger.problem_list)
+    event = saved.problems["P1"].events[0]
+    assert (event.kind, event.by, event.job) == ("job_started", "J01", "J01")
+    assert event.note == "rename the comment in add"
+    assert saved.status_of("P1") == "open"
+
+
+def test_a_refused_plan_records_no_job_started(scratch, run_job) -> None:
+    """Proves a plan that the ledger refuses leaves no event and no saved ledger."""
+    project, _ = scratch
+
+    with pytest.raises(RefactorError):
+        run_job([plan(problems=["P9"])])
+
+    assert not (project.state_dir / "list" / "ledger.json").exists()
+
+
+def test_the_planner_sees_a_reopen_and_only_the_last_three_job_events(scratch, run_job) -> None:
+    """Proves the prompt shows a problem's reopened event and its last three job events, and
+    leaves out older job events."""
+    project, _ = scratch
+    ledger = Ledger(problem_list=find_latest_problem_list(project).name)
+    events = [ProblemEvent(when="2026-11-01 09:00", kind="reopened", by="owner",
+                           note="strip repeats the vote")]
+    for number in range(1, 5):
+        events.append(ProblemEvent(when=f"2026-11-02 1{number}:00", kind="job_started",
+                                   by=f"J0{number}", job=f"J0{number}", note=f"try {number}"))
+    ledger.problems["P1"] = ProblemRecord(events=events)
+    save_ledger(ledger, project.state_dir / ledger.problem_list / "ledger.json")
+
+    _, agents, _ = run_job([plan(stop=True)], ledger=ledger)
+
+    prompt = agents["planner"].prompts[0]
+    assert "reopened by owner: strip repeats the vote" in prompt
+    assert "job_started by J04: try 4" in prompt and "try 2" in prompt
+    assert "try 1" not in prompt
 
 
 def test_an_empty_ledger_says_everything_is_open_and_carries_the_focus(run_job) -> None:

@@ -8,6 +8,7 @@ from ratchet.refactor.agent_answers import Plan
 from ratchet.refactor.job_graph import JobOutcome
 from ratchet.refactor.ledger import (
     Ledger,
+    ProblemEvent,
     ProblemStatus,
     load_ledger,
     record_job,
@@ -89,3 +90,71 @@ def test_the_ledger_comes_back_as_it_was_saved(tmp_path: Path) -> None:
 
     assert load_ledger(path, LIST) == ledger
 
+
+
+def kinds(ledger: Ledger, problem_id: str) -> list[str]:
+    """Returns the kinds of the events recorded for a problem, in order."""
+    return [event.kind for event in ledger.problems[problem_id].events]
+
+
+def test_an_old_ledger_without_events_or_carried_from_loads(tmp_path: Path) -> None:
+    """Proves a ledger saved before events existed still loads, with empty events."""
+    path = tmp_path / "ledger.json"
+    path.write_text(
+        '{"problem_list": "' + LIST + '", "jobs": [], '
+        '"problems": {"P1": {"status": "done", "sendbacks": 1}}}',
+        encoding="utf-8",
+    )
+
+    ledger = load_ledger(path, LIST)
+
+    assert ledger.status_of("P1") == ProblemStatus.DONE
+    assert ledger.problems["P1"].carried_from == ""
+    assert ledger.problems["P1"].events == []
+
+
+def test_events_survive_a_save_and_load(tmp_path: Path) -> None:
+    """Proves recorded events are written to the file and read back."""
+    ledger = Ledger(problem_list=LIST)
+    record_job(ledger, finished(JobOutcome.COMMITTED), "job-001", 1.0, Caps())
+    path = tmp_path / "ledger.json"
+
+    save_ledger(ledger, path)
+
+    assert load_ledger(path, LIST).problems["P1"].events == ledger.problems["P1"].events
+    assert isinstance(ledger.problems["P1"].events[0], ProblemEvent)
+
+
+def test_a_committed_job_records_done_or_committed_once_for_each_problem() -> None:
+    """Proves a completed problem gets a done event, and an advanced one a committed event."""
+    ledger = Ledger(problem_list=LIST)
+
+    record_job(ledger, finished(JobOutcome.COMMITTED, problems=["P1", "P2"], completes=["P1"]),
+               "job-001", 1.0, Caps())
+
+    assert kinds(ledger, "P1") == ["done"]
+    assert kinds(ledger, "P2") == ["committed"]
+    event = ledger.problems["P1"].events[0]
+    assert (event.by, event.job, event.commit) == ("J01", "J01", "abc1234")
+
+
+def test_an_abandoned_job_records_abandoned() -> None:
+    """Proves an abandoned job gives each of its problems one abandoned event with the reason."""
+    ledger = Ledger(problem_list=LIST)
+
+    record_job(ledger, finished(JobOutcome.ABANDONED, problems=["P1", "P2"]), "job-001", 1.0, Caps())
+
+    assert kinds(ledger, "P1") == kinds(ledger, "P2") == ["abandoned"]
+    assert ledger.problems["P1"].events[0].note == "it was abandoned"
+
+
+def test_a_sent_back_job_records_sent_back_and_abandoned_at_the_cap() -> None:
+    """Proves sent_back is recorded each time, and abandoned as well when the cap is reached."""
+    ledger = Ledger(problem_list=LIST)
+
+    record_job(ledger, finished(JobOutcome.BLOCKED), "job-001", 1.0, Caps())
+    assert kinds(ledger, "P1") == ["sent_back"]
+
+    record_job(ledger, finished(JobOutcome.REPLAN), "job-002", 1.0, Caps())
+    assert kinds(ledger, "P1") == ["sent_back", "sent_back", "abandoned"]
+    assert ledger.problems["P1"].events[-1].job == "J02"

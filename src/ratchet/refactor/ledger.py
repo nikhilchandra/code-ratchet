@@ -15,7 +15,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from ratchet.refactor.agent_answers import Plan
-from ratchet.refactor.job_graph import JobOutcome
+from ratchet.refactor.job_outcome import JobOutcome
 from ratchet.refactor.settings import Caps
 
 class ProblemStatus(StrEnum):
@@ -27,11 +27,30 @@ class ProblemStatus(StrEnum):
     ABANDONED = "abandoned"
 
 
+class ProblemEvent(BaseModel):
+    """Holds one thing that happened to a problem, such as a job finishing it."""
+
+    # When it happened, as "2026-11-02 14:05".
+    when: str
+    # One of opened, carried, job_started, committed, done, sent_back, abandoned or reopened.
+    kind: str
+    # A job id, or "audit", "re-audit" or "owner".
+    by: str
+    job: str = ""
+    commit: str = ""
+    # The name of the problem list that the event came from, when it is not this one.
+    list: str = ""
+    note: str = ""
+
+
 class ProblemRecord(BaseModel):
-    """Holds one problem's status, and how many jobs on it came back blocked or replanned."""
+    """Holds one problem's status, its sendbacks, where it was carried from, and its events."""
 
     status: ProblemStatus = ProblemStatus.OPEN
     sendbacks: int = 0
+    # The older list and problem it was carried from, such as "problems-20261102-14h05m P7", or "".
+    carried_from: str = ""
+    events: list[ProblemEvent] = []
 
 
 class JobRecord(BaseModel):
@@ -128,6 +147,11 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
     aside every problem it worked on. A blocked or replanned job counts a sendback against each
     of its problems, and a problem that reaches the cap on sendbacks is set aside.
 
+    Each problem the job worked on also gets events. A committed job gives a done event for a
+    problem it completes and a committed event for the others. An abandoned job gives an
+    abandoned event. A blocked or replanned job gives a sent_back event, and an abandoned event
+    as well when the problem reaches the cap.
+
     Args:
         ledger: The ledger to add to.
         job_data: The finished job's data, which holds its plan and its outcome.
@@ -158,12 +182,25 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
     ledger.jobs.append(record)
     for problem_id in plan.problems:
         problem = ledger.problems.setdefault(problem_id, ProblemRecord())
-        if outcome == JobOutcome.COMMITTED and problem_id in plan.completes:
-            problem.status = ProblemStatus.DONE
+        kinds = []
+        if outcome == JobOutcome.COMMITTED:
+            if problem_id in plan.completes:
+                problem.status = ProblemStatus.DONE
+                kinds.append("done")
+            else:
+                kinds.append("committed")
         elif outcome == JobOutcome.ABANDONED:
             problem.status = ProblemStatus.ABANDONED
+            kinds.append("abandoned")
         elif outcome in (JobOutcome.BLOCKED, JobOutcome.REPLAN):
             problem.sendbacks += 1
+            kinds.append("sent_back")
             if problem.sendbacks >= caps.sendbacks:
                 problem.status = ProblemStatus.ABANDONED
+                kinds.append("abandoned")
+        # record one event for each kind
+        for kind in kinds:
+            problem.events.append(ProblemEvent(when=record.ended, kind=kind, by=record.id,
+                                               job=record.id, commit=record.commit,
+                                               note=record.reason))
     return record

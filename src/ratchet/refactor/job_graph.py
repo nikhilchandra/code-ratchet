@@ -21,19 +21,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from enum import StrEnum
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from rooster import Agent, AgentGraph, Command, Job, Tool
 
 from ratchet.agent_calls import NoAnswerError, ask
 from ratchet.git import Repo
+from ratchet.problem_history import problem_history
 from ratchet.project import Project
+from ratchet.records import records_log
 from ratchet.pytest_runner import Outcome, find_regressions, format_failure_report, run_pytest
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review, Status, Verdict
 from ratchet.refactor.agent_profiles import Role, write_profile
 from ratchet.refactor.comment_fixes import apply_comment_fixes
+from ratchet.refactor.job_outcome import JobOutcome
+from ratchet.refactor.ledger import Ledger, ProblemEvent, ProblemRecord, save_ledger
 from ratchet.refactor.problem_list import ProblemList
 from ratchet.refactor.progress_lines import count_of, name_tests
 from ratchet.refactor.review_reports import (
@@ -44,12 +47,14 @@ from ratchet.refactor.review_reports import (
 from ratchet.refactor.rule_checks import check_rules, snapshot_ratchet_files
 from ratchet.refactor.settings import COMMAND, RefactorSettings
 
-# ledger.py imports JobOutcome from this module, so Ledger is imported here only for type checkers
-if TYPE_CHECKING:
-    from ratchet.refactor.ledger import Ledger
-
 # How many of the latest jobs the planner sees.
 RECENT_JOBS = 10
+
+# How many of a problem's latest job events the planner sees.
+RECENT_EVENTS = 3
+
+# The kinds of event that come from a job, of which the planner sees only the latest.
+JOB_EVENT_KINDS = ("job_started", "committed", "done", "sent_back", "abandoned")
 
 
 # A function that shows what one step of a job did. It takes the job, the step's name and what
@@ -65,19 +70,6 @@ def _report_nothing(job: Job, step: str, text: str, **extras: object) -> None:
 class RefactorError(RuntimeError):
     """Signals that a refactor run cannot go on, such as a refused plan, a dirty working tree, a
     suite that fails before the run, or a halted job."""
-
-
-class JobOutcome(StrEnum):
-    """Names how a refactor job ended."""
-
-    # The planner found nothing left to plan.
-    STOPPED = "stopped"
-    COMMITTED = "committed"
-    # The implementer could not carry out the plan, or the reviewer found the fault in the plan.
-    BLOCKED = "blocked"
-    REPLAN = "replan"
-    # The step reached a cap on rejections or test failures.
-    ABANDONED = "abandoned"
 
 
 def make_agents(
@@ -127,11 +119,31 @@ def make_agents(
     return agents
 
 
-def _format_planner_prompt(job: Job, ledger: Ledger, problems_file: str) -> str:
-    """Returns the planner's prompt: the status of every touched problem, the latest jobs, and
-    any request from the person running ratchet.
+def _format_event(event: ProblemEvent, current_list: str) -> str:
+    """Returns one problem event as a line, such as "2026-11-02 16:20 committed by J03: note".
 
     Args:
+        event: The event.
+        current_list: The name of the list the planner works on, which an event from that list
+            does not name.
+
+    Returns:
+        The line, which names the event's list when it is an older one.
+    """
+    where = f" in {event.list}" if event.list and event.list != current_list else ""
+    note = f": {event.note}" if event.note else ""
+    return f"{event.when} {event.kind} by {event.by}{where}{note}"
+
+
+def _format_planner_prompt(project: Project, job: Job, ledger: Ledger, problems_file: str) -> str:
+    """Returns the planner's prompt: the status and history of every touched problem, the latest
+    jobs, the records log, and any request from the person running ratchet.
+
+    A problem's history shows its carried and reopened events from every list it passed
+    through, and its last few job events.
+
+    Args:
+        project: The project, as read from its .ratchet folder.
         job: The job, whose prompt is a problem the person asks to be planned next, such as
             "P19", or "".
         ledger: The ledger of the problem list.
@@ -150,6 +162,10 @@ def _format_planner_prompt(job: Job, ledger: Ledger, problems_file: str) -> str:
         times = "time" if problem.sendbacks == 1 else "times"
         sent_back = f", sent back {problem.sendbacks} {times}" if problem.sendbacks else ""
         lines.append(f"- {problem_id}: {problem.status}{sent_back}")
+        events = problem_history(project, ledger.problem_list, problem_id)
+        shown = [event for event in events if event.kind in ("carried", "reopened")]
+        shown += [event for event in events if event.kind in JOB_EVENT_KINDS][-RECENT_EVENTS:]
+        lines += [f"  - {_format_event(event, ledger.problem_list)}" for event in sorted(shown, key=events.index)]
     recent = ledger.jobs[-RECENT_JOBS:]
     lines += ["", f"## The last {len(recent)} jobs", ""]
     if recent:
@@ -157,6 +173,10 @@ def _format_planner_prompt(job: Job, ledger: Ledger, problems_file: str) -> str:
         lines += ["```json", json.dumps(shown, indent=2), "```"]
     else:
         lines.append("None yet.")
+    commits = records_log(project.root)
+    if commits:
+        lines += ["", "## The records log", "", "The latest commits to the .ratchet records:", ""]
+        lines += [f"- {commit}" for commit in commits]
     if job.prompt:
         lines += ["", "# A request from the person running ratchet", "",
                   f"Plan a step for {job.prompt} next, if the rules for ordering allow it."]
@@ -212,6 +232,7 @@ def build_job_graph(
     baseline: dict[str, Outcome],
     folder: Path,
     ledger: Ledger,
+    ledger_path: Path,
     problem_list: ProblemList,
     report: StepReport = _report_nothing,
 ) -> AgentGraph:
@@ -231,7 +252,10 @@ def build_job_graph(
             compared with.
         folder: The folder that the graph keeps its jobs in, under a folder named "refactor".
         ledger: The ledger of the problem list, which the planner's prompt is made from. A
-            plan that the ledger refuses halts the job before any code changes.
+            plan that the ledger refuses halts the job before any code changes. A plan that
+            passes gives each of its problems a job_started event.
+        ledger_path: The ledger's file, which the plan step saves right after it records
+            job_started.
         problem_list: The problem list that the jobs work on.
         report: The function that shows what each step did, as StepReport describes.
 
@@ -284,7 +308,7 @@ def build_job_graph(
 
     @graph.step("plan", next=("implement", None))
     def plan(job: Job) -> str | None:
-        prompt = _format_planner_prompt(job, ledger, problem_list.relative_path)
+        prompt = _format_planner_prompt(project, job, ledger, problem_list.relative_path)
         reply = ask(planner, prompt, job_folder(job))
         answer, cost = reply.data, reply.cost_usd
         job.data.update(plan=answer.model_dump(mode="json", by_alias=True), attempt=0,
@@ -300,6 +324,15 @@ def build_job_graph(
         if refusal:
             report(job, "plan", f"refused: {refusal}")
             raise RefactorError(f"the plan was refused: {refusal}")
+
+        # record job_started for each of the plan's problems and save the ledger
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        job_id = f"J{len(ledger.jobs) + 1:02d}"
+        for problem_id in answer.problems:
+            problem = ledger.problems.setdefault(problem_id, ProblemRecord())
+            problem.events.append(ProblemEvent(when=now, kind="job_started", by=job_id,
+                                               job=job_id, note=answer.summary))
+        save_ledger(ledger, ledger_path)
         return "implement"
 
     @graph.step("implement", next=("check-rules", "undo"))

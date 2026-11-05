@@ -122,7 +122,7 @@ def run_refactor(
     ledger = load_ledger(ledger_path, problem_list.name)
     agents = agent_maker(project, settings, problem_list.relative_path, folder)
     graph = build_job_graph(project, settings, agents, baseline.outcomes, folder, ledger,
-                            problem_list, report=report)
+                            ledger_path, problem_list, report=report)
 
     run = RefactorRun()
     for number in range(max_jobs):

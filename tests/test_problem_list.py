@@ -8,7 +8,7 @@ import pytest
 
 from ratchet.git import Repo
 from ratchet.project import Project, ProjectError
-from ratchet.refactor.problem_list import find_latest_problem_list
+from ratchet.refactor.problem_list import find_latest_problem_list, highest_problem_id, split_entries
 
 
 def write(project: Project, name: str, text: str = "## P1. Something\n") -> None:
@@ -77,3 +77,106 @@ def test_an_empty_list_is_refused(scratch: tuple[Project, Repo]) -> None:
 
     with pytest.raises(ProjectError, match="problems-20261027-08h05m.md is empty"):
         find_latest_problem_list(project)
+
+
+HAND_WRITTEN = """# Problems
+
+#### P3. First
+
+Waits on P9.
+
+## P4 Second
+"""
+
+AUDIT_WRITTEN = """# Problems
+
+## Open
+
+### P7. Strip handling written twice
+
+Status: reopened
+Sources: L1, R P7
+Grade: inferred (Breaks: the parts rule)
+Subject: views.strip
+Carried from: problems-20261102-14h05m P7
+After: P3
+
+The vote is repeated.
+
+#### Done when
+
+- one copy remains
+
+### P8. Second
+
+## Questions for the owner (parked)
+
+### Q2. Is the tax rounding deliberate?
+
+Answer:
+
+## Dropped
+
+### D1. A claim that was false
+
+## Bugs noticed
+"""
+
+
+def test_a_hand_written_list_gives_entries_without_fields() -> None:
+    """Proves headings at any depth are entries, with the nearest plain heading as the section."""
+    entries = split_entries(HAND_WRITTEN)
+
+    assert [entry.id for entry in entries] == ["P3", "P4"]
+    assert entries[0].title == "First"
+    assert entries[0].section == "Problems"
+    assert entries[0].fields == {}
+    assert "Waits on P9." in entries[0].text
+    assert "Second" not in entries[0].text
+
+
+def test_an_audit_list_gives_fields_and_sections() -> None:
+    """Proves the field lines are read, a deeper heading stays in its entry, and each entry
+    knows its section."""
+    entries = split_entries(AUDIT_WRITTEN)
+    first = entries[0]
+
+    assert [entry.id for entry in entries] == ["P7", "P8", "Q2", "D1"]
+    assert first.fields == {
+        "Status": "reopened",
+        "Sources": "L1, R P7",
+        "Grade": "inferred (Breaks: the parts rule)",
+        "Subject": "views.strip",
+        "Carried from": "problems-20261102-14h05m P7",
+        "After": "P3",
+    }
+    assert "one copy remains" in first.text
+    assert [entry.section for entry in entries] == [
+        "Open", "Open", "Questions for the owner (parked)", "Dropped"]
+
+
+def test_questions_and_dropped_entries_are_not_problems() -> None:
+    """Proves only a P id counts as a problem."""
+    problems = [entry.id for entry in split_entries(AUDIT_WRITTEN) if entry.is_problem]
+
+    assert problems == ["P7", "P8"]
+
+
+def test_the_highest_id_is_taken_across_every_list(scratch: tuple[Project, Repo]) -> None:
+    """Proves the highest problem number is found in any list, and a Q or D id is not counted."""
+    project, _ = scratch
+    for path in project.folder.glob("problems*.md"):
+        path.unlink()
+    write(project, "problems-20261026-23h59m.md", "## P12. Old\n")
+    write(project, "problems-20261027-08h05m.md", AUDIT_WRITTEN + "\n### D30. Gone\n")
+
+    assert highest_problem_id(project) == 12
+
+
+def test_the_highest_id_is_zero_without_problems(scratch: tuple[Project, Repo]) -> None:
+    """Proves a folder with no list gives zero."""
+    project, _ = scratch
+    for path in project.folder.glob("problems*.md"):
+        path.unlink()
+
+    assert highest_problem_id(project) == 0
