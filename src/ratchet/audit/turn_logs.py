@@ -26,6 +26,10 @@ WINDOWS_PATH = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'<>|;&()]*")
 DRIVE_START = re.compile(r"[A-Za-z]:[\\/]")
 # A Git Bash drive, such as /c or /c/Users.
 GIT_BASH_DRIVE = re.compile(r"/([A-Za-z])(?:/(.*))?$")
+# A home folder variable, such as $HOME or %USERPROFILE%, that is the whole word or is followed by a separator.
+HOME_VARIABLE = re.compile(r"^(?:\$HOME|\$\{HOME\}|\$USERPROFILE|\$\{USERPROFILE\}|(?i:%USERPROFILE%))(?=[\\/]|$)")
+# Any variable, such as $TMP, ${TMP} or %TMP%, that is directly followed by a separator.
+LEADING_VARIABLE = re.compile(r"^(?:\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\}|%[A-Za-z_]\w*%)(?=[\\/])")
 # A leading option name that is joined to its value, such as --file= or name=.
 OPTION_PREFIX = re.compile(r"^-{0,2}[\w-]+=")
 
@@ -81,7 +85,7 @@ def paths_named(calls: list[ToolCall]) -> list[str]:
 
     Returns:
         The path fields of every call, the pattern of a Glob call, the 'glob' field of a Grep
-        call, and every absolute, '~' or '..' path written in the command text of a Bash call. A
+        call, and every absolute, '~', '..' or variable path written in the command text of a Bash call. A
         relative pattern or glob is joined to the call's 'path' field. The regex 'pattern' of a
         Grep call is not a path and is left out. Relative paths are kept as written.
     """
@@ -111,8 +115,10 @@ def absolute_paths_in(command: str) -> list[str]:
 
     Returns:
         Each Windows path with a drive letter, then each word that looks like an absolute path,
-        a '~' path, or a path with a '..' segment, in the order they appear. Search strings such
-        as "/api/", URLs and the null device are not counted.
+        a '~' path, a path with a '..' segment, a path through a home variable such as $HOME, and
+        a path through another variable followed by a separator such as $TMP/x, in the order they
+        appear. Search strings such as "/api/", URLs and the null device are not counted. A bare
+        variable such as '$f' and a format such as '%H%n' are not paths.
     """
     found = WINDOWS_PATH.findall(command)
     for token in _tokens(command):
@@ -146,12 +152,15 @@ def _looks_like_path(token: str) -> bool:
         token: One word of a command.
 
     Returns:
-        True for a '~' path, a path with a '..' segment, and an absolute path. A path that starts
-        with a slash needs two segments, or one segment with a dot or a single letter, so that a
-        search string such as "/api/" is not taken for a path.
+        True for a '~' path, a path with a '..' segment, a path that starts with a home variable,
+        a path that starts with another variable and a separator, and an absolute path. A path
+        that starts with a slash needs two segments, or one segment with a dot or a single letter,
+        so that a search string such as "/api/" is not taken for a path.
     """
     if token in ALLOWED_PATHS or "://" in token:
         return False
+    if HOME_VARIABLE.match(token) or LEADING_VARIABLE.match(token):
+        return True
     if token.startswith("~") or ".." in re.split(r"[\\/]", token):
         return True
     if not token.startswith("/"):
@@ -210,8 +219,10 @@ def _is_absolute(path: str) -> bool:
         path: The path as written.
 
     Returns:
-        True when it starts with a slash or a '~', or with a drive letter and a separator.
+        True when it starts with a slash, a '~' or a variable, or with a drive letter and a separator.
     """
+    if HOME_VARIABLE.match(path) or LEADING_VARIABLE.match(path):
+        return True
     return path.startswith(("/", "\\", "~")) or bool(re.match(r"[A-Za-z]:[\\/]", path))
 
 
@@ -247,17 +258,41 @@ def _git_bash_to_windows(path: str) -> str:
     return f"{match.group(1).upper()}:/{match.group(2) or ''}"
 
 
+def _home_expanded(path: str) -> str:
+    """Replaces a leading home variable of a path with the home folder.
+
+    Args:
+        path: The path as written.
+
+    Returns:
+        The path with a leading $HOME, ${HOME}, $USERPROFILE, ${USERPROFILE} or %USERPROFILE%
+        replaced by that variable's value. A variable that is not set is replaced by the home
+        folder of the current user. A path with no home variable is returned unchanged.
+    """
+    match = HOME_VARIABLE.match(path)
+    if not match:
+        return path
+    # take the variable's name out of its $, braces or percent signs
+    name = match.group(0).strip("${}%").upper()
+    value = os.path.expandvars("${" + name + "}")
+    # an unset variable is left as written, so fall back to the home folder
+    if value.startswith("$"):
+        value = os.path.expanduser("~")
+    return value + path[match.end():]
+
+
 def _resolved(copy: Path, path: str) -> Path:
     """Resolves a path against the copy.
 
     Args:
         copy: The folder of the copy, which a relative path is taken from.
-        path: The path as written. A leading '~' is the home folder and /c/... is a Git Bash drive.
+        path: The path as written. A leading '~' or home variable such as $HOME is the home folder
+            and /c/... is a Git Bash drive.
 
     Returns:
         The absolute path with links and '..' resolved.
     """
-    return (copy / os.path.expanduser(_git_bash_to_windows(path))).resolve()
+    return (copy / os.path.expanduser(_git_bash_to_windows(_home_expanded(path)))).resolve()
 
 
 def _inside(path: str, copy: Path) -> bool:
@@ -268,6 +303,9 @@ def _inside(path: str, copy: Path) -> bool:
         copy: The folder of the copy.
 
     Returns:
-        True when the path, resolved against the copy, is the copy or below it.
+        True when the path, resolved against the copy, is the copy or below it. A path that starts
+        with a variable other than a home variable is never inside, because its value is unknown.
     """
+    if LEADING_VARIABLE.match(path) and not HOME_VARIABLE.match(path):
+        return False
     return _resolved(copy, path).is_relative_to(copy.resolve())

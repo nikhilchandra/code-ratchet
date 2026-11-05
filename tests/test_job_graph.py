@@ -3,6 +3,7 @@ tests really run."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 
@@ -13,6 +14,7 @@ from ratchet.git import Repo
 from ratchet.pathways import build_map, describe
 from ratchet.project import Project
 from ratchet.pytest_runner import run_pytest
+from ratchet.refactor import agent_answers
 from ratchet.refactor.agent_answers import (
     ImplementerAnswer,
     Plan,
@@ -46,6 +48,8 @@ from scripted_agents import (
     commit_shop,
     done,
     edit,
+    map_approve,
+    map_revise,
     plan,
     review,
     revise,
@@ -76,7 +80,7 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
     def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
             super_planner: list[Turn] | None = None, test_writer: list[Turn] = (),
             ledger: Ledger | None = None, focus: str = "", reports: list | None = None,
-            coverage: bool = False):
+            coverage: bool = False, seen: dict | None = None):
         # a super-planner left out approves every plan and asks for no tests
         if super_planner is None:
             super_planner = [approve()] * len(planner)
@@ -85,6 +89,9 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
                   "test_writer": ScriptedAgent("test_writer", WriterAnswer, test_writer),
                   "implementer": ScriptedAgent("implementer", ImplementerAnswer, implementer),
                   "reviewer": ScriptedAgent("reviewer", Review, reviewer)}
+        # a dict given as 'seen' gets the agents, so a test can read them after the job raises
+        if seen is not None:
+            seen.update(agents)
 
         def report(job, step: str, text: str, **extras) -> None:
             if reports is not None:
@@ -661,6 +668,34 @@ def test_a_skipped_old_test_is_not_counted_against_the_written_tests(
     assert lines_of(reports, "write-tests") == ["1 file, 1 test passed"]
 
 
+@pytest.fixture
+def tests_ini(scratch: tuple[Project, Repo]) -> None:
+    """Commits a tests/pytest.ini, so that pytest takes tests/ as its rootdir when a run names a
+    file in it.
+
+    The ini's pythonpath is read from the ini's own folder, so that 'from app import add' still
+    imports. It is set up before the run_job fixture, so that the baseline is run with it."""
+    project, repo = scratch
+    (project.root / "tests" / "pytest.ini").write_text("[pytest]\npythonpath = ../src\n",
+                                                       encoding="utf-8")
+    repo.run("add", "-A")
+    repo.commit("add a pytest.ini to the test folder")
+
+
+def test_written_tests_under_their_own_pytest_ini_are_collected(tests_ini, run_job) -> None:
+    """Proves written tests in a folder with its own pytest.ini are found in the run of their
+    file, and are committed with the step."""
+    reports: list = []
+
+    job, _, _ = run_job([plan()], [edit(*GOOD)], [review("accept")],
+                        super_planner=[approve(wanted())],
+                        test_writer=[write_test("tests/test_more.py", PASSING)] * 3,
+                        reports=reports)
+
+    assert lines_of(reports, "write-tests") == ["1 file, 1 test passed"]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
 def test_a_written_file_with_no_test_in_it_is_refused(folder_command, run_job) -> None:
     """Proves a written file that holds no test is refused, rather than passing on the tests
     that the run found elsewhere."""
@@ -866,7 +901,7 @@ def test_a_function_outside_the_plan_goes_to_the_super_planner_and_its_approval_
     commit_shop(project, repo)
     reports: list = []
 
-    job, agents, _ = shop_job(run_job, [add_shop_sub], [approve(), approve()],
+    job, agents, _ = shop_job(run_job, [add_shop_sub], [approve(), map_approve()],
                               [review("accept")], reports=reports)
 
     prompts = agents["super_planner"].prompts
@@ -894,7 +929,7 @@ def test_a_refused_function_goes_back_to_implement_with_the_notes(scratch, run_j
         return done()
 
     job, agents, _ = shop_job(run_job, [add_shop_sub, only_total],
-                              [approve(), revise("drop sub")], [review("accept")],
+                              [approve(), map_revise("drop sub")], [review("accept")],
                               reports=reports)
 
     second = agents["implementer"].prompts[1]
@@ -912,7 +947,7 @@ def test_three_refused_map_reviews_undo_the_job(scratch, run_job) -> None:
     reports: list = []
 
     job, _, _ = shop_job(run_job, [add_shop_sub, done(), done()],
-                         [approve()] + [revise("drop sub")] * 3, reports=reports)
+                         [approve()] + [map_revise("drop sub")] * 3, reports=reports)
 
     assert job.data["outcome"] == JobOutcome.ABANDONED
     assert job.data["reason"].startswith("# The super-planner refused the functions outside the plan")
@@ -926,11 +961,47 @@ def test_an_approved_function_is_not_reviewed_again(scratch, run_job) -> None:
     project, repo = scratch
     commit_shop(project, repo)
 
-    job, agents, _ = shop_job(run_job, [add_shop_sub, done()], [approve(), approve()],
+    job, agents, _ = shop_job(run_job, [add_shop_sub, done()], [approve(), map_approve()],
                               [review("reject", failing=("scope",)), review("accept")])
 
     assert len(agents["super_planner"].prompts) == 2
     assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_the_map_review_answers_without_tests_to_write(scratch, run_job) -> None:
+    """Proves the super-planner answers the map review in the shape of
+    ratchet.refactor.agent_answers.MapReview, which holds no tests to write, that its prompt
+    does not ask about them, and that the agent answers a plan in the shape of SuperPlan again
+    after the job."""
+    project, repo = scratch
+    commit_shop(project, repo)
+
+    job, agents, graph = shop_job(run_job, [add_shop_sub], [approve(), map_approve()],
+                                  [review("accept")])
+
+    super_planner = agents["super_planner"]
+    assert super_planner.schemas_seen == [SuperPlan, agent_answers.MapReview]
+    assert super_planner.schema is SuperPlan
+    assert "tests_to_write" not in super_planner.prompts[1]
+    saved = json.loads((graph.state_dir / "job" / "attempt-1" / "map-review.json")
+                       .read_text(encoding="utf-8"))
+    assert set(saved) == {"verdict", "summary", "revisions"}
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_map_review_with_no_answer_puts_the_plan_shape_back(scratch, run_job) -> None:
+    """Proves that when the super-planner gives no answer to the map review, it still answers a
+    plan in the shape of SuperPlan afterwards, whatever the job does with the failed turn."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    agents: dict = {}
+
+    with contextlib.suppress(NoAnswerError):
+        shop_job(run_job, [add_shop_sub], [approve(), None], [review("accept")], seen=agents)
+
+    super_planner = agents["super_planner"]
+    assert super_planner.schemas_seen == [SuperPlan, agent_answers.MapReview]
+    assert super_planner.schema is SuperPlan
 
 
 def test_a_module_level_change_does_not_start_a_map_review(scratch, run_job) -> None:
@@ -952,6 +1023,35 @@ def test_a_module_level_change_does_not_start_a_map_review(scratch, run_job) -> 
 
     assert len(agents["super_planner"].prompts) == 1
     assert lines_of(reports, "check-map") == []
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_deleting_an_unplanned_function_goes_to_the_super_planner_and_its_neighbour_does_not(
+        scratch, run_job) -> None:
+    """Proves that deleting a function the plan does not name, from between two others, sends that
+    function to the super-planner, and not the unchanged function after it."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    cli = project.root / "src" / "shop" / "cli.py"
+    helper = '\n\ndef helper():\n    """Returns one."""\n    return 1\n'
+    marker = "    return sum(prices)\n"
+    cli.write_text(SHOP_CLI.replace(marker, marker + helper), encoding="utf-8", newline="\n")
+    repo.commit("add a helper")
+    reports: list = []
+
+    def drop_helper(prompt: str) -> dict:
+        cli.write_text(SHOP_CLI, encoding="utf-8", newline="\n")
+        return done()
+
+    job, agents, _ = shop_job(run_job, [drop_helper], [approve(), map_approve()],
+                              [review("accept")], reports=reports)
+
+    prompts = agents["super_planner"].prompts
+    assert len(prompts) == 2
+    assert "shop.cli.helper" in prompts[1]
+    assert "shop.cli.main" not in prompts[1]
+    assert job.data["approved"] == ["shop.cli.helper"]
+    assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
     assert job.data["outcome"] == JobOutcome.COMMITTED
 
 
@@ -1006,3 +1106,50 @@ def test_three_coverage_failures_undo_the_job(scratch, run_job) -> None:
     assert job.data["reason"].startswith("# Lines that no test runs")
     assert lines_of(reports, "test")[-1].endswith("-> undo, at the cap of 3 test failures")
     assert repo.changed_paths() == []
+
+
+def test_a_function_outside_the_plan_is_reviewed_when_the_owner_sets_diff_noprefix(
+        scratch, run_job) -> None:
+    """Proves a changed function that the plan does not name still goes to the super-planner when
+    the repository's config sets diff.noprefix, which would otherwise drop the a/ and b/ prefixes
+    from the diff that the map check reads."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    repo.run("config", "diff.noprefix", "true")
+    reports: list = []
+
+    job, agents, _ = shop_job(run_job, [add_shop_sub], [approve(), map_approve()],
+                              [review("accept")], reports=reports)
+
+    prompts = agents["super_planner"].prompts
+    assert len(prompts) == 2
+    assert "shop.cli.sub" in prompts[1]
+    assert job.data["approved"] == ["shop.cli.sub"]
+    assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_line_no_test_runs_goes_back_to_implement_when_the_owner_sets_diff_noprefix(
+        scratch, run_job) -> None:
+    """Proves that, with coverage on, an added line that no test runs still sends the job back to
+    the implementer when the repository's config sets diff.noprefix, which would otherwise drop
+    the a/ and b/ prefixes from the diff that the coverage check reads."""
+    project, repo = scratch
+    repo.run("config", "diff.noprefix", "true")
+    reports: list = []
+    lines: list[int] = []
+
+    def add_sub(prompt: str) -> dict:
+        answer = add_app_sub(prompt)
+        # the line of sub's return, which is not its docstring
+        lines.append(app_text(project).splitlines().index("    return a - b") + 1)
+        return answer
+
+    job, agents, _ = run_job([plan()], [add_sub, write_sub_test("app")], [review("accept")],
+                             reports=reports, coverage=True)
+
+    line = lines[0]
+    texts = [(step, text) for step, text, _ in reports]
+    assert ("test", f"1 line not run by any test: src/app.py:{line} -> attempt 2") in texts
+    assert job.data["test_failures"] == 1
+    assert job.data["outcome"] == JobOutcome.COMMITTED

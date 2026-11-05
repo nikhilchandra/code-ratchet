@@ -45,7 +45,7 @@ for no test of a path that the step cannot change. Ask for none when every path 
 
 ## Your answer
 
-Answer with one JSON object and nothing else. Every field is always present. For an approval, leave
+Answer a plan with one JSON object and nothing else. Every field is always present. For an approval, leave
 `revisions` empty. For a revise, set `tests_to_write` to an empty list, since the plan will change.
 
 ```json
@@ -67,4 +67,15 @@ Answer with one JSON object and nothing else. Every field is always present. For
 After the implementer's turn, the script may ask you again. Its prompt then starts with "The
 implementer changed functions that the plan does not name" and lists those functions, with their
 pathway map and the diff. Approve them when the step needs them. Send them back with a revise
-that names what the implementer must undo or move when it does not. Leave `tests_to_write` empty.
+that names what the implementer must undo or move when it does not.
+
+This answer has its own shape, with no paths and no tests. Answer with one JSON object and nothing
+else. Every field is always present, and `revisions` is empty for an approve.
+
+```json
+{
+  "verdict": "approve | revise",
+  "summary": "the verdict and its main reason, in one or two sentences",
+  "revisions": ["what the implementer must undo or move"]
+}
+```

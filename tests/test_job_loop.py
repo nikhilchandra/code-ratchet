@@ -32,6 +32,7 @@ from scripted_agents import (
     approve,
     commit_shop,
     edit,
+    map_approve,
     plan,
     review,
     revise,
@@ -356,6 +357,23 @@ def test_an_untested_line_goes_back_from_run_refactor(scratch, run) -> None:
     assert "src/app.py" in committed and "tests/test_sub.py" in committed
 
 
+def test_an_added_line_in_an_omitted_file_is_not_sent_back_from_run_refactor(scratch, run) -> None:
+    """Proves a run does not send back an added line in a src file that the project's coverage
+    config omits, since no test could make coverage measure it."""
+    project, repo = scratch
+    # omit src/app.py, and add src/extra.py so that the coverage report still holds a file
+    (project.root / ".coveragerc").write_text("[run]\nomit = */app.py\n", encoding="utf-8")
+    (project.root / "src" / "extra.py").write_text("X = 1\n", encoding="utf-8", newline="\n")
+    repo.run("add", "-A")
+    repo.run("commit", "-q", "-m", "omit app")
+
+    result, agents, lines = run([plan()], [add_app_sub], [review("accept")], width=200)
+
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+    assert len(agents["implementer"].prompts) == 1
+    assert not any("not run by any test" in line for line in lines)
+
+
 def test_a_run_without_pytest_cov_says_once_that_coverage_is_not_checked(scratch, run) -> None:
     """Proves a run whose test command does not load pytest-cov says once that coverage is not
     checked, and commits an added line that no test runs."""
@@ -381,7 +399,7 @@ def test_a_function_outside_the_plan_is_reviewed_from_run_refactor(scratch, run)
         return write_sub_test("shop.cli")(prompt)
 
     result, _, lines = run([plan(functions=["shop.cli.total"])], [add_tested_sub],
-                           [review("accept")], super_planner=[approve(), approve()])
+                           [review("accept")], super_planner=[approve(), map_approve()])
 
     # the step's column starts after the time (7), the job (9) and the problems (7)
     steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]

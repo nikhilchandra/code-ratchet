@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 from rooster import Job, JobStatus
 
+from ratchet.architecture import check_architecture
 from ratchet.audit.agent_answers import (
     AuditorAnswer,
     CheckAnswer,
@@ -28,7 +30,7 @@ from ratchet.audit.audit_run import (
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
 from ratchet.audit.code_copy import remove_copy
 from ratchet.audit.settings import AuditSettings
-from ratchet.project import Project
+from ratchet.project import Config, Project
 from ratchet.refactor.problem_list import find_latest_problem_list, find_problem_lists
 from scripted_agents import ScriptedAgent
 from test_audit_graph import (  # noqa: F401
@@ -200,6 +202,7 @@ def test_approving_an_audit_cut_off_at_the_questions_is_refused_when_head_has_mo
         settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
     assert agents["checker"].prompts == []
+    settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
 
 
 def test_discarding_an_audit_cut_off_at_the_questions_calls_no_checker(
@@ -290,6 +293,52 @@ def test_an_audit_sweeps_the_copies_of_earlier_halted_audits(audit_project: Proj
         remove_copy(capped)
 
 
+def test_an_audit_sweeps_the_copy_of_an_earlier_interrupted_audit(audit_project: Project) -> None:
+    """Proves an audit that starts deletes the copy of an earlier audit that was cut off mid-step
+    and stayed saved as running, and still reaches its draft."""
+    agents, _ = scripted(audit_project)
+    graph = build_audit_graph(audit_project, AuditSettings(max_cost_usd=12.0), lambda *_: agents)
+    with pytest.raises(AuditError, match="cap"):
+        graph.start("", slug="capped")
+    copy = Path(graph.load("capped").data["copy"])
+    assert copy.is_dir()
+    # save the capped job as running, as Ctrl-C in the middle of a step leaves it
+    saved = graph.state_dir / "capped.json"
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["status"] = JobStatus.RUNNING.value
+    saved.write_text(json.dumps(data), encoding="utf-8")
+
+    try:
+        run = waiting_run(audit_project)
+
+        assert run.outcome == "waiting"
+        assert not copy.exists()
+    finally:
+        remove_copy(copy)
+
+
+def test_an_audit_interrupted_in_a_step_deletes_its_copy(audit_project: Project) -> None:
+    """Proves an audit cut off by Ctrl-C during the auditor's turn, after its copy was made, is
+    left running but deletes its copy."""
+    agents, maker = scripted(audit_project)
+
+    def interrupt(prompt: str) -> dict:
+        raise KeyboardInterrupt
+
+    agents["auditor"].turns = [interrupt]
+
+    with pytest.raises(KeyboardInterrupt):
+        start_audit(audit_project, agent_maker=maker, interactive=False)
+
+    job = only_job(audit_project)
+    assert job.status == JobStatus.RUNNING and "copy" in job.data
+    copy = Path(job.data["copy"])
+    try:
+        assert not copy.exists()
+    finally:
+        remove_copy(copy)
+
+
 def test_an_audit_after_one_that_halted_in_prepare_still_starts(audit_project: Project) -> None:
     """Proves an audit that halted on a dirty tree, before it made a copy, does not stop the next
     audit from reaching its draft."""
@@ -325,6 +374,28 @@ def test_dropping_a_copy_ignores_a_path_that_is_not_a_copy(tmp_path: Path) -> No
     _drop_copy(folder)
 
     assert folder.is_dir()
+
+
+def test_dropping_a_copy_ignores_a_copy_that_cannot_be_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy whose files are locked raises nothing, so the audit goes on."""
+    def locked(copy: Path) -> None:
+        raise OSError(f"{copy} is locked")
+
+    monkeypatch.setattr("ratchet.audit.audit_run.remove_copy", locked)
+
+    _drop_copy(tmp_path / "copy")
+
+
+def test_audit_run_has_no_except_clause_that_only_passes() -> None:
+    """Ratchet's own code checker finds no silent except clause in audit_run.py."""
+    config = Config(test_command=["pytest"], editable=["src/ratchet/audit/audit_run.py"])
+    project = Project(root=Path(__file__).parents[1], config=config, rules="rules")
+
+    findings = check_architecture(project, None)
+
+    assert [item.evidence for item in findings if item.kind == "silent_except"] == []
 
 
 def test_cleaning_up_a_job_that_was_never_saved_does_nothing(audit_project: Project) -> None:
@@ -374,5 +445,44 @@ def test_approving_with_another_temp_folder_still_reaches_the_draft(
     run = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
     assert run.outcome == "waiting" and Path(run.draft_path).is_file()
+    monkeypatch.undo()
+    remove_copy(copy)
+
+
+def test_approving_with_a_locked_copy_still_reaches_the_draft(
+    audit_project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves the checker's work is kept when a locked file stops remove_copy deleting the copy."""
+    agents = cut_off_at_questions(audit_project)
+    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
+
+    def locked(folder: Path) -> None:
+        raise PermissionError(f"{folder} is locked")
+
+    monkeypatch.setattr("ratchet.audit.audit_graph.remove_copy", locked)
+
+    run = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
+
+    assert run.outcome == "waiting" and Path(run.draft_path).is_file()
+    monkeypatch.undo()
+    remove_copy(copy)
+
+
+def test_discarding_with_a_locked_copy_still_ends(
+    audit_project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves a discard still ends the audit when a locked file stops remove_copy deleting the
+    copy."""
+    agents = cut_off_at_questions(audit_project)
+    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
+
+    def locked(folder: Path) -> None:
+        raise PermissionError(f"{folder} is locked")
+
+    monkeypatch.setattr("ratchet.audit.audit_graph.remove_copy", locked)
+
+    done = settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
+
+    assert done.outcome == "discarded"
     monkeypatch.undo()
     remove_copy(copy)

@@ -1,0 +1,5 @@
+{
+  "verdict": "approve",
+  "summary": "invoices.pricing.round_cents is called only from line_total, which the step changes, so the step needs its change too.",
+  "revisions": []
+}

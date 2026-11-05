@@ -4,9 +4,13 @@ that crash or hang."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from ratchet.git import Repo
 from ratchet.pytest_runner import (
     OutcomeKind,
     Outcome,
@@ -16,6 +20,9 @@ from ratchet.pytest_runner import (
     format_failure_report,
     format_untested_report,
     has_pytest_cov,
+    is_omitted,
+    outcomes_of_files,
+    read_coverage_omit,
     read_coverage_report,
     run_pytest,
 )
@@ -105,6 +112,48 @@ def test_a_hang_is_stopped_and_not_run_again(tmp_path: Path) -> None:
 
     assert run.code == -1 and run.outcomes == {}
     assert run.log.startswith("the suite did not finish within 1 s")
+
+
+def own_ini_project(root: Path) -> None:
+    """Writes a project with a pyproject.toml, a tests/pytest.ini and a passing test in
+    tests/test_new.py, so that pytest takes tests/ as its rootdir when a run names that file."""
+    (root / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (root / "tests" / "test_new.py").write_text("def test_a():\n    pass\n", encoding="utf-8")
+
+
+def test_a_run_given_a_test_file_names_its_tests_from_the_project_folder(tmp_path: Path) -> None:
+    """Proves a run that names a test file under its own pytest.ini names the test by its path
+    from the project's folder, as a run with no paths would."""
+    own_ini_project(tmp_path)
+
+    run = run_pytest([*PYTEST, "tests/test_new.py"], tmp_path, tmp_path / "out", 60)
+
+    assert set(run.outcomes) == {"tests.test_new::test_a"}
+
+
+def test_outcomes_of_files_keeps_only_the_named_files() -> None:
+    """Proves the outcomes of a file's module, of a class in it and of the file failing to import
+    are kept, and that another file, even one whose name starts the same, is dropped."""
+    outcomes = {test_id: outcome(OutcomeKind.PASSED) for test_id in (
+        "tests.test_new::test_a", "tests.test_new.TestK::test_b", "::tests.test_bad",
+        "tests.test_old::test_c", "tests.test_newer::test_d")}
+
+    kept = outcomes_of_files(outcomes, ["tests/test_new.py", "tests/test_bad.py"])
+
+    assert set(kept) == {"tests.test_new::test_a", "tests.test_new.TestK::test_b",
+                         "::tests.test_bad"}
+
+
+def test_a_run_of_a_file_under_its_own_ini_is_found_by_outcomes_of_files(tmp_path: Path) -> None:
+    """Proves the outcomes of a run that names a file under its own pytest.ini are found as that
+    file's outcomes."""
+    own_ini_project(tmp_path)
+
+    run = run_pytest([*PYTEST, "tests/test_new.py"], tmp_path, tmp_path / "out", 60)
+
+    assert outcomes_of_files(run.outcomes, ["tests/test_new.py"])
 
 
 def test_regressions_count_only_tests_that_got_worse() -> None:
@@ -249,3 +298,151 @@ def test_has_pytest_cov_is_false_when_pytest_cannot_run(tmp_path: Path) -> None:
     """Proves a missing program, and a run that outlasts the timeout, both read as no plugin."""
     assert has_pytest_cov(["no-such-program-anywhere"], tmp_path, 60) is False
     assert has_pytest_cov([sys.executable, "-c", "import time; time.sleep(30)", "--"], tmp_path, 1) is False
+
+
+def _git(root: Path, *arguments: str) -> None:
+    subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
+
+
+def test_untested_lines_are_found_when_the_diff_has_no_prefix_config(tmp_path: Path) -> None:
+    """Proves the added code lines of a new src file are found in the diff of a repository whose
+    config sets diff.noprefix, which would otherwise drop the a/ and b/ prefixes from the diff's
+    file headers."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "ratchet@example.com")
+    _git(tmp_path, "config", "user.name", "ratchet")
+    _git(tmp_path, "config", "core.autocrlf", "false")
+    (tmp_path / "README.md").write_text("start\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "start")
+    _git(tmp_path, "config", "diff.noprefix", "true")
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "mod.py").write_text("# a note\n\nX = 1\nY = 2\n",
+                                                     encoding="utf-8", newline="\n")
+
+    assert find_untested_lines(Repo(tmp_path).diff(), {}) == {"src/pkg/mod.py": [3, 4]}
+
+
+def added_file(path: str) -> str:
+    """Returns a diff that adds the file 'path', holding a comment, a blank line and two lines of
+    code, which are its lines 3 and 4."""
+    return (f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+            "@@ -0,0 +1,4 @@\n+# a note\n+\n+X = 1\n+Y = 2\n")
+
+
+def test_a_file_omitted_by_a_pattern_with_no_slash_is_skipped(tmp_path: Path) -> None:
+    """Proves an omit pattern with no slash, such as 'cli.py', matches the file in any folder, so
+    that an added src file it matches is not checked."""
+    assert find_untested_lines(added_file("src/pkg/cli.py"), {}, root=tmp_path, omit=["cli.py"]) == {}
+
+
+def test_a_leading_star_slash_omit_matches_any_folder(tmp_path: Path) -> None:
+    """Proves the omit pattern '*/cli.py' matches cli.py directly in src and in a folder below
+    it."""
+    diff = added_file("src/cli.py") + added_file("src/pkg/cli.py")
+
+    assert find_untested_lines(diff, {}, root=tmp_path, omit=["*/cli.py"]) == {}
+
+
+def test_a_star_in_an_omit_pattern_does_not_cross_a_folder(tmp_path: Path) -> None:
+    """Proves the omit pattern 'src/*.py' matches a file directly in src, and that a file in a
+    folder below src still counts its code lines."""
+    diff = added_file("src/top.py") + added_file("src/pkg/deep.py")
+
+    assert find_untested_lines(diff, {}, root=tmp_path, omit=["src/*.py"]) == {"src/pkg/deep.py": [3, 4]}
+
+
+def test_a_trailing_slash_star_omit_matches_everything_below(tmp_path: Path) -> None:
+    """Proves the omit pattern 'src/gen/*' matches a file in any folder below src/gen."""
+    assert find_untested_lines(added_file("src/gen/a/b.py"), {}, root=tmp_path, omit=["src/gen/*"]) == {}
+
+
+def test_an_omitted_file_that_the_report_holds_still_counts_its_missing_lines(tmp_path: Path) -> None:
+    """Proves a file that the report holds is checked against its missing lines, even when an
+    omit pattern matches it."""
+    untested = find_untested_lines(added_file("src/cli.py"), {"src/cli.py": [4]}, root=tmp_path,
+                                   omit=["*/cli.py"])
+
+    assert untested == {"src/cli.py": [4]}
+
+
+def test_a_file_missing_for_another_reason_still_counts(tmp_path: Path) -> None:
+    """Proves an added src file that the report does not hold, and that no omit pattern matches,
+    still counts every line that is not blank and not a comment."""
+    assert find_untested_lines(LOOSE, {}, root=tmp_path, omit=["*/other.py"]) == {"src/loose/new.py": [3, 4]}
+
+
+@pytest.mark.parametrize(("name", "text"), [
+    (".coveragerc", "[run]\nomit = a.py, b.py\n"),
+    (".coveragerc.toml", '[run]\nomit = ["a.py", "b.py"]\n'),
+    ("setup.cfg", "[coverage:run]\nomit =\n    a.py\n    b.py\n"),
+    ("tox.ini", "[coverage:report]\nomit = a.py,b.py\n"),
+    ("pyproject.toml", '[tool.coverage.run]\nomit = ["a.py", "b.py"]\n'),
+])
+def test_the_coverage_omit_is_read_from_each_config_file(tmp_path: Path, name: str, text: str) -> None:
+    """Proves the omit patterns are read from each of the files that coverage takes its config
+    from, in each file's own form."""
+    (tmp_path / name).write_text(text, encoding="utf-8")
+
+    assert read_coverage_omit(tmp_path) == ["a.py", "b.py"]
+
+
+def test_a_coveragerc_wins_even_with_no_coverage_settings(tmp_path: Path) -> None:
+    """Proves an empty .coveragerc is taken before a pyproject.toml that sets omit, as coverage
+    takes it, so that no patterns are read."""
+    (tmp_path / ".coveragerc").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[tool.coverage.run]\nomit = ["a.py"]\n', encoding="utf-8")
+
+    assert read_coverage_omit(tmp_path) == []
+
+
+def test_a_setup_cfg_without_coverage_sections_is_passed_over(tmp_path: Path) -> None:
+    """Proves a setup.cfg with no coverage: section is passed over, so that the patterns come from
+    pyproject.toml."""
+    (tmp_path / "setup.cfg").write_text("[metadata]\nname = x\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[tool.coverage.run]\nomit = ["a.py"]\n', encoding="utf-8")
+
+    assert read_coverage_omit(tmp_path) == ["a.py"]
+
+
+def test_a_coverage_run_reads_the_omit_patterns(tmp_path: Path) -> None:
+    """Proves a coverage run holds the omit patterns of the project's pyproject.toml, and that the
+    file they match is left out of the report."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "calc.py").write_text(CALC, encoding="utf-8", newline="\n")
+    (tmp_path / "src" / "skip.py").write_text("X = 1\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_calc.py").write_text(CALC_TEST, encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\npythonpath = src\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.coverage.run]\nomit = ['*/skip.py']\n",
+                                             encoding="utf-8")
+
+    run = run_pytest(PYTEST, tmp_path, tmp_path / "out", 60, coverage=True)
+
+    assert run.omit == ["*/skip.py"]
+    assert "src/calc.py" in run.coverage
+    assert "src/skip.py" not in run.coverage
+
+
+@pytest.mark.parametrize("name, text, expected", [
+    (".coveragerc.toml", '[tool.coverage.report]\nomit = "a.py, b.py"\n', ["a.py", "b.py"]),
+    (".coveragerc", "[coverage:run]\nomit = a.py\n[report]\nomit = b.py\n", ["a.py", "b.py"]),
+    ("tox.ini", "[tox]\nenvlist = py\n", []),
+    ("pyproject.toml", "[tool.other]\nx = 1\n", []),
+    ("pyproject.toml", "[tool.coverage.run\n", []),
+    (".coveragerc", "omit = a.py\n", []),
+])
+def test_the_other_coverage_config_forms_are_read(tmp_path: Path, name: str, text: str, expected: list[str]) -> None:
+    """Proves a string omit and a mix of section names are read, that a file with no coverage
+    section is passed over, and that a file that cannot be parsed gives no patterns."""
+    (tmp_path / name).write_text(text, encoding="utf-8")
+
+    assert read_coverage_omit(tmp_path) == expected
+
+
+def test_a_glob_pattern_that_coverage_refuses_matches_nothing(tmp_path: Path) -> None:
+    """Proves a pattern with '***' or a lone bracket matches nothing, and that '?' and a bracket
+    set each match one character."""
+    assert not is_omitted("src/a.py", tmp_path, ["src/***.py", "src/[a.py"])
+    assert is_omitted("src/a.py", tmp_path, ["src/?.py"])
+    assert is_omitted("src/b.py", tmp_path, ["src/[ab].py"])

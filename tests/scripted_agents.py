@@ -18,7 +18,8 @@ Turn = dict | Callable[[str], dict]
 class ScriptedAgent:
     """Stands in for an Agent, answering each turn from a script and keeping every prompt. Each
     answered turn costs 'cost_usd' dollars, and a failed turn costs nothing. The agent also
-    keeps its 'frozen' paths as they stood at the start of each turn, in 'frozen_seen'."""
+    keeps its 'frozen' paths as they stood at the start of each turn, in 'frozen_seen', and the
+    schema that each turn answered in, in 'schemas_seen'."""
 
     def __init__(self, name: str, schema: type[BaseModel], turns: list[Turn], *,
                  cost_usd: float = 0.5) -> None:
@@ -32,11 +33,13 @@ class ScriptedAgent:
         self.total_tokens = 0
         self.frozen: tuple[str, ...] = ()
         self.frozen_seen: list[tuple[str, ...]] = []
+        self.schemas_seen: list[type[BaseModel]] = []
 
     def run(self, prompt: str) -> dict:
         """Returns the next scripted answer as a result, or a failed result when it is None."""
         self.prompts.append(prompt)
         self.frozen_seen.append(tuple(self.frozen))
+        self.schemas_seen.append(self.schema)
         turn = self.turns.pop(0)
         answer = turn(prompt) if callable(turn) else turn
         if answer is None:
@@ -70,6 +73,18 @@ def revise(*revisions: str) -> dict:
     """Returns a super-planner's answer of revise, with the revisions given."""
     return {"verdict": "revise", "summary": "revise the plan", "paths": ["app.add"],
             "untested_paths": [], "tests_to_write": [], "revisions": list(revisions)}
+
+
+def map_approve() -> dict:
+    """Returns a super-planner's approval of the functions that the implementer changed outside
+    the plan."""
+    return {"verdict": "approve", "summary": "the functions fit", "revisions": []}
+
+
+def map_revise(*revisions: str) -> dict:
+    """Returns a super-planner's answer of revise to the functions that the implementer changed
+    outside the plan, with the revisions given."""
+    return {"verdict": "revise", "summary": "revise the change", "revisions": list(revisions)}
 
 
 def wanted(file: str = "tests/test_more.py") -> dict:

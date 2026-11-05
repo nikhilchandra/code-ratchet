@@ -209,3 +209,77 @@ def test_a_pattern_is_taken_relative_to_the_path_of_its_call(tmp_path):
     assert outside_of(tmp_path, copy, "Glob", {"pattern": "../*.py", "path": "src"}) == []
     assert outside_of(tmp_path, copy, "Glob", {"pattern": "../../*.py", "path": "src"}) != []
     assert outside_of(tmp_path, copy, "Grep", {"pattern": "x", "path": "src", "glob": "../../*.py"}) != []
+
+
+# The ways a shell command can name the home folder through a variable.
+HOME_VARIABLES = ("$HOME", "${HOME}", "$USERPROFILE", "${USERPROFILE}", "%USERPROFILE%", "%userprofile%")
+
+
+def test_home_variable_paths_are_found_in_a_command():
+    command = "git diff --no-index $HOME/code/x/.ratchet/problems-x.md /dev/null"
+
+    assert absolute_paths_in(command) == ["$HOME/code/x/.ratchet/problems-x.md"]
+    for home in HOME_VARIABLES:
+        assert absolute_paths_in(f"cat {home}/code/x/.ratchet/p.md") == [f"{home}/code/x/.ratchet/p.md"]
+
+
+def test_bash_reads_through_home_variables_are_outside(tmp_path):
+    copy = tmp_path / "copy"
+    copy.mkdir()
+
+    for home in HOME_VARIABLES:
+        path = f"{home}/code/x/.ratchet/p.md"
+        assert path in outside_of(tmp_path, copy, "Bash", {"command": f"cat {path}"}), home
+
+
+def test_home_variables_are_expanded_before_the_inside_check(tmp_path, monkeypatch):
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    # the home folder holds the copy, so a path through home into the copy stays inside
+    assert outside_of(tmp_path, copy, "Bash", {"command": "cat $HOME/copy/a.py"}) == []
+    assert outside_of(tmp_path, copy, "Bash", {"command": "cat %USERPROFILE%/copy/a.py"}) == []
+    assert outside_of(tmp_path, copy, "Bash", {"command": "cat ${HOME}/p.md"}) == ["${HOME}/p.md"]
+
+
+def test_other_leading_variables_are_outside(tmp_path):
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    # shlex keeps the backslash inside single quotes
+    quoted = r"%APPDATA%\p.md"
+
+    for path in ("$TMP/p.md", "${APPDATA}/p.md", "%APPDATA%/p.md", "$HOMEDIR/x"):
+        assert absolute_paths_in(f"cat {path}") == [path]
+        assert outside_of(tmp_path, copy, "Bash", {"command": f"cat {path}"}) == [path]
+    assert absolute_paths_in(f"cat '{quoted}'") == [quoted]
+    assert outside_of(tmp_path, copy, "Bash", {"command": f"cat '{quoted}'"}) == [quoted]
+
+
+def test_shell_variables_and_format_strings_that_are_not_paths_are_clean(tmp_path):
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    commands = (
+        'for f in $(git ls-files); do wc -l "$f"; done',
+        "echo $PWD $?",
+        "git log --format=%H%n%s",
+        "echo $HOMEDIR",
+    )
+
+    for command in commands:
+        assert absolute_paths_in(command) == [], command
+        assert outside_of(tmp_path, copy, "Bash", {"command": command}) == [], command
+
+
+def test_a_glob_pattern_that_starts_with_a_variable_is_not_joined_to_the_base(tmp_path):
+    copy = tmp_path / "copy"
+    (copy / "src").mkdir(parents=True)
+    assert outside_of(tmp_path, copy, "Glob", {"pattern": "$TMP/*.md", "path": "src"}) == ["$TMP/*.md"]
+
+
+def test_an_unset_home_variable_falls_back_to_the_home_folder(tmp_path, monkeypatch):
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    assert outside_of(tmp_path, copy, "Bash", {"command": "cat $USERPROFILE/p.md"}) != []

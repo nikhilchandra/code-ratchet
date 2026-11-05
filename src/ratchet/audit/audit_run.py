@@ -5,12 +5,14 @@ terminal when there is one, and settle a waiting audit by approving or discardin
 At most one audit waits at a time. An audit that is waiting for approval is settled by
 settle_audit(), which a later `ratchet audit --approve` or `--discard` calls.
 
-An audit that halts deletes its copy of the code. Each new audit also deletes the copies that
-earlier halted audits of the project left behind.
+An audit that does not wait deletes its copy of the code, whether it halted, finished, or was cut
+off by Ctrl-C. Each new audit also deletes the copies that earlier audits of the project left
+behind.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -192,29 +194,32 @@ def _drop_copy(copy: Path) -> None:
         copy: The folder that a job stored as its copy. A path that is not a ratchet copy, or a
             file that is locked, leaves the folder alone and does not stop the audit.
     """
-    try:
+    with contextlib.suppress(CopyError, OSError):
         remove_copy(copy)
-    except (CopyError, OSError):
-        pass
 
 
 def _sweep_copies(graph: AgentGraph) -> None:
-    """Deletes the copies that earlier halted or finished audits left behind.
+    """Deletes the copies that earlier audits left behind, except the copy of a waiting audit.
 
-    A waiting audit keeps its copy, and so does a job that has no copy, such as one that halted
-    before it made one.
+    An earlier audit may have halted, finished, or been cut off by Ctrl-C in the middle of a step,
+    which leaves its job saved as running. A running job counts as cut off, so two audits must not
+    run at once. A job that has no copy, such as one that halted before it made one, is skipped.
+    start_audit sweeps only after it has refused to run beside a waiting audit.
 
     Args:
         graph: The audit graph.
     """
     for job in graph.jobs():
         copy = job.data.get("copy")
-        if copy and job.status in (JobStatus.HALTED, JobStatus.DONE):
+        if copy and job.status != JobStatus.WAITING:
             _drop_copy(Path(copy))
 
 
 def _clean_up(graph: AgentGraph, slug: str) -> None:
-    """Deletes the copy of one job when the job halted or finished.
+    """Deletes the copy of one job unless the job waits for a decision.
+
+    A job still running when this is called was cut off in the middle of a step, such as by Ctrl-C,
+    so its copy is deleted too.
 
     Args:
         graph: The audit graph.
@@ -224,7 +229,7 @@ def _clean_up(graph: AgentGraph, slug: str) -> None:
         return
     job = graph.load(slug)
     copy = job.data.get("copy")
-    if copy and job.status in (JobStatus.HALTED, JobStatus.DONE):
+    if copy and job.status != JobStatus.WAITING:
         _drop_copy(Path(copy))
 
 
@@ -271,8 +276,8 @@ def start_audit(
         show: Writes one line to the owner.
         edit: Opens a file for the owner to change.
 
-    The copies that earlier halted audits left behind are deleted first, and the copy of this
-    audit is deleted if it halts.
+    The copies that earlier audits left behind are deleted first, including those of audits that
+    were cut off by Ctrl-C. The copy of this audit is deleted unless it waits.
 
     Returns:
         The run. Its outcome is "waiting" when the owner has yet to decide on the draft.
@@ -301,7 +306,7 @@ def start_audit(
     if not has_records(project.root):
         raise AuditError("this project has not been set up yet. Run `ratchet init` first.")
 
-    # delete the copies of earlier halted audits, then name this audit's job
+    # delete the copies of earlier halted or interrupted audits, then name this audit's job
     _sweep_copies(graph)
     slug = _new_slug(graph, datetime.now().strftime("audit-%Y%m%d-%Hh%Mm"))
     try:
@@ -315,7 +320,7 @@ def start_audit(
             run.draft_path = str(graph.state_dir / job.slug / "draft.md")
         return run
     finally:
-        # delete the copy when the job halted or finished
+        # delete the copy unless the job waits, including one cut off mid-step
         _clean_up(graph, slug)
 
 
@@ -355,5 +360,5 @@ def settle_audit(
             return run
         return _finish(graph.resume(job.slug, {"decision": decision}))
     finally:
-        # delete the copy when the job halted or finished
+        # delete the copy unless the job waits, including one cut off mid-step
         _clean_up(graph, job.slug)

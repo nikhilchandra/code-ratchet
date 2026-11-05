@@ -749,6 +749,25 @@ def test_a_blind_audit_that_diffs_the_old_list_through_dotdot_halts_the_job(
     assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
 
 
+def test_a_blind_audit_that_reads_through_home_halts_the_job(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit that reads the old list through a path that starts with $HOME, as in
+    'git diff --no-index', stops the job."""
+    command = json.dumps("git diff --no-index $HOME/code/x/.ratchet/problems-x.md /dev/null")
+    message = '{"content": [{"name": "Bash", "input": {"command": %s}}]}' % command
+
+    def fresh(prompt: str) -> dict:
+        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return fresh_turn(audit_project)
+
+    with pytest.raises(AuditError, match="blind audit"):
+        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
+    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
+        remove_copy(Path(job.data["copy"]))
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
 def test_a_reaudit_runs_the_blind_audit_and_the_rechecker_and_skips_the_rest(
     audit_project: Project, start, old_list: list
 ) -> None:

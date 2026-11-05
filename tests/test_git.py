@@ -113,3 +113,32 @@ def test_restoring_no_work_leaves_the_last_commit(tmp_path: Path) -> None:
 
     assert patch == b""
     assert repo.changed_paths() == []
+
+
+@pytest.mark.parametrize("setting", ["diff.noprefix", "diff.mnemonicPrefix"])
+def test_diff_keeps_the_a_and_b_prefixes_when_the_owner_turns_them_off(
+        tmp_path: Path, setting: str) -> None:
+    """Proves the diff's file headers keep git's a/ and b/ prefixes when the repository's config
+    sets 'setting', which would otherwise drop them or replace them with i/ and w/."""
+    repo = make_repo(tmp_path)
+    repo.run("config", setting, "true")
+    (tmp_path / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")
+
+    diff = repo.diff()
+
+    assert "--- a/src/app.py" in diff
+    assert "+++ b/src/app.py" in diff
+
+
+@pytest.mark.parametrize("setting", ["color.ui", "color.diff"])
+def test_diff_has_no_color_when_the_owner_forces_it(tmp_path: Path, setting: str) -> None:
+    """Proves the diff holds no ANSI color codes when the repository's config sets 'setting' to
+    always, which would otherwise color the output even through a pipe."""
+    repo = make_repo(tmp_path)
+    repo.run("config", setting, "always")
+    (tmp_path / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")
+
+    diff = repo.diff()
+
+    assert "\x1b[" not in diff
+    assert "+x = 2" in diff

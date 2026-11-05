@@ -101,3 +101,17 @@ def test_the_reviewers_criteria_name_their_checks(tmp_path: Path) -> None:
     assert "**Necessary (S3, S4, S9, S18).**" in profile
     assert "**Modular (S1, S2, S6 and the stated rules).**" in profile
     assert "**Comments (S21).**" in profile
+
+
+def test_the_super_planner_profile_shows_the_map_review_shape(tmp_path: Path) -> None:
+    """Proves the super-planner's instructions show the shape of its answer on the functions
+    outside the plan, which has a verdict, a summary and revisions, and no tests to write."""
+    profile = build_profile(make_project(tmp_path), Role.SUPER_PLANNER, PROBLEMS_FILE)
+
+    heading = "## Functions outside the plan"
+    assert heading in profile
+    # the section runs from its heading to the next heading of its level, or to the end
+    section = profile.split(heading, 1)[1].split("\n## ", 1)[0]
+    assert '"verdict": "approve | revise"' in section
+    assert '"summary"' in section and '"revisions"' in section
+    assert "tests_to_write" not in section and '"paths"' not in section

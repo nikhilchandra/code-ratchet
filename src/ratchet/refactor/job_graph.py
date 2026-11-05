@@ -49,10 +49,12 @@ from ratchet.pytest_runner import (
     find_untested_lines,
     format_failure_report,
     format_untested_report,
+    outcomes_of_files,
     run_pytest,
 )
 from ratchet.refactor.agent_answers import (
     ImplementerAnswer,
+    MapReview,
     Plan,
     Review,
     Status,
@@ -276,7 +278,8 @@ def _format_map_review_prompt(
         "# The implementer changed functions that the plan does not name\n\n"
         "Approve them when the plan's step needs them, and revise when it does not. A revise "
         "sends the job back to the implementer with your revisions, and an approve lets the "
-        "functions stay. Leave `tests_to_write` empty.",
+        "functions stay. Answer in the shape that your instructions give for the functions outside "
+        "the plan, which holds only a verdict, a summary and revisions.",
         "# The functions outside the plan\n\n" + functions,
         "# The plan\n\n```json\n" + json.dumps(plan, indent=2) + "\n```",
         "# The pathway map of the functions outside the plan\n\n```json\n"
@@ -580,11 +583,7 @@ def build_job_graph(
             run = run_pytest([*project.config.test_command, *paths], project.root, folder,
                              project.config.test_timeout_s)
             # test_command may name a test folder, so the run can hold tests that were not written
-            # a file that fails to import is reported as "::<module>", with no class part
-            modules = [path.removesuffix(".py").replace("/", ".") for path in paths]
-            written = {test_id: outcome for test_id, outcome in run.outcomes.items()
-                       if any(test_id.split("::")[0] == module or test_id == f"::{module}"
-                              or test_id.startswith(module + ".") for module in modules)}
+            written = outcomes_of_files(run.outcomes, paths)
             failed = {test_id: outcome for test_id, outcome in written.items()
                       if outcome.kind != OutcomeKind.PASSED}
             if written and not failed:
@@ -663,7 +662,12 @@ def build_job_graph(
         pathways = describe(build_map(project.root), outside)
         prompt = _format_map_review_prompt(job.data["plan"], outside, pathways, diff, project.rules)
         folder = attempt_folder(job)
-        reply = ask(super_planner, prompt, folder)
+        # the map review answers in its own shape, which has no tests to write
+        super_planner.schema = MapReview
+        try:
+            reply = ask(super_planner, prompt, folder)
+        finally:
+            super_planner.schema = SuperPlan
         answer, cost = reply.data, reply.cost_usd
         (folder / "map-review.json").write_text(answer.model_dump_json(indent=2), encoding="utf-8")
         if answer.verdict == SuperVerdict.APPROVE:
@@ -705,7 +709,7 @@ def build_job_graph(
             # An empty report means nothing was measured, such as when the project's own pytest
             # options turn coverage off, so no line can be called untested.
             if coverage and run.coverage:
-                untested = find_untested_lines(repo.diff(), run.coverage)
+                untested = find_untested_lines(repo.diff(), run.coverage, project.root, run.omit)
             if not untested:
                 report(job, "test", f"passed ({count_of(len(run.outcomes), 'test')})")
                 return "review"

@@ -1,0 +1,7 @@
+{
+  "verdict": "revise",
+  "summary": "invoices.tax.tax_due is not on any path that the plan's step changes, so its new rounding belongs to a later step.",
+  "revisions": [
+    "Undo the change to invoices.tax.tax_due, and leave its rounding as it was."
+  ]
+}

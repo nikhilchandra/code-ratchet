@@ -126,6 +126,16 @@ class SuperPlan(_Answer):
     revisions: list[str]
 
 
+class MapReview(_Answer):
+    """Holds the super-planner's verdict on the functions that the implementer changed outside
+    the plan."""
+
+    verdict: SuperVerdict
+    summary: str
+    # What the implementer must undo or move when the verdict is revise, otherwise empty.
+    revisions: list[str]
+
+
 # ---------------------------------------------------------------- the test writer's answer
 
 

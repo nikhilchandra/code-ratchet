@@ -91,6 +91,9 @@ class Repo:
         """Returns the diff of every change outside .ratchet against the last commit, new files
         included.
 
+        The a/ and b/ path prefixes are fixed and color is off, so the owner's diff.noprefix,
+        diff.mnemonicPrefix and color settings cannot change what a reader of the diff sees.
+
         Args:
             paths: The files to limit the diff to. None means every file.
 
@@ -99,7 +102,7 @@ class Repo:
         """
         self.run("add", "-A", "--", *self.step_paths)
         try:
-            return self.run("diff", "--cached", "--", *paths)
+            return self.run("diff", "--cached", "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--", *paths)
         finally:
             self.run("reset", "-q")
 

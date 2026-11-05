@@ -912,8 +912,8 @@ def build_audit_graph(
     def check(job: Job) -> str:
         # a discard decided at the questions gate goes straight to publish, with no checker turn
         if job.data.get("decision") == "discard":
-            # a copy that remove_copy refuses is left alone, as it is when the folder is gone
-            with contextlib.suppress(CopyError):
+            # a copy that remove_copy refuses or cannot delete, such as a locked file, is left for the sweep
+            with contextlib.suppress(CopyError, OSError):
                 remove_copy(Path(job.data["copy"]))
             return "publish"
         # a copy deleted while the job waited at the questions gate would make every citation fail
@@ -1011,8 +1011,9 @@ def build_audit_graph(
                 lines += [f"- note: {text}" for text in entry.notes]
             (folder / "verdicts.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         finally:
-            # a copy that remove_copy refuses must not throw away the checker's work
-            with contextlib.suppress(CopyError):
+            # a copy that remove_copy refuses or cannot delete, such as a locked file, must not throw away
+            # the checker's work, and the sweep removes it later
+            with contextlib.suppress(CopyError, OSError):
                 remove_copy(copy)
         return "draft"
 

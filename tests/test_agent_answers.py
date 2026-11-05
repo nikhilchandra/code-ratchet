@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 
 from ratchet.refactor.agent_answers import (
     ImplementerAnswer,
+    MapReview,
     Plan,
     Review,
     Status,
@@ -32,6 +33,8 @@ SAVED = [
     ("review-replan.json", Review),
     ("super-plan-approve.json", SuperPlan),
     ("super-plan-revise.json", SuperPlan),
+    ("map-review-approve.json", MapReview),
+    ("map-review-revise.json", MapReview),
     ("test-writer.json", WriterAnswer),
 ]
 
@@ -105,7 +108,20 @@ def test_an_unknown_verdict_is_refused() -> None:
         Review.model_validate(answer)
 
 
-@pytest.mark.parametrize("shape", [Plan, ImplementerAnswer, Review, SuperPlan, WriterAnswer])
+def test_a_map_review_refuses_tests_to_write() -> None:
+    """Proves the super-planner's answer on the functions outside the plan cannot ask for tests,
+    so no test it asks for there can be lost."""
+    answer = saved("map-review-approve.json")
+    answer["tests_to_write"] = [{"file": "tests/test_rounding.py", "name": "test_round_cents",
+                                 "covers": "invoices.pricing.round_cents",
+                                 "checks": "round_cents(1.005) is 1.01"}]
+
+    with pytest.raises(ValidationError, match="tests_to_write"):
+        MapReview.model_validate(answer)
+
+
+@pytest.mark.parametrize("shape", [Plan, ImplementerAnswer, Review, SuperPlan, MapReview,
+                                   WriterAnswer])
 def test_the_schema_requires_every_field_and_uses_the_json_names(shape: type[BaseModel]) -> None:
     """Proves the schema sent to Claude requires every field, refuses others, and names the
     fields as the prompts do."""

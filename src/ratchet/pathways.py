@@ -15,9 +15,13 @@ import ast
 import builtins
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ratchet.git import GitError, find_program
+from ratchet.unified_diff import diff_lines
 
 # The most paths that upstream_paths lists for one function.
 PATH_LIMIT = 50
@@ -27,9 +31,6 @@ MODULE_PART = "<module>"
 
 # A path segment that reads as a file name, such as ledger.json or rules.md.
 _FILE_NAME = re.compile(r"[\w.-]+\.\w+")
-
-# The line that starts a hunk of a unified diff.
-_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 # The kinds of syntax that define a function or a class.
 _DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -640,45 +641,75 @@ def describe(pathway_map: PathwayMap, names: list[str]) -> dict:
     return {"functions": described, "unknown": unknown}
 
 
+def _module_of_path(path: str) -> str | None:
+    """Returns the dotted module of a posix path relative to the root, named the way _find_modules names it.
+
+    A path that is not a .py file under src gives None.
+    """
+    parts = path.split("/")
+    if len(parts) < 3 or parts[0] != "src" or not parts[-1].endswith(".py"):
+        return None
+    if parts[-1] == "__init__.py":
+        return ".".join(parts[1:-1])
+    return ".".join([*parts[1:-1], parts[-1][:-3]])
+
+
+def _old_map(root: Path, path: str, module: str) -> PathwayMap | None:
+    """Returns a map of the committed version of path, or None when that version cannot be read or parsed.
+
+    A file in a folder that held no __init__.py at HEAD gives None, because _find_modules skips it.
+    The blob is read as bytes, because a text pipe on Windows swallows a decode error and returns empty output.
+    """
+    parts = path.split("/")
+    try:
+        git = find_program("git")
+        for depth in range(2, len(parts)):
+            package = "/".join([*parts[:depth], "__init__.py"])
+            if subprocess.run([git, "cat-file", "-e", f"HEAD:{package}"], capture_output=True, cwd=root).returncode != 0:
+                return None
+        finished = subprocess.run([git, "show", f"HEAD:{path}"], capture_output=True, cwd=root)
+    except (OSError, GitError):
+        return None
+    if finished.returncode != 0:
+        return None
+    try:
+        tree = ast.parse(finished.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    builder = _Builder(root)
+    builder.map.module_files[module] = root / path
+    builder._index_module(module, tree)
+    return builder.map
+
+
 def functions_of_diff(pathway_map: PathwayMap, diff_text: str) -> list[str]:
     """Returns the sorted functions in src that enclose a changed line of a unified diff.
 
-    An added line counts at its line in the new file. A removed line counts at the line of the new
-    file that it sits before. A changed line outside any function belongs to the module's <module> node.
+    An added line counts at its line in the new file. A removed line counts at its line in the committed
+    file, read with git show HEAD. A deleted file counts every function it held. When the committed file
+    cannot be read or parsed, a removed line falls back to the line of the new file that it sits before.
+    A changed line outside any function belongs to the module's <module> node.
     """
     changed: set[str] = set()
     module: str | None = None
-    lines = diff_text.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        index += 1
-        if line.startswith("+++ "):
-            path = line[4:].split("\t")[0].strip()
-            module = pathway_map.file_modules.get(path[2:]) if path.startswith("b/") else None
-            continue
-        match = _HUNK.match(line)
-        if not match:
-            continue
-        old_left = int(match.group(1) or 1)
-        new_line = int(match.group(2))
-        new_left = int(match.group(3) or 1)
-        while (old_left > 0 or new_left > 0) and index < len(lines):
-            text = lines[index]
-            index += 1
-            if text.startswith("\\"):
-                continue
-            marker = text[:1]
-            if marker != "+":
-                old_left -= 1
-            if marker != "-":
-                new_left -= 1
-            if marker == "+" and module:
-                changed.add(_enclosing(pathway_map, module, new_line))
-            elif marker == "-" and module:
-                changed.add(_removed_in(pathway_map, module, new_line, text[1:]))
-            if marker != "-":
-                new_line += 1
+    old_module: str | None = None
+    old: PathwayMap | None = None
+    last = None
+    for line in diff_lines(diff_text):
+        if (line.old_path, line.new_path) != last:
+            last = (line.old_path, line.new_path)
+            # map the committed file, and count all of it when the file was deleted
+            module = pathway_map.file_modules.get(line.new_path) if line.new_path else None
+            old_module = _module_of_path(line.old_path) if line.old_path else None
+            old = _old_map(pathway_map.root, line.old_path, old_module) if line.old_path and old_module else None
+            if line.new_path is None and old is not None:
+                changed.update(old.functions)
+        if line.marker == "+" and module:
+            changed.add(_enclosing(pathway_map, module, line.new_line))
+        elif line.marker == "-" and old is not None and old_module:
+            changed.add(_enclosing(old, old_module, line.old_line))
+        elif line.marker == "-" and module:
+            changed.add(_removed_in(pathway_map, module, line.new_line, line.text[1:]))
     return sorted(changed)
 
 
