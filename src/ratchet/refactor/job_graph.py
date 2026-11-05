@@ -1,8 +1,12 @@
 """Builds the graph that carries one refactor job, from the planner's plan to a commit or an
-undo, and the three agents that the graph calls.
+undo, and the five agents that the graph calls.
 
 A job goes through these steps:
     plan: the planner picks the next step and writes its plan, or says that nothing is left.
+    super-plan: code builds the pathway map of the plan's functions, and the super-planner
+        approves the plan with the tests it wants written, or sends it back to plan.
+    write-tests: the test writer writes the tests, and code checks that they pass on the code as
+        it is.
     implement: the implementer makes the change, or reports that the plan cannot be done.
     check-rules: code checks the rules it can check by itself.
     test: the whole suite runs and is compared with the baseline.
@@ -12,8 +16,9 @@ A job goes through these steps:
     commit: the step is committed with the plan's title.
     undo: the code goes back to the last commit.
 
-A failed check, a test failure or a rejection sends the job back to implement with a report,
-until a cap is reached and the job is undone. When the job ends, job.data["outcome"] says how,
+A failed check, a test failure or a rejection sends the job back to implement with a report, a
+revise sends it back to plan, and a refused test write sends it back to write-tests, each until a
+cap is reached and the job is undone. When the job ends, job.data["outcome"] says how,
 and job.data["reason"] says why for an outcome other than committed.
 """
 
@@ -31,8 +36,25 @@ from ratchet.git import Repo
 from ratchet.problem_history import problem_history
 from ratchet.project import Project
 from ratchet.records import records_log
-from ratchet.pytest_runner import Outcome, find_regressions, format_failure_report, run_pytest
-from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review, Status, Verdict
+from ratchet.pathways import build_map, describe
+from ratchet.pytest_runner import (
+    Outcome,
+    OutcomeKind,
+    find_regressions,
+    format_failure_report,
+    run_pytest,
+)
+from ratchet.refactor.agent_answers import (
+    ImplementerAnswer,
+    Plan,
+    Review,
+    Status,
+    SuperPlan,
+    SuperVerdict,
+    Verdict,
+    WantedTest,
+    WriterAnswer,
+)
 from ratchet.refactor.agent_profiles import Role, write_profile
 from ratchet.refactor.comment_fixes import apply_comment_fixes
 from ratchet.refactor.job_outcome import JobOutcome
@@ -46,6 +68,7 @@ from ratchet.refactor.review_reports import (
 )
 from ratchet.refactor.rule_checks import check_rules, find_violations, snapshot_ratchet_files
 from ratchet.refactor.settings import COMMAND, RefactorSettings
+from ratchet.refactor.written_tests import find_write_faults, read_written, save_written
 
 # How many of the latest jobs the planner sees.
 RECENT_JOBS = 10
@@ -75,10 +98,10 @@ class RefactorError(RuntimeError):
 def make_agents(
     project: Project, settings: RefactorSettings, problems_file: str, folder: Path
 ) -> dict[str, Agent]:
-    """Returns the planner, the implementer and the reviewer, each set up from its settings.
+    """Returns the five agents, each set up from its settings.
 
-    Each agent starts every turn fresh, so its prompt carries everything it needs. Only the
-    implementer may change files, and only those that the project allows.
+    Each agent starts every turn fresh, so its prompt carries everything it needs. Only the test
+    writer and the implementer may change files, and only those that the project allows.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -88,12 +111,19 @@ def make_agents(
         folder: The folder for the agents' profiles and logs.
 
     Returns:
-        The three agents, keyed by their role's name.
+        The five agents, keyed by their role's name.
     """
     profiles = folder / "profiles"
     logs = folder / "logs"
     roles = {
         Role.PLANNER: (settings.planner, Plan, {}),
+        Role.SUPER_PLANNER: (settings.super_planner, SuperPlan, {}),
+        Role.TEST_WRITER: (settings.test_writer, WriterAnswer, {
+            "tools": Tool.AUTHOR,
+            "commands": Command.PYTEST,
+            "editable": tuple(project.config.editable),
+            "frozen": tuple(project.frozen),
+        }),
         Role.IMPLEMENTER: (settings.implementer, ImplementerAnswer, {
             "tools": Tool.AUTHOR,
             "commands": Command.PYTEST | Command.GIT_MV | Command.GIT_RM,
@@ -145,7 +175,8 @@ def _format_planner_prompt(project: Project, job: Job, ledger: Ledger, problems_
     Args:
         project: The project, as read from its .ratchet folder.
         job: The job, whose prompt is a problem the person asks to be planned next, such as
-            "P19", or "".
+            "P19", or "". When the super-planner sent a plan back, the job's data holds that
+            plan and what the super-planner asked for.
         ledger: The ledger of the problem list.
         problems_file: The problem list's path from the project's folder.
 
@@ -180,7 +211,71 @@ def _format_planner_prompt(project: Project, job: Job, ledger: Ledger, problems_
     if job.prompt:
         lines += ["", "# A request from the person running ratchet", "",
                   f"Plan a step for {job.prompt} next, if the rules for ordering allow it."]
+    revised = job.data.get("revised")
+    if revised:
+        lines += ["", "# The super-planner sent your plan back", "",
+                  "Make a plan that meets every revision below, or stop if no plan can.", "",
+                  "## The plan that was sent back", "",
+                  "```json", json.dumps(revised["plan"], indent=2), "```", "",
+                  "## What the super-planner said", "", revised["summary"], "",
+                  "## The revisions", ""]
+        lines += [f"- {revision}" for revision in revised["revisions"]]
     return "\n".join(lines) + "\n"
+
+
+def _format_super_planner_prompt(plan: dict, pathways: dict, rules: str) -> str:
+    """Returns the super-planner's prompt: the plan, the pathway map of its functions, and the
+    project's rules.
+
+    Args:
+        plan: The planner's plan, as the job's data holds it.
+        pathways: The pathway map of the plan's functions, as ratchet.pathways.describe() returns
+            it.
+        rules: The text of the project's rules.md.
+
+    Returns:
+        The prompt as markdown.
+    """
+    return "\n\n".join([
+        "# The plan\n\n```json\n" + json.dumps(plan, indent=2) + "\n```",
+        "# The pathway map of the plan's functions\n\n```json\n"
+        + json.dumps(pathways, indent=2) + "\n```",
+        "# The project's rules\n\n" + rules.strip(),
+    ])
+
+
+def _format_writer_prompt(wanted: list[WantedTest], report: str) -> str:
+    """Returns the test writer's prompt: the tests to write, and on a later turn the report on
+    the last one.
+
+    Args:
+        wanted: The tests that the super-planner asked for.
+        report: The report on the test writer's last turn, or "".
+
+    Returns:
+        The prompt as markdown.
+    """
+    lines = ["# The tests to write", ""]
+    for test in wanted:
+        lines += [f"- `{test.file}`: `{test.name}` covers {test.covers}", f"  - checks: {test.checks}"]
+    prompt = "\n".join(lines)
+    if report:
+        prompt += "\n\n# The report on your last turn\n\n" + report
+    return prompt
+
+
+def _format_written_section(written: list[str]) -> str:
+    """Returns the part of a prompt that names the tests which the test writer wrote.
+
+    Args:
+        written: The paths of the written tests.
+
+    Returns:
+        A markdown section.
+    """
+    lines = ["# The tests the test writer wrote", "",
+             "The test writer wrote these tests before the step, and they are frozen for it:", ""]
+    return "\n".join([*lines, *[f"- `{path}`" for path in written]])
 
 
 def _format_implementer_prompt(job: Job, settings: RefactorSettings, diff: str) -> str:
@@ -188,7 +283,8 @@ def _format_implementer_prompt(job: Job, settings: RefactorSettings, diff: str) 
     report with the diff as it stands.
 
     Args:
-        job: The job, whose data holds the plan, the attempt and the last report.
+        job: The job, whose data holds the plan, the attempt, the last report and the written
+            tests.
         settings: The refactor command's settings, which hold the caps.
         diff: The diff of the code as it stands.
 
@@ -201,6 +297,9 @@ def _format_implementer_prompt(job: Job, settings: RefactorSettings, diff: str) 
         f"# Attempt\n\nThis is attempt {job.data['attempt']}. The step is set aside after "
         f"{caps.rejections} rejections in a row or {caps.test_failures} test failures.",
     ]
+    if job.data.get("written"):
+        parts.append(_format_written_section(job.data["written"]) +
+                     "\n\nMake the code pass them. Do not change, move or delete them.")
     if job.data["report"]:
         parts.append("# The report on the last attempt\n\n" + job.data["report"])
         parts.append("# The diff of the code as it stands\n\n```diff\n" + diff + "\n```")
@@ -211,18 +310,24 @@ def _format_reviewer_prompt(job: Job, diff: str) -> str:
     """Returns the reviewer's prompt: the plan, the implementer's answer, the attempt and the diff.
 
     Args:
-        job: The job, whose data holds the plan, the implementer's answer and the attempt.
+        job: The job, whose data holds the plan, the implementer's answer, the attempt and the
+            written tests.
         diff: The diff of the step against the last commit.
 
     Returns:
         The prompt as markdown.
     """
-    return "\n\n".join([
+    parts = [
         "# The plan\n\n```json\n" + json.dumps(job.data["plan"], indent=2) + "\n```",
         "# The implementer's answer\n\n```json\n" + json.dumps(job.data["answer"], indent=2) + "\n```",
         f"# Attempt\n\nThis is attempt {job.data['attempt']}. The whole suite passed on it.",
         "# The diff against the last commit\n\n```diff\n" + diff + "\n```",
-    ])
+    ]
+    if job.data.get("written"):
+        parts.insert(2, _format_written_section(job.data["written"]) +
+                     "\n\nThey are in the diff, but judge the implementer's work against them and "
+                     "not the tests themselves.")
+    return "\n\n".join(parts)
 
 
 def build_job_graph(
@@ -236,7 +341,7 @@ def build_job_graph(
     problem_list: ProblemList,
     report: StepReport = _report_nothing,
 ) -> AgentGraph:
-    """Returns the graph that carries one refactor job through its eight steps.
+    """Returns the graph that carries one refactor job through its ten steps.
 
     The job's prompt is a problem that the person running ratchet asks to be planned next, such
     as "P19", or "". Each job keeps its prompts, reports, diffs and test logs in a folder named
@@ -246,14 +351,15 @@ def build_job_graph(
     Args:
         project: The project, as read from its .ratchet folder.
         settings: The refactor command's settings.
-        agents: The planner, the implementer and the reviewer, keyed by their role's name, as
+        agents: The five agents, keyed by their role's name, as
             make_agents() returns them.
         baseline: Each test's outcome before the run started, which every test run is
             compared with.
         folder: The folder that the graph keeps its jobs in, under a folder named "refactor".
         ledger: The ledger of the problem list, which the planner's prompt is made from. A
             plan that the ledger refuses halts the job before any code changes. A plan that
-            passes gives each of its problems a job_started event.
+            passes gives each of its problems a job_started event, once for the job even when
+            the super-planner sends the plan back.
         ledger_path: The ledger's file, which the plan step saves right after it records
             job_started.
         problem_list: The problem list that the jobs work on.
@@ -266,14 +372,28 @@ def build_job_graph(
     repo = Repo(project.root)
     caps = settings.caps
     planner = agents[Role.PLANNER]
+    super_planner = agents[Role.SUPER_PLANNER]
+    test_writer = agents[Role.TEST_WRITER]
     implementer = agents[Role.IMPLEMENTER]
     reviewer = agents[Role.REVIEWER]
     # The .ratchet files as they were when the graph was built, which no step may change.
     ratchet_files = snapshot_ratchet_files(project)
+    # The implementer's own frozen paths, to which each job adds the tests that were written for it.
+    implementer_frozen = tuple(implementer.frozen)
 
     def job_folder(job: Job) -> Path:
         """Returns the folder that holds one job's files."""
         return graph.state_dir / job.slug
+
+    def planning_folder(job: Job) -> Path:
+        """Returns the folder that holds the current planning round's files, which is the job's
+        own folder for the first round and a folder for each round after a revise."""
+        rounds = job.data.get("revisions", 0)
+        return job_folder(job) / f"revision-{rounds}" if rounds else job_folder(job)
+
+    def writing_folder(job: Job) -> Path:
+        """Returns the folder that holds the current test-writing turn's files."""
+        return job_folder(job) / f"write-tests-{job.data['rewrites'] + 1}"
 
     def attempt_folder(job: Job) -> Path:
         """Returns the folder that holds the current attempt's files."""
@@ -300,21 +420,39 @@ def build_job_graph(
         """Returns where the job goes after a failure, such as "-> attempt 2" or "-> undo"."""
         if after == "implement":
             return f"-> attempt {job.data['attempt'] + 1}"
+        if after == "plan":
+            return f"-> plan again, revision {job.data['revisions']} of {caps.revisions}"
+        if after == "write-tests":
+            return f"-> write again, rewrite {job.data['rewrites']} of {caps.test_rewrites}"
         if job.data.get("outcome") != JobOutcome.ABANDONED:
             return "-> undo"
+        if job.data["revisions"] > caps.revisions:
+            return f"-> undo, at the cap of {count_of(caps.revisions, 'revision')}"
+        if job.data["rewrites"] > caps.test_rewrites:
+            return f"-> undo, at the cap of {count_of(caps.test_rewrites, 'rewrite')}"
         if job.data["test_failures"] >= caps.test_failures:
             return f"-> undo, at the cap of {count_of(caps.test_failures, 'test failure')}"
         return f"-> undo, at the cap of {count_of(caps.rejections, 'rejection')}"
 
-    @graph.step("plan", next=("implement", None))
+    @graph.step("plan", next=("super-plan", "undo", None))
     def plan(job: Job) -> str | None:
         prompt = _format_planner_prompt(project, job, ledger, problem_list.relative_path)
-        reply = ask(planner, prompt, job_folder(job))
+        reply = ask(planner, prompt, planning_folder(job))
         answer, cost = reply.data, reply.cost_usd
-        job.data.update(plan=answer.model_dump(mode="json", by_alias=True), attempt=0,
-                        rejections=0, test_failures=0, report="")
-        (job_folder(job) / "plan.json").write_text(json.dumps(job.data["plan"], indent=2),
-                                                    encoding="utf-8")
+        replanned = bool(job.data.get("revisions"))
+        written = answer.model_dump(mode="json", by_alias=True)
+        (planning_folder(job) / "plan.json").write_text(json.dumps(written, indent=2),
+                                                         encoding="utf-8")
+        if replanned and answer.stop:
+            # the job keeps the plan the super-planner last saw, so that the ledger records it
+            report(job, "plan", "nothing left to plan after a revise -> undo", cost_usd=cost,
+                   detail=answer.reason)
+            return end(job, JobOutcome.ABANDONED,
+                       f"The planner had nothing left to plan after a revise: {answer.reason}")
+        if not replanned:
+            job.data.update(attempt=0, rejections=0, test_failures=0, report="", revisions=0,
+                            rewrites=0, started=[], written=[], write_report="")
+        job.data["plan"] = written
         if answer.stop:
             report(job, "plan", "nothing left to plan", cost_usd=cost, detail=answer.reason)
             job.data.update(outcome=JobOutcome.STOPPED, reason=answer.reason)
@@ -325,16 +463,100 @@ def build_job_graph(
             report(job, "plan", f"refused: {refusal}")
             raise RefactorError(f"the plan was refused: {refusal}")
 
-        # record job_started for each of the plan's problems under the job's new id and save the ledger
+        # record job_started for each of the plan's problems that the job has not started, under
+        # the job's id, and save the ledger
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        job_id = f"J{ledger.next_job_number():02d}"
-        job.data["job_id"] = job_id
+        job_id = job.data.setdefault("job_id", f"J{ledger.next_job_number():02d}")
         for problem_id in answer.problems:
+            if problem_id in job.data["started"]:
+                continue
+            job.data["started"].append(problem_id)
             problem = ledger.problems.setdefault(problem_id, ProblemRecord())
             problem.events.append(ProblemEvent(when=now, kind="job_started", by=job_id,
                                                job=job_id, note=answer.summary))
         save_ledger(ledger, ledger_path)
-        return "implement"
+        return "super-plan"
+
+    @graph.step("super-plan", next=("plan", "write-tests", "implement", "undo"))
+    def super_plan(job: Job) -> str:
+        pathways = describe(build_map(project.root), Plan.model_validate(job.data["plan"]).functions)
+        prompt = _format_super_planner_prompt(job.data["plan"], pathways, project.rules)
+        reply = ask(super_planner, prompt, planning_folder(job))
+        answer, cost = reply.data, reply.cost_usd
+        (planning_folder(job) / "super-plan.json").write_text(
+            answer.model_dump_json(indent=2), encoding="utf-8")
+        if answer.verdict == SuperVerdict.REVISE:
+            job.data["revisions"] += 1
+            job.data["revised"] = {"plan": job.data["plan"], "summary": answer.summary,
+                                   "revisions": answer.revisions}
+            after = "plan"
+            if job.data["revisions"] > caps.revisions:
+                notes = "\n".join(f"- {revision}" for revision in answer.revisions)
+                after = end(job, JobOutcome.ABANDONED,
+                            f"# The plan was sent back too often\n\n{answer.summary}\n\n{notes}")
+            report(job, "super-plan", f"revise {where_next(job, after)}", cost_usd=cost,
+                   detail=answer.summary)
+            return after
+        wanted = answer.tests_to_write
+        job.data["wanted"] = [test.model_dump(mode="json") for test in wanted]
+        to_write = f"{count_of(len(wanted), 'test')} to write" if wanted else "no tests to write"
+        report(job, "super-plan", f"approve, {to_write}", cost_usd=cost)
+        return "write-tests" if wanted else "implement"
+
+    @graph.step("write-tests", next=("write-tests", "implement", "undo"))
+    def write_tests(job: Job) -> str:
+        wanted = [WantedTest.model_validate(test) for test in job.data["wanted"]]
+        folder = writing_folder(job)
+        try:
+            reply = ask(test_writer, _format_writer_prompt(wanted, job.data["write_report"]),
+                        folder)
+        except NoAnswerError as error:
+            # the cut-off turn's files are dropped, so that a resumed job starts this turn clean
+            repo.undo()
+            report(job, "write-tests", "gave no answer", detail=str(error))
+            raise
+        cost = reply.cost_usd
+        faults, paths = find_write_faults(project, repo, [test.file for test in wanted])
+        if faults:
+            report_text = ("# The tests were refused\n\n"
+                           + "\n".join(f"- {fault}" for fault in faults))
+        else:
+            run = run_pytest([*project.config.test_command, *paths], project.root, folder,
+                             project.config.test_timeout_s)
+            # test_command may name a test folder, so the run can hold tests that were not written
+            # a file that fails to import is reported as "::<module>", with no class part
+            modules = [path.removesuffix(".py").replace("/", ".") for path in paths]
+            written = {test_id: outcome for test_id, outcome in run.outcomes.items()
+                       if any(test_id.split("::")[0] == module or test_id == f"::{module}"
+                              or test_id.startswith(module + ".") for module in modules)}
+            failed = {test_id: outcome for test_id, outcome in written.items()
+                      if outcome.kind != OutcomeKind.PASSED}
+            if written and not failed:
+                save_written(project, job_folder(job), paths)
+                job.data["written"] = paths
+                made = f"{count_of(len(paths), 'file')}, {count_of(len(written), 'test')} passed"
+                report(job, "write-tests", made, cost_usd=cost)
+                return "implement"
+            if failed:
+                faults = [f"{len(failed)} failing on the code as it is: {name_tests(list(failed))}"]
+            elif run.outcomes:
+                faults = ["none of the written tests were collected"]
+            else:
+                faults = ["the test process crashed"]
+            report_text = format_failure_report(failed, run, folder / "pytest.log")
+
+        # the refused tests are undone, and the test writer sees them with the report
+        report_text += "\n\n# What you wrote\n\n```diff\n" + repo.diff() + "\n```\n"
+        repo.undo()
+        (folder / "report.md").write_text(report_text, encoding="utf-8")
+        job.data["write_report"] = report_text
+        job.data["rewrites"] += 1
+        after = "write-tests"
+        if job.data["rewrites"] > caps.test_rewrites:
+            after = end(job, JobOutcome.ABANDONED, report_text)
+        report(job, "write-tests", f"refused: {'; '.join(faults)} {where_next(job, after)}",
+               cost_usd=cost)
+        return after
 
     @graph.step("implement", next=("check-rules", "undo"))
     def implement(job: Job) -> str:
@@ -342,6 +564,8 @@ def build_job_graph(
         if job.data["attempt"] == 0:
             job.data["violations_before"] = find_violations(project)
         job.data["attempt"] += 1
+        # the tests written for this job are frozen for the implementer, and for it alone
+        implementer.frozen = implementer_frozen + tuple(job.data["written"])
         diff = repo.diff() if job.data["report"] else ""
         work = repo.save_work()
         try:
@@ -366,8 +590,9 @@ def build_job_graph(
     @graph.step("check-rules", next=("test", "implement", "undo"))
     def check_rules_step(job: Job) -> str:
         answer = ImplementerAnswer.model_validate(job.data["answer"])
+        written = read_written(job_folder(job), job.data["written"])
         broken = check_rules(project, repo, answer, ratchet_files,
-                             job.data.get("violations_before"))
+                             job.data.get("violations_before"), written)
         if not broken:
             return "test"
         rules = [line[2:] for line in broken.splitlines() if line.startswith("- ")]
@@ -448,7 +673,7 @@ def build_job_graph(
     @graph.step("fix-comments", next=("commit", "implement", "undo"))
     def fix_comments(job: Job) -> str:
         verdict = Review.model_validate(job.data["review"])
-        failure = apply_comment_fixes(project, verdict)
+        failure = apply_comment_fixes(project, verdict, job.data["written"])
         if not failure:
             (attempt_folder(job) / "comment-fixes.patch").write_text(repo.diff(), encoding="utf-8")
             job.data["comment_fixes"] = len(verdict.comment_fixes)

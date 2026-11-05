@@ -1,0 +1,16 @@
+{
+  "verdict": "revise",
+  "summary": "The plan's functions leave out invoices.tax.tax_due, which multiplies a line's quantity by its unit price as well. The step would leave a second copy of the line total, and P3 asks for one.",
+  "paths": [
+    "invoices.cli.main -> invoices.report.render -> invoices.pricing.line_total",
+    "invoices.cli.main -> invoices.tax.tax_due"
+  ],
+  "untested_paths": [
+    "invoices.cli.main -> invoices.tax.tax_due"
+  ],
+  "tests_to_write": [],
+  "revisions": [
+    "Add invoices.tax.tax_due to 'functions' and to 'changes', so that it calls pricing.line_total.",
+    "Add a check that src/invoices/tax.py no longer multiplies a quantity by a unit price."
+  ]
+}

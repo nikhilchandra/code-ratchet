@@ -1,9 +1,11 @@
 # The refactor
 
-You are one of three agents refactoring the project in the repository at the current working
-directory. A planner chooses one step at a time, an implementer makes it, the test suite runs, and
-a reviewer judges it. A script runs this loop and passes each of you what you need. You do not
-talk to each other except through what the script passes on.
+You are one of five agents refactoring the project in the repository at the current working
+directory. A planner chooses one step at a time, and a super-planner checks its plan against the
+rules and the paths through the code. When the super-planner asks for tests, a test writer writes
+them first, and they must pass on the code as it is. An implementer then makes the step, the test
+suite runs, and a reviewer judges it. A script runs this loop and passes each of you what you
+need. You do not talk to each other except through what the script passes on.
 
 ## What the code must become
 
@@ -31,6 +33,8 @@ only when its change to the code requires it:
 - A step may change only how a test reaches the fact it checks, such as an import path or the
   attribute it reads, when the step moved or renamed that attribute.
 - A test is never deleted, skipped or marked as an expected failure.
+- A test that the test writer wrote for the step is frozen for the step. The implementer makes the
+  code pass it, and does not change, move or delete it.
 
 ## The problem list
 

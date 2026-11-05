@@ -9,6 +9,9 @@ them. You do not edit any file. Read as much of the code around the diff as you 
 
 The script appends the plan for the step, the implementer's answer, the attempt number, and the
 full diff of the step against the last commit. The tests have already passed, so do not run them.
+When the test writer wrote tests for the step, the script names their files. They are frozen for
+the step and are part of the diff, but they are the test writer's work and not the implementer's,
+so judge the implementer's work against them and do not judge them.
 
 ## The rubric
 
@@ -45,7 +48,9 @@ and say what would fix it.
    order of results or an option. The tests passing does not prove this, so read for it.
 8. **Tests.** Every changed test, whether or not the implementer listed it, stays within the test
    rules of the shared section. It fails on any change to a frozen file or to an assertion, and on
-   any test that is deleted, skipped or marked as an expected failure.
+   any test that is deleted, skipped or marked as an expected failure. A test that the test writer
+   wrote is not a change of the implementer's, but the criterion fails when the implementer's code
+   does not keep to what it checks.
 9. **Comments (S21).** In the code that the step touches, every comment and docstring follows the
    comment rules of the shared section, and none is left untrue by the change. Do not fault
    comments in code that the step does not touch.

@@ -3,30 +3,56 @@ tests really run."""
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
 
 from ratchet.agent_calls import NoAnswerError
 from ratchet.git import Repo
+from ratchet.pathways import build_map, describe
 from ratchet.project import Project
 from ratchet.pytest_runner import run_pytest
-from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review
+from ratchet.refactor.agent_answers import (
+    ImplementerAnswer,
+    Plan,
+    Review,
+    SuperPlan,
+    WriterAnswer,
+)
 from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
-from ratchet.refactor.ledger import Ledger, ProblemEvent, ProblemRecord, load_ledger, record_job, save_ledger
+from ratchet.refactor.ledger import (
+    Ledger,
+    ProblemEvent,
+    ProblemRecord,
+    ProblemStatus,
+    load_ledger,
+    record_job,
+    save_ledger,
+)
 from ratchet.refactor.problem_list import find_latest_problem_list
 from ratchet.refactor.settings import Caps, RefactorSettings
 from rooster import Agent, JobStatus
+from conftest import APP
 from scripted_agents import (
     BREAK,
     GOOD,
     ScriptedAgent,
     Turn,
+    approve,
     done,
     edit,
     plan,
     review,
+    revise,
+    wanted,
+    write_test,
 )
+
+# A test that the test writer writes, which passes on the scratch project's code, and one that
+# fails on it.
+PASSING = "from app import add\n\n\ndef test_more():\n    # two and two\n    assert add(2, 2) == 4\n"
+FAILING = "from app import add\n\n\ndef test_more():\n    assert add(2, 2) == 5\n"
 
 
 @pytest.fixture
@@ -43,8 +69,14 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
     problem_list = find_latest_problem_list(project)
 
     def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
+            super_planner: list[Turn] | None = None, test_writer: list[Turn] = (),
             ledger: Ledger | None = None, focus: str = "", reports: list | None = None):
+        # a super-planner left out approves every plan and asks for no tests
+        if super_planner is None:
+            super_planner = [approve()] * len(planner)
         agents = {"planner": ScriptedAgent("planner", Plan, planner),
+                  "super_planner": ScriptedAgent("super_planner", SuperPlan, super_planner),
+                  "test_writer": ScriptedAgent("test_writer", WriterAnswer, test_writer),
                   "implementer": ScriptedAgent("implementer", ImplementerAnswer, implementer),
                   "reviewer": ScriptedAgent("reviewer", Review, reviewer)}
 
@@ -76,7 +108,7 @@ def test_an_accepted_step_is_committed(scratch, run_job) -> None:
     assert job.data["outcome"] == JobOutcome.COMMITTED
     assert repo.run("log", "-1", "--format=%s").strip() == "rename the comment in add"
     assert job.data["commit"] == repo.last_commit()
-    assert job.cost_usd == 1.5
+    assert job.cost_usd == 2.0
     folder = graph.state_dir / "job" / "attempt-1"
     assert {path.name for path in folder.iterdir()} >= {
         "implementer-prompt.md", "reviewer-prompt.md", "diff.patch", "checks.md", "pytest.log"}
@@ -342,10 +374,11 @@ def test_each_step_reports_what_happened(scratch, run_job) -> None:
     run_job([plan()], [edit(*GOOD)], [review("accept")], reports=reports)
 
     assert [(step, text) for step, text, _ in reports] == [
-        ("plan", "rename the comment in add"), ("implement", "attempt 1"),
-        ("test", "passed (1 test)"), ("review", "accept")]
+        ("plan", "rename the comment in add"), ("super-plan", "approve, no tests to write"),
+        ("implement", "attempt 1"), ("test", "passed (1 test)"), ("review", "accept")]
     assert reports[0][2] == {"problems": "P1", "cost_usd": 0.5}
-    assert reports[2][2] == {}
+    assert reports[1][2] == {"cost_usd": 0.5}
+    assert reports[3][2] == {}
 
 
 def test_each_failure_reports_its_culprit_and_where_the_job_goes(scratch, run_job) -> None:
@@ -404,7 +437,10 @@ def test_the_diagram_draws_every_arrow_of_the_table(scratch, run_job) -> None:
     arrows = {(names[a], names[b]) for a, b in re.findall(r"(s\d+) --> (s\d+|finish\(\(finish\)\))", text)}
 
     assert arrows == {
-        ("plan", "implement"), ("plan", "finish"),
+        ("plan", "super-plan"), ("plan", "undo"), ("plan", "finish"),
+        ("super-plan", "plan"), ("super-plan", "write-tests"), ("super-plan", "implement"),
+        ("super-plan", "undo"),
+        ("write-tests", "write-tests"), ("write-tests", "implement"), ("write-tests", "undo"),
         ("implement", "check-rules"), ("implement", "undo"),
         ("check-rules", "test"), ("check-rules", "implement"), ("check-rules", "undo"),
         ("test", "review"), ("test", "implement"), ("test", "undo"),
@@ -415,7 +451,7 @@ def test_the_diagram_draws_every_arrow_of_the_table(scratch, run_job) -> None:
 
 
 def test_the_real_agents_are_set_up_from_the_settings(scratch) -> None:
-    """Proves the three agents get their model, budget, answer shape and permissions, without
+    """Proves the five agents get their model, budget, answer shape and permissions, without
     running them."""
     project, _ = scratch
 
@@ -432,3 +468,375 @@ def test_the_real_agents_are_set_up_from_the_settings(scratch) -> None:
     assert reviewer.editable == () and reviewer.schema is Review
     assert planner.profile == project.state_dir / "list" / "profiles" / "planner.md"
     assert ".ratchet/problems-20261026-09h00m.md" in planner.profile.read_text(encoding="utf-8")
+    super_planner, test_writer = agents["super_planner"], agents["test_writer"]
+    assert set(agents) == {"planner", "super_planner", "test_writer", "implementer", "reviewer"}
+    assert (super_planner.model, super_planner.max_work_usd, super_planner.schema) == (
+        "opus", 3.0, SuperPlan)
+    assert super_planner.editable == ()
+    assert "Keep it small." in super_planner.profile.read_text(encoding="utf-8")
+    assert (test_writer.model, test_writer.max_work_usd, test_writer.schema) == (
+        "sonnet", 5.0, WriterAnswer)
+    assert test_writer.editable == ("src/**", "tests/**")
+    assert test_writer.frozen == ("**/*.feature", ".ratchet/**")
+
+
+def lines_of(reports: list, step: str) -> list[str]:
+    """Returns what each report of one step said, in order."""
+    return [text for name, text, _ in reports if name == step]
+
+
+def new_ledger(project: Project) -> Ledger:
+    """Returns an empty ledger of the scratch project's problem list."""
+    return Ledger(problem_list=find_latest_problem_list(project).name)
+
+
+def test_the_super_planner_sees_the_plan_the_pathway_map_and_the_rules(scratch, run_job) -> None:
+    """Proves code builds the pathway map of the plan's functions and gives it to the
+    super-planner with the plan and rules.md, and that an approval with no tests to write goes
+    straight to the implementer."""
+    project, repo = scratch
+    package = project.root / "src" / "shop"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(
+        '"""Totals a basket."""\n\n\ndef total(prices):\n    """Returns the sum."""\n'
+        '    return sum(prices)\n\n\ndef main():\n    """Shows the total."""\n'
+        '    print(total([1, 2]))\n', encoding="utf-8", newline="\n")
+    repo.commit("add a shop")
+    expected = json.dumps(describe(build_map(project.root), ["shop.cli.total"]), indent=2)
+
+    job, agents, _ = run_job([plan(functions=["shop.cli.total"])], [edit(*GOOD)],
+                             [review("accept")])
+
+    prompt = agents["super_planner"].prompts[0]
+    assert '"shop.cli.total"' in expected and expected in prompt
+    assert json.dumps(job.data["plan"], indent=2) in prompt
+    assert "Keep it small." in prompt
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert agents["test_writer"].prompts == []
+
+
+@pytest.mark.parametrize("functions", [["nowhere.at_all"], []])
+def test_a_super_plan_for_an_unknown_function_still_runs(scratch, run_job, functions) -> None:
+    """Proves a plan whose functions the pathway map does not hold, or that names none, still
+    reaches the super-planner and the commit."""
+    job, agents, _ = run_job([plan(functions=functions)], [edit(*GOOD)], [review("accept")])
+
+    prompts = agents["super_planner"].prompts
+    assert len(prompts) == 1 and all(name in prompts[0] for name in functions)
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_revise_sends_the_job_back_to_plan_with_the_notes(scratch, run_job) -> None:
+    """Proves a revise asks the planner again with the earlier plan and the revisions, and that
+    the planning rounds share one job id and one job_started event."""
+    project, _ = scratch
+    ledger = new_ledger(project)
+
+    job, agents, _ = run_job([plan(step_title="first try at the comment"), plan()],
+                             [edit(*GOOD)], [review("accept")],
+                             super_planner=[revise("name what add returns"), approve()],
+                             ledger=ledger)
+
+    second = agents["planner"].prompts[1]
+    assert '"first try at the comment"' in second
+    assert "name what add returns" in second
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert record_job(ledger, job.data, job.slug, job.cost_usd, Caps()).id == "J01"
+    kinds = [event.kind for event in ledger.problems["P1"].events]
+    assert kinds.count("job_started") == 1
+
+
+def test_the_third_revise_abandons_the_job(scratch, run_job) -> None:
+    """Proves the revise after the cap of two abandons the job before the implementer is asked,
+    and says so."""
+    project, repo = scratch
+    ledger = new_ledger(project)
+    reports: list = []
+
+    job, agents, _ = run_job([plan()] * 3, super_planner=[revise("rename it")] * 3,
+                             ledger=ledger, reports=reports)
+
+    assert job.data["outcome"] == JobOutcome.ABANDONED
+    assert len(agents["super_planner"].prompts) == 3
+    assert agents["implementer"].prompts == []
+    assert lines_of(reports, "super-plan")[-1] == "revise -> undo, at the cap of 2 revisions"
+    assert repo.changed_paths() == []
+    record_job(ledger, job.data, job.slug, job.cost_usd, Caps())
+    assert ledger.problems["P1"].events[-1].kind == "abandoned"
+
+
+def test_a_stop_after_a_revise_keeps_the_last_plan(scratch, run_job) -> None:
+    """Proves a planner that stops after a revise abandons the job, and that the job keeps the
+    plan the super-planner last saw, so the ledger records its title and problems."""
+    project, _ = scratch
+    ledger = new_ledger(project)
+    stop = plan(stop=True, reason="nothing", step_title="", summary="", problems=[],
+                completes=[], functions=[])
+
+    job, agents, _ = run_job([plan(), stop], super_planner=[revise("rename it")], ledger=ledger)
+
+    assert job.data["outcome"] == JobOutcome.ABANDONED
+    assert job.data["plan"]["step_title"] == "rename the comment in add"
+    record = record_job(ledger, job.data, job.slug, job.cost_usd, Caps())
+    assert (record.title, record.problems) == ("rename the comment in add", ["P1"])
+    assert ledger.problems["P1"].events[-1].kind == "abandoned"
+
+
+def test_a_revised_plan_that_drops_a_problem_sends_it_back(scratch, run_job) -> None:
+    """Proves a problem that an earlier planning round started, and the revised plan dropped,
+    gets a sent_back event and stays open."""
+    project, _ = scratch
+    ledger = new_ledger(project)
+
+    job, _, _ = run_job([plan(problems=["P1", "P2"], completes=["P1"]), plan()],
+                        [edit(*GOOD)], [review("accept")],
+                        super_planner=[revise("leave P2 for later"), approve()], ledger=ledger)
+    record_job(ledger, job.data, job.slug, job.cost_usd, Caps())
+
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert ledger.status_of("P1") == ProblemStatus.DONE
+    dropped = ledger.problems["P2"]
+    assert dropped.events[-1].kind == "sent_back" and dropped.sendbacks == 1
+    assert ledger.status_of("P2") == ProblemStatus.OPEN
+    kinds = [event.kind for event in ledger.problems["P1"].events]
+    assert kinds.count("job_started") == 1
+
+
+def written_job(run_job, implementer: list[Turn], reviewer: list[Turn], **options):
+    """Runs one job whose super-planner asks for tests/test_more.py and whose test writer
+    writes a passing test there."""
+    return run_job([plan()], implementer, reviewer, super_planner=[approve(wanted())],
+                   test_writer=[write_test("tests/test_more.py", PASSING)], **options)
+
+
+def test_written_tests_pass_freeze_and_are_committed(scratch, run_job) -> None:
+    """Proves the test writer gets the tests asked for, its passing test is frozen for the
+    implementer and named in its prompt, and the test is committed with the step."""
+    project, repo = scratch
+    reports: list = []
+
+    job, agents, _ = written_job(run_job, [edit(*GOOD)], [review("accept")], reports=reports)
+
+    implementer = agents["implementer"]
+    assert "add(2, 2) is 4" in agents["test_writer"].prompts[0]
+    assert implementer.frozen_seen == [("tests/test_more.py",)]
+    assert "tests/test_more.py" in implementer.prompts[0]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert "tests/test_more.py" in repo.run("ls-files").splitlines()
+    assert lines_of(reports, "write-tests") == ["1 file, 1 test passed"]
+
+
+@pytest.fixture
+def folder_command(scratch: tuple[Project, Repo]) -> None:
+    """Makes the test command name the test folder, which holds one committed skipped test.
+
+    It is set up before the run_job fixture, so that the baseline holds the skipped test."""
+    project, repo = scratch
+    (project.root / "tests" / "test_old.py").write_text(
+        "import pytest\n\n\n@pytest.mark.skip\ndef test_old():\n    pass\n", encoding="utf-8")
+    repo.run("add", "-A")
+    repo.commit("add a skipped test")
+    project.config.test_command = [*project.config.test_command, "tests"]
+
+
+def test_a_skipped_old_test_is_not_counted_against_the_written_tests(
+        folder_command, run_job) -> None:
+    """Proves that, when the test command names the test folder, only the written tests count:
+    an old test that is skipped does not refuse them, and they are counted alone."""
+    reports: list = []
+
+    job, _, _ = written_job(run_job, [edit(*GOOD)], [review("accept")], reports=reports)
+
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert lines_of(reports, "write-tests") == ["1 file, 1 test passed"]
+
+
+def test_a_written_file_with_no_test_in_it_is_refused(folder_command, run_job) -> None:
+    """Proves a written file that holds no test is refused, rather than passing on the tests
+    that the run found elsewhere."""
+    reports: list = []
+
+    run_job([plan()], [], [], super_planner=[approve(wanted())],
+            test_writer=[write_test("tests/test_more.py", "VALUE = 1\n")] * 3, reports=reports)
+
+    assert "none of the written tests were collected" in lines_of(reports, "write-tests")[0]
+
+
+def test_a_written_test_that_kills_the_test_process_is_refused(run_job) -> None:
+    """Proves a written test that ends the test process, so that no outcome is read, is refused
+    as a crash."""
+    reports: list = []
+
+    run_job([plan()], [], [], super_planner=[approve(wanted())],
+            test_writer=[write_test("tests/test_more.py",
+                                    "import os\n\nos._exit(3)\n")] * 3, reports=reports)
+
+    assert "the test process crashed" in lines_of(reports, "write-tests")[0]
+
+
+UNIMPORTABLE = "import nonexistent_mod\n\n\ndef test_a():\n    pass\n"
+
+
+def test_a_written_test_that_cannot_be_imported_goes_back_with_the_error(scratch, run_job) -> None:
+    """Proves a written file that fails to import is refused as failing, and the test writer's
+    next prompt holds the import error."""
+    def second(prompt: str) -> dict:
+        assert "nonexistent_mod" in prompt
+        return write_test("tests/test_more.py", PASSING)(prompt)
+
+    reports: list = []
+    job, _, _ = run_job(
+        [plan()], [edit(*GOOD)], [review("accept")], super_planner=[approve(wanted())],
+        test_writer=[write_test("tests/test_more.py", UNIMPORTABLE), second], reports=reports)
+
+    assert "1 failing on the code as it is" in lines_of(reports, "write-tests")[0]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_the_next_job_gets_the_implementers_own_frozen_paths_back(scratch, run_job) -> None:
+    """Proves the written tests are frozen only for their own job, so a later job's
+    implementer sees its own frozen paths again."""
+    project, _ = scratch
+
+    job, agents, graph = run_job(
+        [plan(), plan(problems=["P2"], completes=["P2"])],
+        [edit(*GOOD), edit("a + b", "b + a")], [review("accept"), review("accept")],
+        super_planner=[approve(wanted()), approve()],
+        test_writer=[write_test("tests/test_more.py", PASSING)])
+    second = graph.start("", slug="job-2")
+
+    assert job.data["outcome"] == second.data["outcome"] == JobOutcome.COMMITTED
+    assert agents["implementer"].frozen_seen == [("tests/test_more.py",), ()]
+
+
+def test_the_reviewer_is_told_which_files_the_test_writer_wrote(scratch, run_job) -> None:
+    """Proves the reviewer's prompt names the written tests as the test writer's, frozen for
+    the step, apart from the diff that holds them."""
+    job, agents, _ = written_job(run_job, [edit(*GOOD)], [review("accept")])
+
+    prompt = agents["reviewer"].prompts[0]
+    named = [line for line in prompt.splitlines() if "tests/test_more.py" in line
+             and not line.startswith(("diff --git", "+++", "---"))]
+    assert named
+    assert "test writer" in prompt.lower() and "frozen" in prompt.lower()
+
+
+def test_a_comment_fix_in_a_written_test_is_refused(scratch, run_job) -> None:
+    """Proves a reviewer's comment fix to a written test is not made, and the step goes back to
+    the implementer, so the test is committed as the test writer left it."""
+    project, repo = scratch
+    fix = {"file": "tests/test_more.py", "old": "# two and two", "new": "# two plus two"}
+
+    job, agents, _ = written_job(
+        run_job, [edit(*GOOD), done()],
+        [review("accept_after_comment_fixes", failing=("comments",), fixes=[fix]),
+         review("accept")])
+
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert len(agents["implementer"].prompts) == 2
+    assert repo.run("show", "HEAD:tests/test_more.py") == PASSING
+
+
+def test_a_written_test_that_fails_on_the_current_code_goes_back(scratch, run_job) -> None:
+    """Proves a written test that fails on the unchanged code is undone and goes back to the
+    test writer with the failure and the earlier diff."""
+    project, _ = scratch
+
+    def second(prompt: str) -> dict:
+        assert app_text(project) == APP
+        assert not (project.root / "tests" / "test_more.py").exists()
+        assert "test_more" in prompt and "assert 4 == 5" in prompt
+        assert "+    assert add(2, 2) == 5" in prompt
+        return write_test("tests/test_more.py", PASSING)(prompt)
+
+    job, agents, _ = run_job([plan()], [edit(*GOOD)], [review("accept")],
+                             super_planner=[approve(wanted())],
+                             test_writer=[write_test("tests/test_more.py", FAILING), second])
+
+    assert len(agents["test_writer"].prompts) == 2
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_three_refused_test_writes_abandon_the_job(scratch, run_job) -> None:
+    """Proves the refusal after the cap of two rewrites abandons the job before the implementer
+    is asked, and leaves the tree clean."""
+    project, repo = scratch
+    reports: list = []
+
+    job, agents, _ = run_job([plan()], super_planner=[approve(wanted())],
+                             test_writer=[write_test("tests/test_more.py", FAILING)] * 3,
+                             reports=reports)
+
+    assert job.data["outcome"] == JobOutcome.ABANDONED
+    assert lines_of(reports, "write-tests")[-1].endswith("-> undo, at the cap of 2 rewrites")
+    assert agents["implementer"].prompts == []
+    assert repo.changed_paths() == []
+
+
+def test_a_test_writer_that_changes_code_or_an_existing_test_is_refused(scratch, run_job) -> None:
+    """Proves a write that changes source code or adds to an existing test file is refused and
+    sent back with both faults."""
+    project, _ = scratch
+
+    def meddle(prompt: str) -> dict:
+        edit(*GOOD)(prompt)
+        test_app = project.root / "tests" / "test_app.py"
+        test_app.write_text(test_app.read_text(encoding="utf-8")
+                            + "\n\ndef test_more():\n    assert add(2, 2) == 4\n",
+                            encoding="utf-8", newline="\n")
+        return {"summary": "wrote test_more",
+                "tests": [{"file": "tests/test_app.py", "name": "test_more", "covers": "app.add"}]}
+
+    job, agents, _ = run_job([plan()], [edit(*GOOD)], [review("accept")],
+                             super_planner=[approve(wanted())],
+                             test_writer=[meddle, write_test("tests/test_more.py", PASSING)])
+
+    second = agents["test_writer"].prompts[1]
+    assert "src/app.py is not a new test file" in second
+    assert "tests/test_app.py already exists at the last commit" in second
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_skip_word_in_a_written_test_is_refused(scratch, run_job) -> None:
+    """Proves a written test that holds the word skip, even in a comment, is refused."""
+    skipping = PASSING.replace("# two and two", "# skip this later")
+
+    job, agents, _ = run_job([plan()], [edit(*GOOD)], [review("accept")],
+                             super_planner=[approve(wanted())],
+                             test_writer=[write_test("tests/test_more.py", skipping),
+                                          write_test("tests/test_more.py", PASSING)])
+
+    assert "a skip or an expected failure" in agents["test_writer"].prompts[1]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_test_writer_with_no_answer_halts_the_job_with_the_tree_clean(scratch, run_job) -> None:
+    """Proves a cut-off test writer halts the job and drops the files its turn wrote."""
+    project, repo = scratch
+
+    def cut_off(prompt: str) -> None:
+        write_test("tests/test_more.py", PASSING)(prompt)
+        return None
+
+    with pytest.raises(NoAnswerError, match="the test_writer gave no answer: timed out"):
+        run_job([plan()], super_planner=[approve(wanted())], test_writer=[cut_off])
+
+    assert repo.changed_paths() == []
+
+
+def test_an_implementer_that_deletes_a_written_test_is_sent_back(scratch, run_job) -> None:
+    """Proves a written test that the implementer deletes is put back, named in the next
+    prompt, and committed as the test writer left it."""
+    project, repo = scratch
+
+    def delete_test(prompt: str) -> dict:
+        (project.root / "tests" / "test_more.py").unlink()
+        return edit(*GOOD)(prompt)
+
+    job, agents, _ = written_job(run_job, [delete_test, done()],
+                                 [review("accept")])
+
+    assert "tests/test_more.py was written by the test writer" in agents["implementer"].prompts[1]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert repo.run("show", "HEAD:tests/test_more.py") == PASSING

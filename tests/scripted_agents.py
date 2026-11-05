@@ -17,7 +17,8 @@ Turn = dict | Callable[[str], dict]
 
 class ScriptedAgent:
     """Stands in for an Agent, answering each turn from a script and keeping every prompt. Each
-    answered turn costs 'cost_usd' dollars, and a failed turn costs nothing."""
+    answered turn costs 'cost_usd' dollars, and a failed turn costs nothing. The agent also
+    keeps its 'frozen' paths as they stood at the start of each turn, in 'frozen_seen'."""
 
     def __init__(self, name: str, schema: type[BaseModel], turns: list[Turn], *,
                  cost_usd: float = 0.5) -> None:
@@ -29,10 +30,13 @@ class ScriptedAgent:
         self.session_id = None
         self.total_cost_usd = 0.0
         self.total_tokens = 0
+        self.frozen: tuple[str, ...] = ()
+        self.frozen_seen: list[tuple[str, ...]] = []
 
     def run(self, prompt: str) -> dict:
         """Returns the next scripted answer as a result, or a failed result when it is None."""
         self.prompts.append(prompt)
+        self.frozen_seen.append(tuple(self.frozen))
         turn = self.turns.pop(0)
         answer = turn(prompt) if callable(turn) else turn
         if answer is None:
@@ -51,9 +55,38 @@ def plan(**changes: object) -> dict:
     """Returns a plan with one check, with any field changed."""
     return {"stop": False, "reason": "", "step_title": "rename the comment in add",
             "summary": "rename the comment in add",
-            "problems": ["P1"], "completes": ["P1"], "why_now": "", "changes": [], "added": [],
+            "problems": ["P1"], "completes": ["P1"], "functions": ["app.add"], "why_now": "", "changes": [], "added": [],
             "removed": [], "moved": [], "tests_affected": [],
             "checks": ["src/app.py defines add"], "risks": ""} | changes
+
+
+def approve(*tests: dict) -> dict:
+    """Returns a super-planner's approval that asks for the tests given, as wanted() makes them."""
+    return {"verdict": "approve", "summary": "the plan fits", "paths": ["app.add"],
+            "untested_paths": [], "tests_to_write": list(tests), "revisions": []}
+
+
+def revise(*revisions: str) -> dict:
+    """Returns a super-planner's answer of revise, with the revisions given."""
+    return {"verdict": "revise", "summary": "revise the plan", "paths": ["app.add"],
+            "untested_paths": [], "tests_to_write": [], "revisions": list(revisions)}
+
+
+def wanted(file: str = "tests/test_more.py") -> dict:
+    """Returns one test that the super-planner asks for, in 'file'."""
+    return {"file": file, "name": "test_more", "covers": "app.add", "checks": "add(2, 2) is 4"}
+
+
+def write_test(path: str, body: str, name: str = "test_more") -> Callable[[str], dict]:
+    """Returns a test writer's turn that writes 'body' to the file at 'path', from the project's
+    folder, with Unix line endings, and answers that it wrote the test 'name' there."""
+    def turn(prompt: str) -> dict:
+        file = Path.cwd() / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(body, encoding="utf-8", newline="\n")
+        return {"summary": f"wrote {name}",
+                "tests": [{"file": path, "name": name, "covers": "app.add"}]}
+    return turn
 
 
 def done(**changes: object) -> dict:

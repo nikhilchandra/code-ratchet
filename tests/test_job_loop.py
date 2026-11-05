@@ -11,14 +11,34 @@ from ratchet.agent_calls import NoAnswerError
 from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.records import commit_records, init_records, records_log, records_repo
-from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review
+from ratchet.refactor.agent_answers import (
+    ImplementerAnswer,
+    Plan,
+    Review,
+    SuperPlan,
+    WriterAnswer,
+)
 from ratchet.refactor.job_graph import JobOutcome, RefactorError
 from ratchet.refactor import job_loop
 from ratchet.refactor.job_loop import run_refactor
 from ratchet.refactor.ledger import ProblemStatus, load_ledger
-from scripted_agents import GOOD, ScriptedAgent, Turn, edit, plan, review
+from scripted_agents import (
+    GOOD,
+    ScriptedAgent,
+    Turn,
+    approve,
+    edit,
+    plan,
+    review,
+    revise,
+    wanted,
+    write_test,
+)
 
 LIST = "problems-20261026-09h00m"
+
+# A test that the test writer writes, which passes on the scratch project's code.
+PASSING = "from app import add\n\n\ndef test_more():\n    assert add(2, 2) == 4\n"
 
 
 @pytest.fixture
@@ -30,8 +50,14 @@ def run(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
 
     def run_with(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
+                 super_planner: list[Turn] | None = None, test_writer: list[Turn] = (),
                  **options):
+        # a super-planner left out approves every plan and asks for no tests
+        if super_planner is None:
+            super_planner = [approve()] * len(planner)
         agents = {"planner": ScriptedAgent("planner", Plan, planner),
+                  "super_planner": ScriptedAgent("super_planner", SuperPlan, super_planner),
+                  "test_writer": ScriptedAgent("test_writer", WriterAnswer, test_writer),
                   "implementer": ScriptedAgent("implementer", ImplementerAnswer, implementer),
                   "reviewer": ScriptedAgent("reviewer", Review, reviewer)}
         lines: list[str] = []
@@ -58,17 +84,45 @@ def test_jobs_run_until_the_planner_finds_nothing_left(scratch, run) -> None:
 
     assert result.end == "the planner found nothing left: all done"
     assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
-    assert result.cost_usd == 2.0
+    assert result.cost_usd == 2.5
     assert ledger_of(project).status_of("P1") == ProblemStatus.DONE
     second = agents["planner"].prompts[1]
     assert "- P1: done" in second and '"rename the comment in add"' in second
     # the step's column starts after the time (7), the job (9) and the problems (7)
     steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]
-    assert steps == ["plan", "implement", "test", "review", "commit", "plan"]
+    assert steps == ["plan", "super-plan", "implement", "test", "review", "commit", "plan"]
     commit = next(line for line in lines if " commit " in line)
     assert re.fullmatch(
-        r"\d\d:\d\d  job-001 +commit +[0-9a-f]{7} \| J01 \| job \$1\.50 \| run \$1\.50", commit)
+        r"\d\d:\d\d  job-001 +commit +[0-9a-f]{7} \| J01 \| job \$2\.00 \| run \$2\.00", commit)
     assert (project.state_dir / LIST / "run.log").read_text(encoding="utf-8").count("\n") == len(lines)
+
+
+def test_a_job_with_written_tests_commits_them(scratch, run) -> None:
+    """Proves the test writer's test goes into the job's commit, and the job's problem is done."""
+    project, repo = scratch
+
+    result, _, _ = run([plan()], [edit(*GOOD)], [review("accept")],
+                       super_planner=[approve(wanted())],
+                       test_writer=[write_test("tests/test_more.py", PASSING)])
+
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+    committed = repo.run("show", "--name-only", "--format=", "HEAD").split()
+    assert "tests/test_more.py" in committed and "src/app.py" in committed
+    assert ledger_of(project).status_of("P1") == ProblemStatus.DONE
+
+
+def test_a_job_abandoned_at_the_revise_cap_lets_the_run_go_on(scratch, run) -> None:
+    """Proves a job abandoned after too many revises is recorded, and the next job runs."""
+    project, _ = scratch
+
+    result, _, _ = run(
+        [plan()] * 3 + [plan(problems=["P2"], completes=["P2"])], [edit("a + b", "b + a")],
+        [review("accept")], super_planner=[revise("rename it")] * 3 + [approve()], max_jobs=2)
+
+    assert [record.outcome for record in result.jobs] == [JobOutcome.ABANDONED,
+                                                          JobOutcome.COMMITTED]
+    assert ledger_of(project).status_of("P1") == ProblemStatus.ABANDONED
+    assert ledger_of(project).status_of("P2") == ProblemStatus.DONE
 
 
 def test_a_run_stops_at_its_most_jobs_and_the_focus_goes_to_the_first_only(scratch, run) -> None:

@@ -5,7 +5,8 @@ the code as much as you need to make the plan accurate.
 
 ## What you are given
 
-The script appends the ledger to this prompt. It gives the status of every problem that a step
+The script appends the ledger to this prompt, and after it, when the super-planner sent an
+earlier plan back, that plan with the revisions to make. It gives the status of every problem that a step
 has worked on, and the last ten steps: the problems each advanced, and how each ended, either
 committed, or set aside with the reason and the last report. A problem that the ledger does
 not name is open, and no step has worked on it yet. Read `${problems_file}` and the code
@@ -38,6 +39,12 @@ For every class, method or parameter that the step adds, name the requirement it
 explain why nothing simpler meets it. A plan that adds a class to connect two other classes, or
 a method that only passes a call through, is the kind of plan the refactor exists to stop.
 
+Name in `functions` every function that the step changes, each as `package.module.qualname`, such
+as `invoices.pricing.line_total`, with `<module>` for the code at the top of a module. The script
+builds the paths that lead to these functions for the super-planner, so a function that you leave
+out is a path that nobody checks. When the script appends a super-planner's revisions, make a
+plan that meets each of them.
+
 Name every test that the step's change to the code will affect, and say what change to it the
 test rules allow, or that none is needed.
 
@@ -61,6 +68,7 @@ Answer with one JSON object and nothing else. Every field is always present. For
   "summary": "the step in at most 60 characters, such as: line totals come from pricing",
   "problems": ["P19"],
   "completes": ["P19"],
+  "functions": ["package.module.qualname"],
   "why_now": "why this step comes next, in one or two sentences",
   "changes": [
     {"file": "path/to/file.py", "what": "what changes in this file"}

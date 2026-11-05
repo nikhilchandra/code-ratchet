@@ -23,15 +23,21 @@ class Caps(BaseModel):
     # The jobs on a problem that come back blocked or replanned, after which the problem is
     # set aside.
     sendbacks: int = Field(default=2, gt=0)
+    # The sendbacks that a job may take from the super-planner to the planner, and from a refused
+    # test write to the test writer. The next one abandons the job.
+    revisions: int = Field(default=2, gt=0)
+    test_rewrites: int = Field(default=2, gt=0)
 
 
 class RefactorSettings(BaseModel):
-    """Holds the refactor command's caps and how each of its three roles runs."""
+    """Holds the refactor command's caps and how each of its five roles runs."""
 
     model_config = ConfigDict(extra="forbid")
 
     caps: Caps = Caps()
     planner: RoleSettings = RoleSettings(model="opus", budget_usd=3.0, timeout_s=1800)
+    super_planner: RoleSettings = RoleSettings(model="opus", budget_usd=3.0, timeout_s=1800)
+    test_writer: RoleSettings = RoleSettings(model="sonnet", budget_usd=5.0, timeout_s=3600)
     implementer: RoleSettings = RoleSettings(model="sonnet", budget_usd=8.0, timeout_s=3600)
     reviewer: RoleSettings = RoleSettings(model="opus", budget_usd=3.0, timeout_s=1800)
 

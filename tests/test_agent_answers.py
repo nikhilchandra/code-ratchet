@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review, Status, Verdict
+from ratchet.refactor.agent_answers import (
+    ImplementerAnswer,
+    Plan,
+    Review,
+    Status,
+    SuperPlan,
+    SuperVerdict,
+    Verdict,
+    WriterAnswer,
+)
 
 ANSWERS = Path(__file__).parent / "answers"
 
@@ -21,6 +30,9 @@ SAVED = [
     ("review-comment-fixes.json", Review),
     ("review-reject.json", Review),
     ("review-replan.json", Review),
+    ("super-plan-approve.json", SuperPlan),
+    ("super-plan-revise.json", SuperPlan),
+    ("test-writer.json", WriterAnswer),
 ]
 
 
@@ -50,6 +62,22 @@ def test_the_answers_read_as_python_values() -> None:
     assert blocked.status is Status.BLOCKED and blocked.blocked_reason
 
 
+def test_the_super_planners_answers_read_as_python_values() -> None:
+    """Proves the plan names its functions, an approval lists its tests, and a revise its
+    revisions."""
+    plan = Plan.model_validate(saved("plan.json"))
+    approve = SuperPlan.model_validate(saved("super-plan-approve.json"))
+    revise = SuperPlan.model_validate(saved("super-plan-revise.json"))
+    written = WriterAnswer.model_validate(saved("test-writer.json"))
+
+    assert "invoices.pricing.line_total" in plan.functions
+    assert approve.verdict is SuperVerdict.APPROVE and len(approve.tests_to_write) == 2
+    assert approve.tests_to_write[0].file == "tests/test_export_totals.py"
+    assert revise.verdict is SuperVerdict.REVISE and revise.revisions
+    assert [test.file for test in written.tests] == [
+        test.file for test in approve.tests_to_write]
+
+
 def test_a_missing_field_is_refused() -> None:
     """Proves every field must be present, as the prompts tell the agents."""
     answer = saved("plan.json")
@@ -77,7 +105,7 @@ def test_an_unknown_verdict_is_refused() -> None:
         Review.model_validate(answer)
 
 
-@pytest.mark.parametrize("shape", [Plan, ImplementerAnswer, Review])
+@pytest.mark.parametrize("shape", [Plan, ImplementerAnswer, Review, SuperPlan, WriterAnswer])
 def test_the_schema_requires_every_field_and_uses_the_json_names(shape: type[BaseModel]) -> None:
     """Proves the schema sent to Claude requires every field, refuses others, and names the
     fields as the prompts do."""

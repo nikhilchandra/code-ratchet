@@ -30,7 +30,7 @@ from ratchet.refactor.problem_list import find_latest_problem_list
 from ratchet.refactor.progress_lines import console_width, count_of, format_step_lines
 from ratchet.refactor.settings import RefactorSettings, load_settings
 
-# A function that makes the three agents, with the arguments of make_agents().
+# A function that makes the five agents, with the arguments of make_agents().
 AgentMaker = Callable[[Project, RefactorSettings, str, Path], dict[str, Agent]]
 
 # The width of the time that starts each console line, such as "14:25  ".
@@ -74,7 +74,7 @@ def run_refactor(
         project: The project, as read from its .ratchet folder.
         max_jobs: The most jobs to run.
         focus: A problem to ask the planner to take first, such as "P19", or "".
-        agent_maker: The function that makes the three agents.
+        agent_maker: The function that makes the five agents.
         say: The function that shows each line of progress. Every line also goes to the run's
             log.
         width: The console's width in characters, which the lines are fitted to. None measures

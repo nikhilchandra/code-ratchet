@@ -55,15 +55,17 @@ Tests: tests/test_audit_graph.py::test_a_problem_done_in_the_old_ledger_is_reope
 1. `ratchet.cli.main` loads the project with `ratchet.project.load_project` and calls `ratchet.refactor.job_loop.run_refactor`.
 2. `ratchet.refactor.job_loop.run_refactor` refuses a tree with changes, runs the suite once with `ratchet.pytest_runner.run_pytest` and refuses to go on if it fails.
 3. It finds the newest list with `ratchet.refactor.problem_list.find_latest_problem_list` and loads the ledger with `ratchet.refactor.ledger.load_ledger`.
-4. For each job it starts the graph from `ratchet.refactor.job_graph.build_job_graph`. `ratchet.refactor.job_graph.build_job_graph.plan` asks the planner for one step, and the job ends there if the planner has nothing left.
-5. `ratchet.refactor.job_graph.build_job_graph.implement` asks the implementer to make the change.
-6. `ratchet.refactor.job_graph.build_job_graph.check_rules_step` runs `ratchet.refactor.rule_checks.check_rules` on the change.
-7. `ratchet.refactor.job_graph.build_job_graph.test` runs the suite and compares it with the baseline.
-8. `ratchet.refactor.job_graph.build_job_graph.review` asks the reviewer. An accept goes on, and an accept with comment fixes goes through `ratchet.refactor.job_graph.build_job_graph.fix_comments` first. A reject goes back to implement.
-9. `ratchet.refactor.job_graph.build_job_graph.commit` commits the change.
-10. `ratchet.refactor.ledger.record_job` and `ratchet.refactor.ledger.save_ledger` record the job. When the run ends, `ratchet.refactor.job_loop.run_refactor.save_records` commits the ledger with `ratchet.records.commit_records`.
+4. For each job it starts the graph from `ratchet.refactor.job_graph.build_job_graph`. `ratchet.refactor.job_graph.build_job_graph.plan` asks the planner for one step, which now names the functions it changes, and the job ends there if the planner has nothing left.
+5. `ratchet.refactor.job_graph.build_job_graph.super_plan` builds the pathway map of those functions with `ratchet.pathways.build_map` and `ratchet.pathways.describe`, and asks the super-planner, with the plan and rules.md. A revise goes back to plan with the super-planner's notes, at most 2 times (`ratchet.refactor.settings.Caps.revisions`), and the next revise undoes the job as abandoned. An approve goes to write-tests when it lists tests, and otherwise to implement.
+6. `ratchet.refactor.job_graph.build_job_graph.write_tests` asks the test writer for the listed tests. `ratchet.refactor.written_tests.find_write_faults` refuses a change to any file but a new test file, and a skip, and the tests must pass on the code as it is. A refused write is undone with `ratchet.git.Repo.undo` and goes back to the test writer, at most 2 times (`ratchet.refactor.settings.Caps.test_rewrites`), and the next refusal undoes the job as abandoned. The written tests become frozen paths of the implementer.
+7. `ratchet.refactor.job_graph.build_job_graph.implement` asks the implementer to make the change.
+8. `ratchet.refactor.job_graph.build_job_graph.check_rules_step` runs `ratchet.refactor.rule_checks.check_rules` on the change, which also puts back any written test that the implementer changed, renamed or deleted.
+9. `ratchet.refactor.job_graph.build_job_graph.test` runs the suite and compares it with the baseline.
+10. `ratchet.refactor.job_graph.build_job_graph.review` asks the reviewer. An accept goes on, and an accept with comment fixes goes through `ratchet.refactor.job_graph.build_job_graph.fix_comments` first, which refuses a fix to a written test. A reject goes back to implement.
+11. `ratchet.refactor.job_graph.build_job_graph.commit` commits the change, with the written tests.
+12. `ratchet.refactor.ledger.record_job` and `ratchet.refactor.ledger.save_ledger` record the job. When the run ends, `ratchet.refactor.job_loop.run_refactor.save_records` commits the ledger with `ratchet.records.commit_records`.
 
-Tests: tests/test_job_loop.py::test_jobs_run_until_the_planner_finds_nothing_left and tests/test_job_loop.py::test_a_run_commits_its_ledger_to_the_records_repository. Both start at `ratchet.refactor.job_loop.run_refactor` and run plan, implement, test, review, commit and the ledger. They do not go through `ratchet.cli.main`.
+Tests: tests/test_job_loop.py::test_jobs_run_until_the_planner_finds_nothing_left and tests/test_job_loop.py::test_a_run_commits_its_ledger_to_the_records_repository. Both start at `ratchet.refactor.job_loop.run_refactor` and run plan, super-plan, implement, test, review, commit and the ledger, with a super-planner that approves and asks for no tests. tests/test_job_loop.py::test_a_job_with_written_tests_commits_them runs the write-tests step too, from `run_refactor` to the commit that holds the written test. tests/test_job_graph.py covers each arrow of the new steps: the approve, the revise and its cap, the written tests that fail on the current code and the cap on rewrites, and the frozen paths. None of them goes through `ratchet.cli.main`.
 
 ## A refactor job that halts
 
@@ -73,9 +75,9 @@ Tests: tests/test_job_loop.py::test_jobs_run_until_the_planner_finds_nothing_lef
 4. `ratchet.refactor.job_loop.run_refactor.save_records` commits the ledger, and the error is raised again.
 5. `ratchet.cli.main` prints it on one line and returns 1.
 
-A job that reaches three test failures or three rejections does not halt. `ratchet.refactor.job_graph.build_job_graph.undo` undoes it, the job ends as abandoned, and the run goes on.
+A job that reaches three test failures or three rejections, a third revise from the super-planner, or a third refused test write does not halt. `ratchet.refactor.job_graph.build_job_graph.undo` undoes it with `ratchet.git.Repo.undo`, which also drops any written test not yet committed, the job ends as abandoned, and the run goes on. A planner that stops after a revise ends the job the same way, and the job keeps the last plan that the super-planner saw, so `ratchet.refactor.ledger.record_job` records its title and problems. A problem that an earlier plan started and a revised plan dropped gets a sent_back event and stays open.
 
-Tests: tests/test_job_loop.py::test_a_job_that_halts_part_way_is_undone, tests/test_job_loop.py::test_a_halted_job_leaves_job_started_in_the_ledger_file and tests/test_job_loop.py::test_a_halted_job_commits_the_records. They run `run_refactor` up to the raised error, not `ratchet.cli.main`, so step 5 is untested.
+Tests: tests/test_job_loop.py::test_a_job_that_halts_part_way_is_undone, tests/test_job_loop.py::test_a_halted_job_leaves_job_started_in_the_ledger_file and tests/test_job_loop.py::test_a_halted_job_commits_the_records. They run `run_refactor` up to the raised error, not `ratchet.cli.main`, so step 5 is untested. tests/test_job_loop.py::test_a_job_abandoned_at_the_revise_cap_lets_the_run_go_on runs an abandoned job from `run_refactor` to the next job's commit. tests/test_job_graph.py::test_the_third_revise_abandons_the_job, tests/test_job_graph.py::test_three_refused_test_writes_abandon_the_job and tests/test_job_graph.py::test_a_stop_after_a_revise_keeps_the_last_plan run the other caps at the graph, not through `run_refactor`.
 
 ## ratchet reopen
 

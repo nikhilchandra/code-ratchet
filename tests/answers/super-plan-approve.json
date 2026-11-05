@@ -1,0 +1,28 @@
+{
+  "verdict": "approve",
+  "summary": "The plan keeps behavior and fits the rules. Its functions name every function the changes touch. Two of the paths through them have no test, so two tests should pin their current totals before the step runs.",
+  "paths": [
+    "invoices.cli.main -> invoices.report.render -> invoices.pricing.line_total",
+    "invoices.cli.main -> invoices.invoice.Invoice.subtotal -> invoices.pricing.line_total",
+    "invoices.cli.export -> invoices.report.render -> invoices.pricing.line_total"
+  ],
+  "untested_paths": [
+    "invoices.cli.export -> invoices.report.render -> invoices.pricing.line_total",
+    "invoices.cli.main -> invoices.invoice.Invoice.subtotal -> invoices.pricing.line_total"
+  ],
+  "tests_to_write": [
+    {
+      "file": "tests/test_export_totals.py",
+      "name": "test_an_exported_row_rounds_its_discounted_total_to_cents",
+      "covers": "invoices.cli.export -> invoices.report.render -> invoices.pricing.line_total",
+      "checks": "Exporting an invoice with one line of 3 at 0.335 and a 10% discount gives a row total of 0.90."
+    },
+    {
+      "file": "tests/test_subtotal_rounding.py",
+      "name": "test_a_subtotal_of_many_small_lines_rounds_only_the_sum",
+      "covers": "invoices.cli.main -> invoices.invoice.Invoice.subtotal -> invoices.pricing.line_total",
+      "checks": "An invoice of ten lines of 1 at 0.005 has a subtotal of 0.05, not 0.10."
+    }
+  ],
+  "revisions": []
+}

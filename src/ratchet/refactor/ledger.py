@@ -160,7 +160,9 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
 
     A committed job finishes the problems its plan says it completes. An abandoned job sets
     aside every problem it worked on. A blocked or replanned job counts a sendback against each
-    of its problems, and a problem that reaches the cap on sendbacks is set aside.
+    of its problems, and a problem that reaches the cap on sendbacks is set aside. A problem that
+    an earlier planning round started and the last plan dropped counts a sendback whatever the
+    job's outcome, and stays open until it reaches the cap.
 
     Each problem the job worked on also gets events. A committed job gives a done event for a
     problem it completes and a committed event for the others. An abandoned job gives an
@@ -171,6 +173,8 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
         ledger: The ledger to add to.
         job_data: The finished job's data, which holds its plan and its outcome. It also holds
             the job's id when the plan step gave it one, and otherwise the next free id is used.
+            It holds the problems that the planning rounds started under "started", when the
+            plan step kept them.
         slug: The job's name in the graph.
         cost_usd: What the job spent, in dollars.
         caps: The refactor command's caps.
@@ -196,19 +200,24 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
         ended=datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
     ledger.jobs.append(record)
-    for problem_id in plan.problems:
+    dropped = [problem_id for problem_id in job_data.get("started", [])
+               if problem_id not in plan.problems]
+    for problem_id in [*plan.problems, *dropped]:
         problem = ledger.problems.setdefault(problem_id, ProblemRecord())
         kinds = []
-        if outcome == JobOutcome.COMMITTED:
+        # a dropped problem is only sent back, whatever happened to the job's other problems
+        how = JobOutcome.BLOCKED if problem_id in dropped else outcome
+        note = "a revised plan left it out" if problem_id in dropped else record.reason
+        if how == JobOutcome.COMMITTED:
             if problem_id in plan.completes:
                 problem.status = ProblemStatus.DONE
                 kinds.append("done")
             else:
                 kinds.append("committed")
-        elif outcome == JobOutcome.ABANDONED:
+        elif how == JobOutcome.ABANDONED:
             problem.status = ProblemStatus.ABANDONED
             kinds.append("abandoned")
-        elif outcome in (JobOutcome.BLOCKED, JobOutcome.REPLAN):
+        elif how in (JobOutcome.BLOCKED, JobOutcome.REPLAN):
             problem.sendbacks += 1
             kinds.append("sent_back")
             if problem.sendbacks >= caps.sendbacks:
@@ -217,6 +226,5 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
         # record one event for each kind
         for kind in kinds:
             problem.events.append(ProblemEvent(when=record.ended, kind=kind, by=record.id,
-                                               job=record.id, commit=record.commit,
-                                               note=record.reason))
+                                               job=record.id, commit=record.commit, note=note))
     return record

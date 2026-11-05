@@ -51,6 +51,9 @@ def test_unset_settings_take_their_defaults(tmp_path: Path) -> None:
         "opus", Effort.HIGH, 3.0)
     assert (settings.implementer.model, settings.implementer.budget_usd) == ("sonnet", 8.0)
     assert (settings.reviewer.model, settings.reviewer.timeout_s) == ("opus", 1800)
+    assert (settings.caps.revisions, settings.caps.test_rewrites) == (2, 2)
+    assert (settings.super_planner.model, settings.super_planner.budget_usd) == ("opus", 3.0)
+    assert (settings.test_writer.model, settings.test_writer.budget_usd) == ("sonnet", 5.0)
 
 
 @pytest.mark.parametrize(

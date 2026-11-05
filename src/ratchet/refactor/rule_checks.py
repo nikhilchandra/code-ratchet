@@ -4,7 +4,7 @@ tests run.
 A step breaks a rule when it changes a file that agents may not change, changes one of the
 .ratchet files that the agents work from, adds a skip or an expected failure to a test, adds an
 import that breaks the target design or an import cycle, or claims to be done without changing
-anything.
+anything, or changes, renames or deletes a test that the test writer wrote.
 """
 
 from __future__ import annotations
@@ -72,10 +72,14 @@ def check_rules(
     answer: ImplementerAnswer,
     inputs: dict[Path, bytes],
     violations_before: list[str] | None = None,
+    written: dict[str, bytes] | None = None,
 ) -> str:
     """Returns why a step broke a rule that code can check, or an empty string.
 
-    A .ratchet file that the step changed is put back before the report is made.
+    A .ratchet file that the step changed, and a written test that the step changed, renamed or
+    deleted, is put back before the report is made. A written test that the step left as it
+    was is not a change of the step, so the skip scan and the check for a step that changed
+    nothing leave it out.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -84,18 +88,29 @@ def check_rules(
         inputs: The .ratchet files as snapshot_ratchet_files() returned them before the step.
         violations_before: The violations as find_violations() returned them before the step,
             or None to skip the check for new violations.
+        written: The tests that the test writer wrote for the step, with the bytes it left, by
+            their paths from the project's folder. None means there are none.
 
     Returns:
         A markdown report with one line per broken rule, or "" when no rule was broken.
     """
     problems = []
+    written = written or {}
     for path, contents in inputs.items():
         if not path.is_file() or path.read_bytes() != contents:
             path.write_bytes(contents)
             name = path.relative_to(project.root).as_posix()
             problems.append(f"{name} was changed, and has been put back")
 
-    changed = repo.changed_paths()
+    for path, contents in written.items():
+        file = project.root / path
+        if not file.is_file() or file.read_bytes() != contents:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(contents)
+            problems.append(f"{path} was written by the test writer, and the step changed, "
+                            "renamed or deleted it; it has been put back")
+
+    changed = [path for path in repo.changed_paths() if path not in written]
     for path in changed:
         if not project.may_change(path):
             problems.append(f"{path} is not among the files that a step may change")

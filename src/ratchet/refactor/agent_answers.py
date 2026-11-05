@@ -1,4 +1,4 @@
-"""Holds the shapes of the three refactor agents' answers, which each agent's reply must fit.
+"""Holds the shapes of the five refactor agents' answers, which each agent's reply must fit.
 
 Every field is required, so an agent always answers every field, with an empty string or an
 empty list where it has nothing to say.
@@ -76,6 +76,9 @@ class Plan(_Answer):
     summary: str
     problems: list[str]
     completes: list[str]
+    # The functions the step changes, each as package.module.qualname, such as
+    # "invoices.pricing.line_total". The script builds their pathway map for the super-planner.
+    functions: list[str]
     why_now: str
     changes: list[Change]
     added: list[Added]
@@ -85,6 +88,60 @@ class Plan(_Answer):
     # Statements about the code after the step, which the reviewer confirms one by one.
     checks: list[str]
     risks: str
+
+
+# ---------------------------------------------------------------- the super-planner's answer
+
+
+class SuperVerdict(StrEnum):
+    """Says whether the plan goes ahead or goes back to the planner."""
+
+    APPROVE = "approve"
+    REVISE = "revise"
+
+
+class WantedTest(_Answer):
+    """Holds one test that the super-planner wants written before the step runs."""
+
+    # The new test file, such as "tests/test_export_totals.py".
+    file: str
+    name: str
+    # The path through the code that the test pins, and the fact it checks on that path.
+    covers: str
+    checks: str
+
+
+class SuperPlan(_Answer):
+    """Holds the super-planner's verdict on a plan, the paths the plan touches, and the tests to
+    write."""
+
+    verdict: SuperVerdict
+    summary: str
+    # Every path through the plan's functions, as entry point -> ... -> function, and those of
+    # them that no test exercises.
+    paths: list[str]
+    untested_paths: list[str]
+    tests_to_write: list[WantedTest]
+    # What the planner must change in the plan when the verdict is revise, otherwise empty.
+    revisions: list[str]
+
+
+# ---------------------------------------------------------------- the test writer's answer
+
+
+class WrittenTest(_Answer):
+    """Holds one test that the test writer wrote, and the path it covers."""
+
+    file: str
+    name: str
+    covers: str
+
+
+class WriterAnswer(_Answer):
+    """Holds the test writer's answer after it has written the tests asked for."""
+
+    summary: str
+    tests: list[WrittenTest]
 
 
 # ---------------------------------------------------------------- the implementer's answer

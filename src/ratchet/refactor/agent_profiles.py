@@ -23,9 +23,11 @@ NO_COMMENT_RULES = "The project sets no further rules for comments."
 
 
 class Role(StrEnum):
-    """Names the three refactor agents, each of which has a prompt of its own."""
+    """Names the five refactor agents, each of which has a prompt of its own."""
 
     PLANNER = "planner"
+    SUPER_PLANNER = "super_planner"
+    TEST_WRITER = "test_writer"
     IMPLEMENTER = "implementer"
     REVIEWER = "reviewer"
 

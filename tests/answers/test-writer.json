@@ -1,0 +1,15 @@
+{
+  "summary": "I wrote the two tests the super-planner asked for, each in a new file. Both pass on the current code.",
+  "tests": [
+    {
+      "file": "tests/test_export_totals.py",
+      "name": "test_an_exported_row_rounds_its_discounted_total_to_cents",
+      "covers": "invoices.cli.export -> invoices.report.render -> invoices.pricing.line_total"
+    },
+    {
+      "file": "tests/test_subtotal_rounding.py",
+      "name": "test_a_subtotal_of_many_small_lines_rounds_only_the_sum",
+      "covers": "invoices.cli.main -> invoices.invoice.Invoice.subtotal -> invoices.pricing.line_total"
+    }
+  ]
+}

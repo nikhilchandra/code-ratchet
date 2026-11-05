@@ -4,6 +4,7 @@ docstrings."""
 from __future__ import annotations
 
 import ast
+from collections.abc import Collection
 
 from ratchet.project import Project
 from ratchet.refactor.agent_answers import Review
@@ -37,7 +38,7 @@ def _code_without_comments(source: str) -> str:
     return ast.dump(tree)
 
 
-def apply_comment_fixes(project: Project, review: Review) -> str:
+def apply_comment_fixes(project: Project, review: Review, written: Collection[str] = ()) -> str:
     """Makes the reviewer's comment fixes in the working tree, and returns why they could not be
     made, or an empty string.
 
@@ -49,6 +50,7 @@ def apply_comment_fixes(project: Project, review: Review) -> str:
     Args:
         project: The project, as read from its .ratchet folder.
         review: The reviewer's answer, holding the fixes.
+        written: The tests that the test writer wrote for the step, which no fix may change.
 
     Returns:
         Why the fixes were not made, or "" when all of them were.
@@ -67,6 +69,8 @@ def apply_comment_fixes(project: Project, review: Review) -> str:
     for fix in review.comment_fixes:
         name = fix.file.replace("\\", "/")
         path = project.root / name
+        if name in written:
+            return f"{name} is a test that the test writer wrote, which is frozen for the step"
         if not name.endswith(".py") or not project.may_change(name) or not path.is_file():
             return f"{name} is not a Python file that a step may change"
         if name not in before:

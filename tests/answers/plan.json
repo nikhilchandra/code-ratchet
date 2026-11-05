@@ -9,6 +9,11 @@
   "completes": [
     "P3"
   ],
+  "functions": [
+    "invoices.pricing.line_total",
+    "invoices.invoice.Invoice.subtotal",
+    "invoices.report.<module>"
+  ],
   "why_now": "P3 is the last problem that blocks P4. The report and the invoice each work out a line's total on their own, and P4 needs one place to change when discounts gain a cap.",
   "changes": [
     {

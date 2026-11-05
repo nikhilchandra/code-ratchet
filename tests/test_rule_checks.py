@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from conftest import PROBLEM_LIST, PROBLEMS
 from ratchet.git import Repo
 from ratchet.project import Project
@@ -170,3 +172,63 @@ def test_editing_the_first_line_of_a_module_in_no_part_is_not_new(scratch: tuple
 
     assert "no_part: app.extra" in before
     assert check_rules(project, repo, answer(Status.BLOCKED), {}, before) == ""
+
+
+# A test that the test writer wrote, with the bytes it left.
+WRITTEN = "tests/test_more.py"
+WRITTEN_TEXT = b"from app import add\n\n\ndef test_more():\n    assert add(2, 2) == 4\n"
+
+
+def write_written(project: Project, text: bytes = WRITTEN_TEXT) -> dict[str, bytes]:
+    """Writes the test writer's test into the scratch project, and returns it as check_rules()
+    takes it in 'written'."""
+    (project.root / WRITTEN).write_bytes(text)
+    return {WRITTEN: text}
+
+
+def test_an_unchanged_written_test_is_not_a_change(scratch: tuple[Project, Repo]) -> None:
+    """Proves an implementer that says it is done while only the written test differs from the
+    last commit is caught."""
+    project, repo = scratch
+    inputs = snapshot_ratchet_files(project)
+    written = write_written(project)
+
+    report = check_rules(project, repo, answer(), inputs, written=written)
+
+    assert "- the implementer says that it is done, but nothing changed" in report
+
+
+def test_a_skip_in_an_unchanged_written_test_is_not_named(scratch: tuple[Project, Repo]) -> None:
+    """Proves the skip scan leaves out a written test that the step did not change."""
+    project, repo = scratch
+    inputs = snapshot_ratchet_files(project)
+    written = write_written(project, WRITTEN_TEXT + b"# skip nothing\n")
+    (project.root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert check_rules(project, repo, answer(), inputs, written=written) == ""
+
+
+@pytest.mark.parametrize("how", ["changed", "deleted", "renamed"])
+def test_a_written_test_that_the_step_touched_is_put_back(
+    scratch: tuple[Project, Repo], how: str
+) -> None:
+    """Proves a written test that the step changed, deleted or renamed with git mv is put back
+    with the test writer's bytes, and reported."""
+    project, repo = scratch
+    inputs = snapshot_ratchet_files(project)
+    written = write_written(project)
+    (project.root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    path = project.root / WRITTEN
+    if how == "changed":
+        path.write_bytes(WRITTEN_TEXT + b"\n\ndef test_less():\n    pass\n")
+    elif how == "deleted":
+        path.unlink()
+    else:
+        repo.run("add", WRITTEN)
+        repo.run("mv", WRITTEN, "tests/test_moved.py")
+
+    report = check_rules(project, repo, answer(), inputs, written=written)
+
+    assert (f"- {WRITTEN} was written by the test writer, and the step changed, renamed or "
+            "deleted it; it has been put back") in report
+    assert path.read_bytes() == WRITTEN_TEXT
