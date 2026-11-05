@@ -1,0 +1,99 @@
+# Scenarios
+
+Each heading is one start-to-finish path through ratchet. The steps name the functions on the path in the order they run. The "Tests:" line names the tests that run the path from its entry function to its last step, or says "none yet". Where a test covers only part of a path, the line says which part.
+
+## ratchet init
+
+1. `ratchet.cli.main` sends the command to `ratchet.cli.run_init`, which asks the owner questions only when there is a terminal.
+2. `ratchet.init_project.init_project` refuses a folder that is not a git repository or has uncommitted changes.
+3. `ratchet.init_project._write_templates` writes config.toml and rules.md, never over a file that exists.
+4. `ratchet.records.init_records` makes .ratchet its own repository.
+5. `ratchet.init_project._add_ignore_line` adds .ratchet to .gitignore and commits it. A project that tracks .ratchet is moved over first, with the owner's consent.
+6. `ratchet.records.commit_records` makes the first records commit.
+
+Tests: tests/test_init_project.py::test_the_init_command_prints_what_it_did (through `ratchet.cli.main`, and a second run changes nothing), tests/test_init_project.py::test_a_new_project_gets_files_a_repository_and_an_ignore_line (through `ratchet.init_project.init_project`).
+
+## The first audit
+
+1. `ratchet.cli.run_audit` loads the project with `ratchet.project.load_project` and calls `ratchet.audit.audit_run.start_audit`.
+2. `ratchet.audit.audit_run.start_audit` refuses while another audit waits, while rules.md is the template, or before init, then builds the graph with `ratchet.audit.audit_graph.build_audit_graph`.
+3. `ratchet.audit.audit_graph.build_audit_graph.prepare` checks for a clean tree and an ignored .ratchet, writes the code findings and the inventory, and makes the copy of the code with `ratchet.audit.code_copy.make_copy`.
+4. `ratchet.audit.audit_graph.build_audit_graph.audit` asks the auditor. `ratchet.audit.audit_graph.build_audit_graph.review` asks list reviewers A and B together.
+5. `ratchet.audit.audit_graph.build_audit_graph.group` makes items, groups them, and asks the pair judge about the pairs that rules cannot settle.
+6. `ratchet.audit.audit_graph.build_audit_graph.check_citations_step` fixes or removes citations that do not match the copy.
+7. Questions gate: `ratchet.audit.audit_graph.build_audit_graph.questions` writes questions.md and the job waits. `ratchet.audit.audit_run._answer_questions` collects answers with `ratchet.owner_terminal.ask_questions`, or resumes with none when there is no terminal.
+8. `ratchet.audit.audit_graph.build_audit_graph.check` asks the checker, applies its verdicts and checks the citations again.
+9. Draft gate: `ratchet.audit.audit_graph.build_audit_graph.draft` gives out ids and writes draft.md, then the job waits. `ratchet.audit.audit_run._approve_draft` shows the draft with `ratchet.owner_terminal.review_draft`. With no terminal the owner runs `ratchet audit --approve`, which calls `ratchet.audit.audit_run.settle_audit`.
+10. `ratchet.audit.audit_graph.build_audit_graph.publish` checks the draft with `ratchet.audit.list_markdown.check_draft` against `ratchet.audit.audit_graph.done_ids`, writes the list, seeds its ledger with `ratchet.refactor.ledger.save_ledger`, adds settled rules to rules.md, and commits with `ratchet.records.commit_records`.
+
+Tests: tests/test_audit_run.py::test_with_no_terminal_the_audit_waits_and_can_be_approved (`start_audit`, the draft gate, then `settle_audit` to publish) and tests/test_audit_run.py::test_the_owner_approves_in_the_terminal (the terminal route to publish). Neither raises a question, so neither stops at the questions gate. That gate is run through `start_audit` only up to the gate, by tests/test_audit_run.py::test_approving_an_audit_cut_off_at_the_questions_stops_at_the_draft (which then approves with no answers), and with owner answers only from the graph, by tests/test_audit_graph.py::test_the_questions_gate_waits_and_the_owners_answers_reach_the_checker. tests/test_audit_live.py::test_a_first_audit_publishes_a_list_within_the_cap runs `start_audit` and `settle_audit` with real agents. It is marked live, spends tokens, and is not skipped by default.
+
+## A re-audit
+
+1. `ratchet.audit.audit_run.start_audit` builds the graph as for a first audit. `ratchet.audit.audit_graph.build_audit_graph.prepare` finds an existing list with `ratchet.refactor.problem_list.find_problem_lists`, so the audit is a re-audit.
+2. `prepare` works out when the old list was published with `ratchet.problem_history.publish_time`, and writes evidence hints with `ratchet.audit.evidence_hints.build_evidence_hints`.
+3. `ratchet.audit.audit_graph.build_audit_graph.audit` runs `ratchet.audit.audit_graph.build_audit_graph.audit_again`. F, the blind audit, and R, the rechecker, are asked together with `ratchet.agent_calls.ask_together`. F is given no list, ledger or earlier answer.
+4. `audit_again` rejects a blind audit that touched paths outside the copy, and asks R again for old ids that have no usable citation or subject.
+5. The merge: `ratchet.audit.audit_graph.build_audit_graph.group` merges F's findings with R's checks of the old problems, and the pair judge joins the pairs the rules cannot settle.
+6. `ratchet.audit.audit_graph.build_audit_graph.check_citations_step` and `ratchet.audit.audit_graph.build_audit_graph.check` run as in a first audit. The checker marks the entries that continue an old problem.
+7. `ratchet.audit.audit_graph.build_audit_graph.draft` keeps an old problem's id and sets its status, such as reopened or blocked.
+8. `ratchet.audit.audit_graph.build_audit_graph.publish` seeds the new ledger with a carried event for each carried problem, then a reopened or abandoned event where the status says so, and commits the records.
+
+Tests: tests/test_audit_graph.py::test_a_reaudit_runs_the_blind_audit_and_the_rechecker_and_skips_the_rest (through the draft gate) and tests/test_audit_graph.py::test_a_fresh_finding_with_a_reopened_problem_is_split_and_the_old_id_stays (through publish). Both start at `ratchet.audit.audit_graph.build_audit_graph` with `graph.start` and `graph.resume`, not at `start_audit`, and no test runs a re-audit through `start_audit`.
+
+## A problem marked done by refactor, then reopened by a re-audit
+
+1. A refactor run commits a job, and `ratchet.refactor.ledger.record_job` marks the problem done in the ledger of its list.
+2. A later re-audit follows the re-audit path above. The rechecker finds the problem is not fixed, and the draft gives it the status reopened.
+3. `ratchet.audit.audit_graph.build_audit_graph.publish` keeps its id and writes carried and reopened events in the new ledger.
+4. `ratchet.problems_view.show_history` reads the problem's events from both lists as one timeline, through `ratchet.problem_history.problem_history`.
+
+Tests: none yet. tests/test_audit_graph.py::test_a_reopened_problem_keeps_its_id_with_carried_and_reopened_events and tests/test_audit_graph.py::test_the_history_reads_as_one_timeline_across_both_lists run the re-audit half only, and the old list in them is made by a first audit, not by a refactor run. tests/test_job_loop.py::test_jobs_run_until_the_planner_finds_nothing_left runs the refactor half only.
+
+## A refactor run
+
+1. `ratchet.cli.main` loads the project with `ratchet.project.load_project` and calls `ratchet.refactor.job_loop.run_refactor`.
+2. `ratchet.refactor.job_loop.run_refactor` refuses a tree with changes, runs the suite once with `ratchet.pytest_runner.run_pytest` and refuses to go on if it fails.
+3. It finds the newest list with `ratchet.refactor.problem_list.find_latest_problem_list` and loads the ledger with `ratchet.refactor.ledger.load_ledger`.
+4. For each job it starts the graph from `ratchet.refactor.job_graph.build_job_graph`. `ratchet.refactor.job_graph.build_job_graph.plan` asks the planner for one step, and the job ends there if the planner has nothing left.
+5. `ratchet.refactor.job_graph.build_job_graph.implement` asks the implementer to make the change.
+6. `ratchet.refactor.job_graph.build_job_graph.check_rules_step` runs `ratchet.refactor.rule_checks.check_rules` on the change.
+7. `ratchet.refactor.job_graph.build_job_graph.test` runs the suite and compares it with the baseline.
+8. `ratchet.refactor.job_graph.build_job_graph.review` asks the reviewer. An accept goes on, and an accept with comment fixes goes through `ratchet.refactor.job_graph.build_job_graph.fix_comments` first. A reject goes back to implement.
+9. `ratchet.refactor.job_graph.build_job_graph.commit` commits the change.
+10. `ratchet.refactor.ledger.record_job` and `ratchet.refactor.ledger.save_ledger` record the job. When the run ends, `ratchet.refactor.job_loop.run_refactor.save_records` commits the ledger with `ratchet.records.commit_records`.
+
+Tests: tests/test_job_loop.py::test_jobs_run_until_the_planner_finds_nothing_left and tests/test_job_loop.py::test_a_run_commits_its_ledger_to_the_records_repository. Both start at `ratchet.refactor.job_loop.run_refactor` and run plan, implement, test, review, commit and the ledger. They do not go through `ratchet.cli.main`.
+
+## A refactor job that halts
+
+1. A step raises, such as an agent that gives no answer.
+2. `ratchet.refactor.job_loop.run_refactor` catches it. If the tree has changes it calls `ratchet.git.Repo.undo`, so the job leaves no half-made change.
+3. The ledger keeps the job_started events that `ratchet.refactor.job_graph.build_job_graph.plan` saved, so the problem stays open.
+4. `ratchet.refactor.job_loop.run_refactor.save_records` commits the ledger, and the error is raised again.
+5. `ratchet.cli.main` prints it on one line and returns 1.
+
+A job that reaches three test failures or three rejections does not halt. `ratchet.refactor.job_graph.build_job_graph.undo` undoes it, the job ends as abandoned, and the run goes on.
+
+Tests: tests/test_job_loop.py::test_a_job_that_halts_part_way_is_undone, tests/test_job_loop.py::test_a_halted_job_leaves_job_started_in_the_ledger_file and tests/test_job_loop.py::test_a_halted_job_commits_the_records. They run `run_refactor` up to the raised error, not `ratchet.cli.main`, so step 5 is untested.
+
+## ratchet reopen
+
+1. `ratchet.cli.main` sends the command to `ratchet.cli.run_reopen`, which loads the project and calls `ratchet.reopen.reopen_problem`.
+2. `ratchet.reopen.reopen_problem` refuses a project with no records repository, an empty reason, no list, or an id that is not a problem on the newest list.
+3. It finds the list with `ratchet.refactor.problem_list.find_problem_lists` and `ratchet.refactor.problem_list.split_entries`.
+4. It loads the ledger, sets the problem open, clears its sendbacks and adds a reopened event by the owner.
+5. `ratchet.refactor.ledger.save_ledger` saves the ledger and `ratchet.records.commit_records` commits it.
+6. `ratchet.cli.run_reopen` prints which list changed.
+
+Tests: tests/test_reopen.py::test_the_command_reopens_and_prints_errors_on_one_line (through `ratchet.cli.main`, to the printed line) and tests/test_reopen.py::test_reopening_commits_the_ledger_in_the_records_repository (through `ratchet.reopen.reopen_problem`, to the commit).
+
+## ratchet problems and --history
+
+1. `ratchet.cli.main` sends the command to `ratchet.cli.run_problems`, which refuses --history with no problem and --all with a problem.
+2. With no id, `ratchet.problems_view.show_lists` prints the newest list, or every list with --all.
+3. With an id, `ratchet.problems_view.show_problem` prints the entry from the newest list that holds it.
+4. With --history, `ratchet.problems_view.show_history` calls `ratchet.problem_history.problem_history`, which follows carried_from back through the older lists.
+5. `ratchet.problems_view.describe_event` words each event, and `ratchet.cli.run_problems` prints the text.
+
+Tests: tests/test_cli.py::test_problems_shows_the_newest_list (steps 1 and 2, through `ratchet.cli.main`). --history is not run through `ratchet.cli.main` except for its refusal in tests/test_cli.py::test_problems_errors_print_one_line, so the history path from the command line is none yet. `ratchet.problems_view.show_history` is run directly by tests/test_problems_view.py::test_the_history_prints_one_exact_line_per_event and tests/test_reopen.py::test_the_history_shows_the_reopen.
