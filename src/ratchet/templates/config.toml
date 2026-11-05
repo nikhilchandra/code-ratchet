@@ -15,14 +15,15 @@ frozen = []
 # Path patterns, relative to the project, that are denied to the agents' file tools in the audit's
 # copy of the code.
 # hide = []
-# The most pairs of findings that the pair judge is asked about.
+# The most pairs of findings that the duplicate judge is asked about.
 # max_pairs = 40
 # The most one audit may spend in dollars, counting every agent's budget.
 # max_cost_usd = 40.0
 # How each role runs. A role may also set effort, which defaults to "high" (low, medium, high,
 # xhigh, max).
 # auditor = { model = "opus", budget_usd = 10.0, timeout_s = 3600 }
-# list_reviewer = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
-# rechecker = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
-# pair_judge = { model = "sonnet", budget_usd = 1.0, timeout_s = 600 }
-# checker = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
+# rules_reviewer = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
+# standard_reviewer = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
+# old_list_checker = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
+# duplicate_judge = { model = "sonnet", budget_usd = 1.0, timeout_s = 600 }
+# final_judge = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }

@@ -1,9 +1,9 @@
-"""Checks how the checker's verdicts are applied to hand-made groups."""
+"""Checks how the final judge's verdicts are applied to hand-made groups."""
 
 from __future__ import annotations
 
 from ratchet.audit.agent_answers import (
-    CheckAnswer,
+    FinalJudgeAnswer,
     CheckedEntry,
     Citation,
     Finding,
@@ -12,7 +12,7 @@ from ratchet.audit.agent_answers import (
     OldVerdict,
     Outcome,
 )
-from ratchet.audit.grouping import CODE, FRESH, LISTED, OLD, Group, GroupingResult, Item
+from ratchet.audit.grouping import CODE, BLIND_AUDITOR, LISTED, OLD, Group, GroupingResult, Item
 from ratchet.audit.verdicts import apply_verdicts
 
 
@@ -46,7 +46,7 @@ def entry(title: str, continues: bool = False) -> CheckedEntry:
 
 
 def check(key: str, outcome: Outcome, *entries: CheckedEntry, merge_into: str = "") -> GroupCheck:
-    """Returns the checker's decision on one group."""
+    """Returns the final judge's decision on one group."""
     return GroupCheck(
         key=key, outcome=outcome, merge_into=merge_into, reason="because", entries=list(entries)
     )
@@ -54,15 +54,15 @@ def check(key: str, outcome: Outcome, *entries: CheckedEntry, merge_into: str = 
 
 def apply(groups: list[Group], *checks: GroupCheck):
     """Applies the checks to the groups."""
-    return apply_verdicts(GroupingResult(tuple(groups), ()), CheckAnswer(checks=list(checks), decisions=[]))
+    return apply_verdicts(GroupingResult(tuple(groups), ()), FinalJudgeAnswer(checks=list(checks), decisions=[]))
 
 
 def old_group(key: str = "G1", related: tuple[str, ...] = ()) -> Group:
-    """Returns a group that holds the old problem P7 and a fresh finding."""
+    """Returns a group that holds the old problem P7 and a blind auditor finding."""
     return make_group(
         key,
         make_item("O P7", OLD, make_finding("old"), "P7"),
-        make_item("F1", FRESH, make_finding("fresh")),
+        make_item("F1", BLIND_AUDITOR, make_finding("blind_auditor")),
         related=related, status="reopened",
     )
 
@@ -73,7 +73,7 @@ def titles(entries) -> list[str]:
 
 
 def test_keep_gives_one_corrected_entry() -> None:
-    """Proves a kept group comes out as the checker's text, with the group's status and tests."""
+    """Proves a kept group comes out as the final judge's text, with the group's status and tests."""
     group = make_group("G1", make_item("L1", LISTED, make_finding("listed")))
 
     result = apply([group], check("G1", Outcome.KEEP, entry("corrected")))
@@ -99,11 +99,11 @@ def test_split_gives_the_old_id_to_the_continuing_entry_only() -> None:
 
 def test_merge_into_adds_the_entries_to_the_related_group() -> None:
     """Proves a merge joins the entries and the result keeps the only old id."""
-    fresh = make_group("G1", make_item("F1", FRESH, make_finding("fresh")), related=("G2",))
+    blind_auditor = make_group("G1", make_item("F1", BLIND_AUDITOR, make_finding("blind_auditor")), related=("G2",))
     old = old_group("G2", related=("G1",))
 
     result = apply(
-        [fresh, old],
+        [blind_auditor, old],
         check("G1", Outcome.MERGE_INTO, entry("moved"), merge_into="G2"),
         check("G2", Outcome.KEEP, entry("old now", True)),
     )
@@ -115,11 +115,11 @@ def test_merge_into_adds_the_entries_to_the_related_group() -> None:
 
 def test_merge_of_a_group_with_the_old_id_into_a_new_group_keeps_the_id() -> None:
     """Proves the old id survives when the group that holds it is the one merged away."""
-    fresh = make_group("G1", make_item("F1", FRESH, make_finding("fresh")), related=("G2",))
+    blind_auditor = make_group("G1", make_item("F1", BLIND_AUDITOR, make_finding("blind_auditor")), related=("G2",))
     old = old_group("G2", related=("G1",))
 
     result = apply(
-        [fresh, old],
+        [blind_auditor, old],
         check("G1", Outcome.KEEP, entry("whole")),
         check("G2", Outcome.MERGE_INTO, entry("old part", True), merge_into="G1"),
     )
@@ -150,7 +150,7 @@ def test_a_merge_of_two_old_ids_is_refused_and_both_are_kept() -> None:
 def test_two_old_ids_merging_into_one_new_group_are_refused() -> None:
     """Proves two old problems that both merge into the same new group stay as grouped, each with
     its id, and the owner is told."""
-    whole = make_group("G1", make_item("F1", FRESH, make_finding("whole")), related=("G2", "G3"))
+    whole = make_group("G1", make_item("F1", BLIND_AUDITOR, make_finding("whole")), related=("G2", "G3"))
     first = old_group("G2", related=("G1",))
     second = make_group(
         "G3", make_item("O P8", OLD, make_finding("other"), "P8"), related=("G1",), status="open"
@@ -187,7 +187,7 @@ def test_a_broken_answer_keeps_the_group_as_grouped_with_a_note() -> None:
 def test_a_merge_into_a_group_that_is_not_kept_is_not_followed() -> None:
     """Proves a merge into a group that is dropped keeps the merging group as grouped."""
     first = make_group("G1", make_item("L1", LISTED, make_finding("one")), related=("G2",))
-    second = make_group("G2", make_item("F1", FRESH, make_finding("two")), related=("G1",))
+    second = make_group("G2", make_item("F1", BLIND_AUDITOR, make_finding("two")), related=("G1",))
 
     result = apply(
         [first, second],
@@ -263,3 +263,13 @@ def test_an_answer_for_an_unknown_group_is_noted() -> None:
 
     assert titles(result.problems) == ["listed"]
     assert "G9" in result.notes[0]
+
+
+def test_a_second_answer_for_one_group_is_noted_and_the_first_is_used() -> None:
+    """Proves a group answered twice is reported, and the first answer decides it."""
+    group = make_group("G1", make_item("L1", LISTED, make_finding("listed")))
+
+    result = apply([group], check("G1", Outcome.KEEP, entry("first")), check("G1", Outcome.DROP))
+
+    assert titles(result.problems) == ["first"]
+    assert result.notes == ("the final judge answered twice for G1, and the first answer was used",)

@@ -1,6 +1,6 @@
-"""The module contains the function that applies the checker's verdicts to the groups of an audit.
-Whatever the checker decides, code keeps the old id on the entry that continues an old problem,
-never merges two old problems, and falls back to the group as grouped when the checker's answer
+"""The module contains the function that applies the final judge's verdicts to the groups of an audit.
+Whatever the final judge decides, code keeps the old id on the entry that continues an old problem,
+never merges two old problems, and falls back to the group as grouped when the final judge's answer
 breaks a rule.
 """
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ratchet.audit.agent_answers import CheckAnswer, CheckedEntry, Finding, Grade, GroupCheck, Outcome
+from ratchet.audit.agent_answers import FinalJudgeAnswer, CheckedEntry, Finding, Grade, GroupCheck, Outcome
 from ratchet.audit.grouping import CODE, NEW, Group, GroupingResult
 
 _KEPT = (Outcome.KEEP, Outcome.SPLIT)
@@ -39,13 +39,13 @@ class FinalEntry:
 
 @dataclass(frozen=True)
 class DroppedEntry:
-    """One group that the checker dropped.
+    """One group that the final judge dropped.
 
     Attributes:
         finding: The group's main text.
         old_id: The id of the old problem in the group, or "".
         sources: The labels of the items in the group.
-        reason: The checker's reason.
+        reason: The final judge's reason.
     """
 
     finding: Finding
@@ -56,7 +56,7 @@ class DroppedEntry:
 
 @dataclass(frozen=True)
 class AppliedVerdicts:
-    """What the groups come out as once the checker's verdicts are applied.
+    """What the groups come out as once the final judge's verdicts are applied.
 
     Attributes:
         problems: The entries that go in the Open section.
@@ -64,7 +64,7 @@ class AppliedVerdicts:
         bugs: The entries that go in the bugs noticed.
         dropped: The groups that were dropped.
         done: The groups that hold only the old entry of a problem that is done or gone, which the
-            checker did not see.
+            final judge did not see.
         notes: Notes for the owner that belong to no entry.
     """
 
@@ -81,9 +81,9 @@ class _Plan:
     """What one group comes out as, before any merge into it.
 
     Attributes:
-        outcome: The checker's outcome for the group.
+        outcome: The final judge's outcome for the group.
         merge_into: The id of the group that this group is merged into, or "" if it is not merged.
-        reason: The checker's stated reason for the outcome.
+        reason: The final judge's stated reason for the outcome.
         entries: The checked entries that the group keeps.
         notes: The notes that the group adds to the audit.
     """
@@ -95,8 +95,8 @@ class _Plan:
     notes: tuple[str, ...]
 
 
-def apply_verdicts(grouping: GroupingResult, answer: CheckAnswer) -> AppliedVerdicts:
-    """Applies the checker's verdict on each group.
+def apply_verdicts(grouping: GroupingResult, answer: FinalJudgeAnswer) -> AppliedVerdicts:
+    """Applies the final judge's verdict on each group.
 
     A group whose verdict breaks a rule is kept as grouped, with its main text and a note for the
     owner. The rules are that a kept or split group holds exactly one entry that continues its old
@@ -104,8 +104,8 @@ def apply_verdicts(grouping: GroupingResult, answer: CheckAnswer) -> AppliedVerd
     kept or split, and that a merge never joins two old problems.
 
     Args:
-        grouping: The groups that went to the checker, as made by finish_groups.
-        answer: The checker's answer.
+        grouping: The groups that went to the final judge, as made by finish_groups.
+        answer: The final judge's answer.
 
     Returns:
         The final entries, with the old id on the entry that continues each old problem. A code
@@ -116,9 +116,9 @@ def apply_verdicts(grouping: GroupingResult, answer: CheckAnswer) -> AppliedVerd
     checks: dict[str, GroupCheck] = {}
     for check in answer.checks:
         if check.key not in groups:
-            notes.append(f"the checker answered for {check.key}, which is not a group")
+            notes.append(f"the final judge answered for {check.key}, which is not a group")
         elif check.key in checks:
-            notes.append(f"the checker answered twice for {check.key}, and the first answer was used")
+            notes.append(f"the final judge answered twice for {check.key}, and the first answer was used")
         else:
             checks[check.key] = check
     reverted = _refused_merges(groups, checks)
@@ -163,7 +163,7 @@ def _refused_merges(groups: dict[str, Group], checks: dict[str, GroupCheck]) -> 
 
     Args:
         groups: The groups by key.
-        checks: The checker's answer for each group by key.
+        checks: The final judge's answer for each group by key.
 
     Returns:
         The keys of every group merging into such a target, and of the target itself.
@@ -188,24 +188,24 @@ def _fallback(group: Group, reason: str) -> _Plan:
 
     Args:
         group: The group.
-        reason: Why the checker's answer was not used, as a phrase that starts with "because".
+        reason: Why the final judge's answer was not used, as a phrase that starts with "because".
 
     Returns:
         A keep plan with one entry holding the group's main text, which continues the group's old
         problem when it has one, and a note for the owner.
     """
     entry = CheckedEntry(continues_old=bool(group.old_id), finding=group.text)
-    note = f"the checker's answer for {group.key} was not used, {reason}"
+    note = f"the final judge's answer for {group.key} was not used, {reason}"
     return _Plan(Outcome.KEEP, "", reason, (entry,), (note,))
 
 
 def _plan(group: Group, check: GroupCheck | None, reverted: bool) -> _Plan:
-    """Makes the plan for one group from the checker's answer, or the fallback when the answer
+    """Makes the plan for one group from the final judge's answer, or the fallback when the answer
     breaks a rule.
 
     Args:
         group: The group.
-        check: The checker's answer for the group, or None.
+        check: The final judge's answer for the group, or None.
         reverted: True when the group is part of a refused merge of two old problems.
 
     Returns:
@@ -214,7 +214,7 @@ def _plan(group: Group, check: GroupCheck | None, reverted: bool) -> _Plan:
     if reverted:
         return _fallback(group, "because it would have joined two old problems")
     if check is None:
-        return _fallback(group, "because the checker gave no answer")
+        return _fallback(group, "because the final judge gave no answer")
     wrong = _broken_rule(group, check)
     if wrong:
         return _fallback(group, wrong)
@@ -222,11 +222,11 @@ def _plan(group: Group, check: GroupCheck | None, reverted: bool) -> _Plan:
 
 
 def _broken_rule(group: Group, check: GroupCheck) -> str:
-    """Tells which rule, if any, a checker's answer breaks, apart from the choice of merge target.
+    """Tells which rule, if any, a final judge's answer breaks, apart from the choice of merge target.
 
     Args:
         group: The group.
-        check: The checker's answer for the group.
+        check: The final judge's answer for the group.
 
     Returns:
         A short phrase that names the broken rule, or "" when the answer is sound.
@@ -317,10 +317,10 @@ def _stated_code_entries(group: Group) -> list[FinalEntry]:
         group: The dropped group.
 
     Returns:
-        The entries, each with a note that says the checker dropped the group.
+        The entries, each with a note that says the final judge dropped the group.
     """
     status = NEW if group.old_id else group.status
-    note = f"kept although the checker dropped {group.key}, because code found it from a stated rule"
+    note = f"kept although the final judge dropped {group.key}, because code found it from a stated rule"
     return [
         FinalEntry(item.finding, "", status, (item.label,), group.area, group.tests, (note,))
         for item in group.items

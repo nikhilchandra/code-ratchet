@@ -126,7 +126,7 @@ class AuditorAnswer(_Answer):
     bugs: list[Bug]
 
 
-# ---------------------------------------------------------------- the list reviewers' answer
+# ---------------------------------------------------------------- the reviewers' answer
 
 
 class ReviewVerdict(StrEnum):
@@ -156,7 +156,7 @@ class ListReview(_Answer):
     bugs: list[Bug]
 
 
-# ---------------------------------------------------------------- the rechecker's answer
+# ---------------------------------------------------------------- the old list checker's answer
 
 
 class OldVerdict(StrEnum):
@@ -171,7 +171,7 @@ class OldVerdict(StrEnum):
 
 
 class OldEntryCheck(_Answer):
-    """Holds the rechecker's verdict on one old problem."""
+    """Holds the old list checker's verdict on one old problem."""
 
     id: str
     verdict: OldVerdict
@@ -191,7 +191,7 @@ class QuestionDecision(StrEnum):
 
 
 class AnsweredQuestion(_Answer):
-    """Holds what the rechecker decides for one question that the owner has answered."""
+    """Holds what the old list checker decides for one question that the owner has answered."""
 
     id: str
     decision: QuestionDecision
@@ -201,36 +201,36 @@ class AnsweredQuestion(_Answer):
     rule_text: str
 
 
-class RecheckAnswer(_Answer):
-    """Holds the rechecker's answer on an old list."""
+class OldListCheckerAnswer(_Answer):
+    """Holds the old list checker's answer on an old list."""
 
     checks: list[OldEntryCheck]
     answered_questions: list[AnsweredQuestion]
     from_reviewer_notes: list[Finding]
 
 
-# ---------------------------------------------------------------- the pair judge's answer
+# ---------------------------------------------------------------- the duplicate judge's answer
 
 
 class PairVerdict(_Answer):
-    """Holds the judge's decision on one numbered pair of findings."""
+    """Holds the duplicate judge's decision on one numbered pair of findings."""
 
     pair: int
     same: bool
     reason: str
 
 
-class PairAnswer(_Answer):
-    """Holds the pair judge's decisions."""
+class DuplicateJudgeAnswer(_Answer):
+    """Holds the duplicate judge's decisions."""
 
     pairs: list[PairVerdict]
 
 
-# ---------------------------------------------------------------- the checker's answer
+# ---------------------------------------------------------------- the final judge's answer
 
 
 class Outcome(StrEnum):
-    """Says how the checker settles one group."""
+    """Says how the final judge settles one group."""
 
     KEEP = "keep"
     MERGE_INTO = "merge_into"
@@ -249,7 +249,7 @@ class CheckedEntry(_Answer):
 
 
 class GroupCheck(_Answer):
-    """Holds the checker's decision on one group."""
+    """Holds the final judge's decision on one group."""
 
     key: str
     outcome: Outcome
@@ -260,7 +260,7 @@ class GroupCheck(_Answer):
 
 
 class QuestionVerdict(_Answer):
-    """Holds what the checker decides for one question that the owner has answered."""
+    """Holds what the final judge decides for one question that the owner has answered."""
 
     label: str
     decision: QuestionDecision
@@ -269,8 +269,8 @@ class QuestionVerdict(_Answer):
     rule_text: str
 
 
-class CheckAnswer(_Answer):
-    """Holds the checker's answer on every group."""
+class FinalJudgeAnswer(_Answer):
+    """Holds the final judge's answer on every group."""
 
     checks: list[GroupCheck]
     decisions: list[QuestionVerdict]

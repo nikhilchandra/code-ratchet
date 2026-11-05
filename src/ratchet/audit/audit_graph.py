@@ -4,18 +4,18 @@ published problem list, and the agents that the graph calls.
 A job goes through these steps:
     prepare: code checks that the audit may start, runs the code checker, takes the inventory and
         records the commit the audit starts on.
-    audit: the auditor writes the list. In a re-audit the blind audit and the rechecker run
-        instead, and the rechecker checks every old problem against the code as it stands now.
-        When the project's git history holds .ratchet, the old lists can be read there, so the
-        auditor takes the blind audit's place and the audit is marked as not blind.
-    review: list reviewers A and B each review the list, and may add problems. A re-audit skips
-        this step.
-    group: code joins the findings that are about the same problem, and the pair judge decides the
-        pairs that its rules cannot settle.
+    audit: the auditor writes the list. In a re-audit the blind auditor and the old list checker
+        run instead, and the old list checker checks every old problem against the code as it
+        stands now. When the project's git history holds .ratchet, the old lists can be read there,
+        so the auditor takes the blind auditor's place and the audit is marked as not blind.
+    review: the rules reviewer and the standard reviewer each review the list, and may add
+        problems. A re-audit skips this step.
+    group: code joins the findings that are about the same problem, and the duplicate judge
+        decides the pairs that its rules cannot settle.
     check-citations: code checks every citation against the code at that commit and fixes lines
         that moved.
     questions: a gate. The questions for the owner are written, and the job waits for the answers.
-    check: code checks that HEAD has not moved and the working tree is clean, the checker judges
+    check: code checks that HEAD has not moved and the working tree is clean, the final judge judges
         the groups, and code applies its verdicts.
     draft: a gate. The ids are given out, the draft is written, and the job waits for approval.
     publish: the list is written with its ledger, the rules decisions are added to rules.md, and
@@ -44,7 +44,7 @@ from ratchet.audit.agent_answers import (
     AnsweredQuestion,
     AuditorAnswer,
     Bug,
-    CheckAnswer,
+    FinalJudgeAnswer,
     CheckedEntry,
     Citation,
     EntryReview,
@@ -58,16 +58,17 @@ from ratchet.audit.agent_answers import (
     Question,
     QuestionDecision,
     QuestionVerdict,
-    RecheckAnswer,
+    OldListCheckerAnswer,
 )
 from ratchet.audit.agent_profiles import (
     FORBIDDEN_OPTIONS,
-    FRESH,
+    BLIND_AUDITOR,
+    REVIEWERS,
     Role,
     format_auditor_prompt,
-    format_check_prompt,
-    format_pair_prompt,
-    format_recheck_prompt,
+    format_duplicate_judge_prompt,
+    format_final_judge_prompt,
+    format_old_list_checker_prompt,
     format_review_prompt,
     hidden_paths,
     make_agents,
@@ -261,7 +262,7 @@ def _load_groups(folder: Path) -> GroupingResult:
         folder: The audit's folder.
 
     Returns:
-        The groups for the checker and the groups for the done list.
+        The groups for the final judge and the groups for the done list.
     """
     data = _read_json(folder / "groups.json")
     return GroupingResult(
@@ -280,13 +281,13 @@ def _entry_from(data: dict) -> FinalEntry:
 
 
 def _load_applied(folder: Path) -> tuple[AppliedVerdicts, list[QuestionVerdict]]:
-    """Reads the checker's verdicts as check applied them.
+    """Reads the final judge's verdicts as check applied them.
 
     Args:
         folder: The audit's folder.
 
     Returns:
-        The applied verdicts, and the checker's decisions on the owner's answered questions.
+        The applied verdicts, and the final judge's decisions on the owner's answered questions.
     """
     data = _read_json(folder / "final.json")
     applied = AppliedVerdicts(
@@ -305,7 +306,7 @@ def _load_applied(folder: Path) -> tuple[AppliedVerdicts, list[QuestionVerdict]]
 
 
 def _gather(folder: Path) -> tuple[list[tuple[str, Question]], list[Bug]]:
-    """Gathers the questions and the bugs that the auditor, the list reviewers and the blind audit
+    """Gathers the questions and the bugs that the auditor, the reviewers and the blind auditor
     gave.
 
     Args:
@@ -317,9 +318,8 @@ def _gather(folder: Path) -> tuple[list[tuple[str, Question]], list[Bug]]:
     """
     answers = [
         _load_answer(folder, "auditor", AuditorAnswer),
-        _load_answer(folder, "review-a", ListReview),
-        _load_answer(folder, "review-b", ListReview),
-        _load_answer(folder, FRESH, AuditorAnswer),
+        *(_load_answer(folder, role, ListReview) for role in REVIEWERS),
+        _load_answer(folder, BLIND_AUDITOR, AuditorAnswer),
     ]
     questions: list[tuple[str, Question]] = []
     bugs: list[Bug] = []
@@ -363,7 +363,7 @@ def _question_text(question: Question) -> str:
 
 
 def _history_text(project: Project, list_name: str, problem_id: str) -> str:
-    """Writes one old problem's history for the rechecker.
+    """Writes one old problem's history for the old list checker.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -420,10 +420,10 @@ def _records_since(root: Path, list_name: str) -> list[str]:
 def _unusable_checks(
     checks: list[OldEntryCheck], old_ids: list[str], root: Path, inventory: list[InventoryItem]
 ) -> list[str]:
-    """Finds the old ids that the rechecker left out or answered without a current place.
+    """Finds the old ids that the old list checker left out or answered without a current place.
 
     Args:
-        checks: The rechecker's checks.
+        checks: The old list checker's checks.
         old_ids: Every problem id of the old list.
         root: The project's folder, which the citations' files are relative to.
         inventory: The modules and classes of the code.
@@ -469,10 +469,10 @@ def _earlier_sendbacks(project: Project, carried_from: str) -> int:
 
 
 def _as_verdict(question: AnsweredQuestion) -> QuestionVerdict:
-    """Writes the rechecker's decision on an old question as a checker's decision.
+    """Writes the old list checker's decision on an old question as a final judge's decision.
 
     Args:
-        question: The rechecker's decision.
+        question: The old list checker's decision.
 
     Returns:
         The same decision, labeled "O" and the old question's id so that it cannot be mistaken
@@ -556,8 +556,8 @@ def _fix_group(root: Path, group: Group, results: list[CitationResult]) -> Group
     return replace(group, items=items, text=text, notes=notes)
 
 
-def _skips_checker(group: Group) -> bool:
-    """Answers whether a group is a single code finding graded stated, which needs no checker."""
+def _skips_final_judge(group: Group) -> bool:
+    """Answers whether a group is a single code finding graded stated, which needs no final judge."""
     return (len(group.items) == 1 and group.items[0].source == CODE
             and group.text.grade == Grade.STATED)
 
@@ -607,7 +607,7 @@ def _add_rules(text: str, rules: list[str], slug: str) -> str:
 
     Args:
         text: The contents of rules.md.
-        rules: The rules to add, each as the text the checker wrote.
+        rules: The rules to add, each as the text the final judge wrote.
         slug: The audit's name, which each rule names.
 
     Returns:
@@ -711,18 +711,18 @@ def build_audit_graph(
         calls = forbidden_calls(log_path, FORBIDDEN_OPTIONS, project.root,
                                 tuple(job.data.get("hidden", ())))
         ran = [_call_text(call) for call in calls if not call.denied]
+        who = "blind auditor" if name == BLIND_AUDITOR else name
         if ran:
-            who = "blind audit" if name == FRESH else name
             raise AuditError(f"the {who} ran a tool call that names {FOLDER} or .git, leaves the "
                              f"project, reads a hidden path or uses a forbidden git option, so it may have seen the old problem lists or a secret: "
                              f"{'; '.join(ran[:3])}")
         refused = [_call_text(call) for call in calls if call.denied]
         if refused:
-            note(job, f"the permission rules refused {len(refused)} calls of the {name} that name "
+            note(job, f"the permission rules refused {len(refused)} calls of the {who} that name "
                       f"{FOLDER} or .git, leave the project, read a hidden path or use a forbidden git option, such as {'; '.join(refused[:3])}")
         unopened = unopened_files(log_path, project.root, files or [])
         if unopened:
-            note(job, f"the {name} never opened {len(unopened)} files of the inventory, such as "
+            note(job, f"the {who} never opened {len(unopened)} files of the inventory, such as "
                       f"{', '.join(unopened[:5])}")
 
     @graph.step("prepare", next=("audit",))
@@ -744,7 +744,7 @@ def build_audit_graph(
         lists = find_problem_lists(project)
         reaudit = bool(lists) and not force_first
         check_cost(job, settings.auditor.budget_usd,
-                   settings.rechecker.budget_usd if reaudit else 0.0)
+                   settings.old_list_checker.budget_usd if reaudit else 0.0)
 
         design = read_target_design(project.rules)
         folder = folder_of(job)
@@ -775,18 +775,18 @@ def build_audit_graph(
                       f"such as {', '.join(missing[:5])}")
 
     def audit_again(job: Job) -> str:
-        """Runs the blind audit and the rechecker together, and asks the rechecker once more for
-        the old ids it left out or gave no current place. When the history holds .ratchet, the
-        auditor runs in the blind audit's place."""
+        """Runs the blind auditor and the old list checker together, and asks the old list checker
+        once more for the old ids it left out or gave no current place. When the history holds
+        .ratchet, the auditor runs in the blind auditor's place."""
         folder = folder_of(job)
         root = project.root
         old_name = job.data["old_list"]
-        check_cost(job, settings.auditor.budget_usd, settings.rechecker.budget_usd)
+        check_cost(job, settings.auditor.budget_usd, settings.old_list_checker.budget_usd)
         inventory = _load_inventory(folder)
 
-        # the blind audit gets no list, ledger or earlier answer
+        # the blind auditor gets no list, ledger or earlier answer
         ratchet_commit = job.data.get("ratchet_commit", "")
-        fresh_prompt = format_auditor_prompt(job.prompt, _load_code_findings(folder), inventory)
+        blind_auditor_prompt = format_auditor_prompt(job.prompt, _load_code_findings(folder), inventory)
         old_text = read_markdown(project.folder, f"{old_name}.md")
         old_ids = [entry.id for entry in split_entries(old_text) if entry.is_problem]
         histories = {old_id: _history_text(project, old_name, old_id) for old_id in old_ids}
@@ -794,44 +794,45 @@ def build_audit_graph(
         git_log = Repo(project.root).run(
             "log", "--stat", f"--since={job.data['published']}", check=False)
         hints = (folder / "evidence-hints.md").read_text(encoding="utf-8")
-        recheck_prompt = format_recheck_prompt(old_text, histories, records, git_log, hints)
+        old_list_checker_prompt = format_old_list_checker_prompt(old_text, histories, records, git_log, hints)
         chosen = agents_of(job)
-        # with .ratchet in the history, the auditor stands in for the blind audit
-        blind = chosen[Role.AUDITOR if ratchet_commit else FRESH]
-        fresh_reply, recheck_reply = ask_together(
-            [(blind, fresh_prompt), (chosen[Role.RECHECKER], recheck_prompt)],
+        # with .ratchet in the history, the auditor stands in for the blind auditor
+        blind = chosen[Role.AUDITOR if ratchet_commit else BLIND_AUDITOR]
+        blind_auditor_reply, old_list_checker_reply = ask_together(
+            [(blind, blind_auditor_prompt), (chosen[Role.OLD_LIST_CHECKER], old_list_checker_prompt)],
             folder / "prompts")
-        for reply in (fresh_reply, recheck_reply):
+        for reply in (blind_auditor_reply, old_list_checker_reply):
             if isinstance(reply, NoAnswerError):
                 raise reply
 
-        check_turn(job, FRESH, fresh_reply.log_path, sorted({item.file for item in inventory}))
-        _write_json(folder / f"{FRESH}.json", fresh_reply.data)
-        note_units(job, FRESH, fresh_reply.data, inventory)
-        check_turn(job, "rechecker", recheck_reply.log_path)
+        check_turn(job, BLIND_AUDITOR, blind_auditor_reply.log_path,
+                   sorted({item.file for item in inventory}))
+        _write_json(folder / f"{BLIND_AUDITOR}.json", blind_auditor_reply.data)
+        note_units(job, BLIND_AUDITOR, blind_auditor_reply.data, inventory)
+        check_turn(job, Role.OLD_LIST_CHECKER, old_list_checker_reply.log_path)
 
         # ask again for the old ids that have no current place, and keep the better checks
-        answer: RecheckAnswer = recheck_reply.data
+        answer: OldListCheckerAnswer = old_list_checker_reply.data
         unusable = _unusable_checks(answer.checks, old_ids, root, inventory)
         if unusable:
-            check_cost(job, settings.rechecker.budget_usd,
-                       spent=fresh_reply.cost_usd + recheck_reply.cost_usd)
+            check_cost(job, settings.old_list_checker.budget_usd,
+                       spent=blind_auditor_reply.cost_usd + old_list_checker_reply.cost_usd)
             retry = ask(
-                chosen[Role.RECHECKER],
-                format_recheck_prompt(old_text, histories, records, git_log, hints, unusable),
+                chosen[Role.OLD_LIST_CHECKER],
+                format_old_list_checker_prompt(old_text, histories, records, git_log, hints, unusable),
                 folder / "prompts" / "retry")
-            check_turn(job, "rechecker", retry.log_path)
+            check_turn(job, Role.OLD_LIST_CHECKER, retry.log_path)
             again = {check.id: check for check in retry.data.checks}
             kept = {check.id: check for check in answer.checks}
             kept.update({old_id: again[old_id] for old_id in unusable if old_id in again})
             answer = answer.model_copy(update={"checks": list(kept.values())})
             unusable = _unusable_checks(answer.checks, old_ids, root, inventory)
             if unusable:
-                raise AuditError("the rechecker gave no current citation or subject for "
+                raise AuditError("the old_list_checker gave no current citation or subject for "
                                  f"{', '.join(unusable)}, even when asked again")
         answer = answer.model_copy(
             update={"checks": [check for check in answer.checks if check.id in old_ids]})
-        _write_json(folder / "recheck.json", answer)
+        _write_json(folder / f"{Role.OLD_LIST_CHECKER}.json", answer)
         return "group"
 
     @graph.step("audit", next=("review", "group"))
@@ -852,17 +853,17 @@ def build_audit_graph(
     @graph.step("review", next=("group",))
     def review(job: Job) -> str:
         folder = folder_of(job)
-        check_cost(job, 2 * settings.list_reviewer.budget_usd)
+        check_cost(job, *(getattr(settings, role).budget_usd for role in REVIEWERS))
         listed = _load_answer(folder, "auditor", AuditorAnswer).problems
         entries = {f"L{number}": finding for number, finding in enumerate(listed, start=1)}
         prompt = format_review_prompt(entries, _load_code_findings(folder))
         chosen = agents_of(job)
-        requests = [(chosen[Role.LIST_REVIEWER_A], prompt), (chosen[Role.LIST_REVIEWER_B], prompt)]
-        for letter, (agent, _), reply in zip("ab", requests, ask_together(requests, folder / "prompts")):
+        requests = [(chosen[role], prompt) for role in REVIEWERS]
+        for (agent, _), reply in zip(requests, ask_together(requests, folder / "prompts")):
             if isinstance(reply, NoAnswerError):
                 note(job, f"{reply}, so the audit went on without that review")
                 continue
-            _write_json(folder / f"review-{letter}.json", reply.data)
+            _write_json(folder / f"{agent.name}.json", reply.data)
             given = {verdict.label for verdict in reply.data.reviews}
             missing = [label for label in entries if label not in given]
             if missing:
@@ -874,35 +875,35 @@ def build_audit_graph(
     def group(job: Job) -> str:
         folder = folder_of(job)
         design = read_target_design(project.rules)
-        reviews = [_load_answer(folder, name, ListReview) for name in ("review-a", "review-b")]
+        reviews = [_load_answer(folder, role, ListReview) for role in REVIEWERS]
         auditor = _load_answer(folder, "auditor", AuditorAnswer)
-        fresh = _load_answer(folder, FRESH, AuditorAnswer)
-        recheck = _load_answer(folder, "recheck", RecheckAnswer)
+        blind_auditor = _load_answer(folder, BLIND_AUDITOR, AuditorAnswer)
+        old_list_checker = _load_answer(folder, Role.OLD_LIST_CHECKER, OldListCheckerAnswer)
         items = make_items(
             project, design,
             code=_load_code_findings(folder),
             listed=auditor.problems if auditor else [],
             added_a=reviews[0].added if reviews[0] else [],
             added_b=reviews[1].added if reviews[1] else [],
-            old=recheck.checks if recheck else [],
-            from_notes=recheck.from_reviewer_notes if recheck else [],
-            fresh=fresh.problems if fresh else [],
+            old=old_list_checker.checks if old_list_checker else [],
+            from_notes=old_list_checker.from_reviewer_notes if old_list_checker else [],
+            blind_auditor=blind_auditor.problems if blind_auditor else [],
         )
         groups = group_items(items)
 
-        # ask the pair judge about the pairs that the rules cannot settle
+        # ask the duplicate judge about the pairs that the rules cannot settle
         candidates = pair_candidates(groups, settings.max_pairs)
         verdicts = []
         if candidates:
-            check_cost(job, settings.pair_judge.budget_usd)
+            check_cost(job, settings.duplicate_judge.budget_usd)
             try:
-                reply = ask(agents_of(job)[Role.PAIR_JUDGE], format_pair_prompt(candidates),
+                reply = ask(agents_of(job)[Role.DUPLICATE_JUDGE], format_duplicate_judge_prompt(candidates),
                             folder / "prompts")
             except NoAnswerError as error:
                 note(job, f"{error}, so no pair was joined by its decision")
             else:
                 verdicts = reply.data.pairs
-                check_turn(job, "pair_judge", reply.log_path)
+                check_turn(job, Role.DUPLICATE_JUDGE, reply.log_path)
         groups, records = join_pairs(groups, candidates, verdicts)
         result = finish_groups(project, design, items, groups, job.data["reaudit"])
         _write_json(folder / "pairs.json", records)
@@ -935,7 +936,7 @@ def build_audit_graph(
 
     @graph.step("check", next=("draft", "publish"))
     def check(job: Job) -> str:
-        # a discard decided at the questions gate goes straight to publish, with no checker turn
+        # a discard decided at the questions gate goes straight to publish, with no final judge turn
         if job.data.get("decision") == "discard":
             return "publish"
         # halt when the code is not what the audit started on, since the citations come from it
@@ -951,38 +952,38 @@ def build_audit_graph(
         if "answers" in job.data:
             _write_json(folder / "answers.json", answers)
         result = _load_groups(folder)
-        asked = [group for group in result.groups if not _skips_checker(group)]
-        skipped = [group for group in result.groups if _skips_checker(group)]
+        asked = [group for group in result.groups if not _skips_final_judge(group)]
+        skipped = [group for group in result.groups if _skips_final_judge(group)]
 
-        # ask the checker about the groups it must judge and the questions that were answered
+        # ask the final judge about the groups it must judge and the questions that were answered
         answered = [(label, question, answers[label]) for label, question in gathered
                     if label in answers]
-        judged = CheckAnswer(checks=[], decisions=[])
+        judged = FinalJudgeAnswer(checks=[], decisions=[])
         if asked or answered:
-            check_cost(job, settings.checker.budget_usd)
+            check_cost(job, settings.final_judge.budget_usd)
             reviews: dict[str, list[EntryReview]] = {}
-            for name in ("review-a", "review-b"):
-                given = _load_answer(folder, name, ListReview)
+            for role in REVIEWERS:
+                given = _load_answer(folder, role, ListReview)
                 for verdict in given.reviews if given else []:
                     reviews.setdefault(verdict.label, []).append(verdict)
-            prompt = format_check_prompt(
+            prompt = format_final_judge_prompt(
                 asked, (folder / "citations.md").read_text(encoding="utf-8"), answered, reviews)
-            reply = ask(agents_of(job)[Role.CHECKER], prompt, folder / "prompts")
+            reply = ask(agents_of(job)[Role.FINAL_JUDGE], prompt, folder / "prompts")
             judged = reply.data
-            _write_json(folder / "check.json", judged)
-            check_turn(job, "checker", reply.log_path)
+            _write_json(folder / f"{Role.FINAL_JUDGE}.json", judged)
+            check_turn(job, Role.FINAL_JUDGE, reply.log_path)
 
         # code keeps each stated code finding as it is, then applies the verdicts
         unjudged = [
             GroupCheck(key=group.key, outcome=Outcome.KEEP, merge_into="",
-                       reason="found by code from a stated rule, so the checker was not asked",
+                       reason="found by code from a stated rule, so the final judge was not asked",
                        entries=[CheckedEntry(continues_old=False, finding=group.text)])
             for group in skipped
         ]
-        everything = CheckAnswer(checks=unjudged + judged.checks, decisions=judged.decisions)
-        recheck = _load_answer(folder, "recheck", RecheckAnswer)
+        everything = FinalJudgeAnswer(checks=unjudged + judged.checks, decisions=judged.decisions)
+        old_list_checker = _load_answer(folder, Role.OLD_LIST_CHECKER, OldListCheckerAnswer)
         old_decisions = [_as_verdict(question) for question in
-                         (recheck.answered_questions if recheck else [])]
+                         (old_list_checker.answered_questions if old_list_checker else [])]
         applied = apply_verdicts(result, everything)
 
         # check the citations of the final entries again
@@ -1021,7 +1022,7 @@ def build_audit_graph(
             "notes": notes,
             "decisions": decisions,
         })
-        lines = ["# What the checker decided", ""]
+        lines = ["# What the final judge decided", ""]
         for check_ in everything.checks:
             target = f" into {check_.merge_into}" if check_.merge_into else ""
             lines.append(f"- {check_.key}: {check_.outcome}{target}. {check_.reason}")
@@ -1044,10 +1045,10 @@ def build_audit_graph(
         if job.data.get("ratchet_commit", ""):
             made.not_blind = NOT_BLIND_NOTE.format(commit=job.data["ratchet_commit"])
         old_name = job.data["old_list"]
-        recheck = _load_answer(folder, "recheck", RecheckAnswer)
-        left = {check.id: check.what_is_left for check in recheck.checks} if recheck else {}
+        old_list_checker = _load_answer(folder, Role.OLD_LIST_CHECKER, OldListCheckerAnswer)
+        left = {check.id: check.what_is_left for check in old_list_checker.checks} if old_list_checker else {}
 
-        # turn the owner's answered questions into what the checker decided for each
+        # turn the owner's answered questions into what the final judge decided for each
         new_problems: list[tuple[FinalEntry, str]] = []
         rules: list[str] = []
         for label, question in gathered:
@@ -1119,7 +1120,7 @@ def build_audit_graph(
                 tests=_tests_of(entry), notes=list(entry.notes),
             ))
 
-        # the entries that the checker made questions of follow the questions that were asked
+        # the entries that the final judge made questions of follow the questions that were asked
         for number, entry in enumerate(applied.questions, start=len(gathered) + 1):
             made.questions.append(
                 DraftQuestion(f"Q{number}", entry.finding.title, entry.finding.what_is_wrong))

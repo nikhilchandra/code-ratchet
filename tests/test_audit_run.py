@@ -12,10 +12,10 @@ import pytest
 from ratchet.architecture import check_architecture
 from ratchet.audit.agent_answers import (
     AuditorAnswer,
-    CheckAnswer,
+    FinalJudgeAnswer,
     ListReview,
-    PairAnswer,
-    RecheckAnswer,
+    DuplicateJudgeAnswer,
+    OldListCheckerAnswer,
 )
 from ratchet.audit.audit_run import (
     APPROVE,
@@ -39,20 +39,20 @@ from test_audit_graph import (  # noqa: F401
     audit_project,
     auditor_turn,
     build_project,
-    checker_turn,
+    final_judge_turn,
     commit_ratchet,
-    continuing_checker,
+    continuing_final_judge,
     default_turns,
-    fresh_turn,
+    blind_auditor_turn,
     git_output,
-    judge_turn,
-    recheck_turn,
+    duplicate_judge_turn,
+    old_list_checker_turn,
     short_hash,
 )
 
-ANSWERS = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
-           "list_reviewer_b": ListReview, "rechecker": RecheckAnswer, "pair_judge": PairAnswer,
-           "checker": CheckAnswer}
+ANSWERS = {"auditor": AuditorAnswer, "blind_auditor": AuditorAnswer, "rules_reviewer": ListReview,
+           "standard_reviewer": ListReview, "old_list_checker": OldListCheckerAnswer,
+           "duplicate_judge": DuplicateJudgeAnswer, "final_judge": FinalJudgeAnswer}
 
 
 def scripted(project: Project) -> tuple[dict[str, ScriptedAgent], object]:
@@ -202,7 +202,7 @@ def cut_off_at_questions(project: Project) -> dict[str, ScriptedAgent]:
                 "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
                 "what_would_settle": "A word from the owner."}
     turns = default_turns(project) | {"auditor": [auditor_turn(project, questions=[question])],
-                                      "checker": [checker_turn()]}
+                                      "final_judge": [final_judge_turn()]}
     agents = {name: ScriptedAgent(name, schema, turns.get(name, []))
               for name, schema in ANSWERS.items()}
 
@@ -235,7 +235,7 @@ def test_approving_an_audit_cut_off_at_the_questions_stops_at_the_draft(
 def test_approving_an_audit_cut_off_at_the_questions_is_refused_when_head_has_moved(
     audit_project: Project,
 ) -> None:
-    """Proves HEAD is checked before the checker is called."""
+    """Proves HEAD is checked before the final judge is called."""
     agents = cut_off_at_questions(audit_project)
     (audit_project.root / "later.txt").write_text("later\n", encoding="utf-8")
     for command in (["add", "-A"], ["commit", "-q", "-m", "later"]):
@@ -244,24 +244,24 @@ def test_approving_an_audit_cut_off_at_the_questions_is_refused_when_head_has_mo
     with pytest.raises(AuditError, match="HEAD has moved"):
         settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
-    assert agents["checker"].prompts == []
+    assert agents["final_judge"].prompts == []
     settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
 
 
-def test_discarding_an_audit_cut_off_at_the_questions_calls_no_checker(
+def test_discarding_an_audit_cut_off_at_the_questions_calls_no_final_judge(
     audit_project: Project,
 ) -> None:
-    """Proves discarding an audit left at the questions gate ends it with no checker turn."""
+    """Proves discarding an audit left at the questions gate ends it with no final judge turn."""
     agents = cut_off_at_questions(audit_project)
 
     done = settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
 
     assert done.outcome == "discarded" and not find_problem_lists(audit_project)
-    assert agents["checker"].prompts == []
+    assert agents["final_judge"].prompts == []
 
 
 def test_fresh_audits_as_a_first_audit_when_a_list_exists(audit_project: Project) -> None:
-    """Proves fresh skips the rechecker even though the project has a problem list."""
+    """Proves --fresh skips the old list checker even though the project has a problem list."""
     waiting_run(audit_project)
     settle_audit(audit_project, APPROVE)
     agents, maker = scripted(audit_project)
@@ -269,7 +269,7 @@ def test_fresh_audits_as_a_first_audit_when_a_list_exists(audit_project: Project
     run = start_audit(audit_project, agent_maker=maker, fresh=True, interactive=False)
 
     assert run.outcome == "waiting"
-    assert agents["rechecker"].prompts == [] and agents["auditor"].prompts
+    assert agents["old_list_checker"].prompts == [] and agents["auditor"].prompts
 
 
 def test_an_audit_after_one_that_halted_in_prepare_still_starts(audit_project: Project) -> None:
@@ -353,9 +353,11 @@ def published_old_list(project: Project) -> list:
 
 def reaudit_agents(project: Project, entries: list, blind: str) -> dict[str, ScriptedAgent]:
     """Returns scripted agents for a re-audit in which every old problem is open. The agent named
-    'blind', which is "fresh" or "auditor", gives the audit that runs beside the rechecker."""
-    turns = {blind: [fresh_turn(project)], "rechecker": [recheck_turn(entries)],
-             "pair_judge": [judge_turn], "checker": [continuing_checker()]}
+    'blind', which is "blind_auditor" or "auditor", gives the audit that runs beside the old list checker."""
+    turns = {blind: [blind_auditor_turn(project)],
+             "old_list_checker": [old_list_checker_turn(entries)],
+             "duplicate_judge": [duplicate_judge_turn],
+             "final_judge": [continuing_final_judge()]}
     return {name: ScriptedAgent(name, schema, turns.get(name, []))
             for name, schema in ANSWERS.items()}
 
@@ -379,7 +381,7 @@ def test_a_reaudit_whose_history_holds_ratchet_shows_the_note_and_publishes(
 
     assert run.outcome == "waiting"
     assert note in shown
-    assert agents["fresh"].prompts == [] and len(agents["auditor"].prompts) == 1
+    assert agents["blind_auditor"].prompts == [] and len(agents["auditor"].prompts) == 1
 
     done = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
@@ -393,14 +395,14 @@ def test_a_reaudit_with_a_clean_history_runs_the_blind_audit(audit_project: Proj
     """Proves a re-audit of a project whose history never held .ratchet asks the blind audit and
     not the auditor, shows no note, and publishes a list with no "Not blind" line."""
     entries = published_old_list(audit_project)
-    agents = reaudit_agents(audit_project, entries, "fresh")
+    agents = reaudit_agents(audit_project, entries, "blind_auditor")
     shown: list[str] = []
 
     run = start_audit(audit_project, agent_maker=lambda *_: agents, interactive=False,
                       show=shown.append)
 
     assert run.outcome == "waiting"
-    assert len(agents["fresh"].prompts) == 1 and agents["auditor"].prompts == []
+    assert len(agents["blind_auditor"].prompts) == 1 and agents["auditor"].prompts == []
     assert not any("blind audit was skipped" in line for line in shown)
 
     done = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
@@ -466,7 +468,7 @@ def test_ctrl_c_inside_a_resumed_step_halts_the_audit(audit_project: Project) ->
         raise KeyboardInterrupt
 
     turns = default_turns(audit_project) | {
-        "auditor": [auditor_turn(audit_project, questions=[question])], "checker": [interrupt]}
+        "auditor": [auditor_turn(audit_project, questions=[question])], "final_judge": [interrupt]}
     agents = {name: ScriptedAgent(name, schema, turns.get(name, []))
               for name, schema in ANSWERS.items()}
 
@@ -474,7 +476,7 @@ def test_ctrl_c_inside_a_resumed_step_halts_the_audit(audit_project: Project) ->
         start_audit(audit_project, agent_maker=lambda *_: agents, interactive=True,
                     ask=lambda prompt: "yes, it is deliberate", show=lambda line: None)
 
-    assert len(agents["checker"].prompts) == 1
+    assert len(agents["final_judge"].prompts) == 1
     assert read_job_file(audit_job_file(audit_project))["status"] == "halted"
     assert not lock_path(audit_project).exists()
 
@@ -527,7 +529,7 @@ def test_with_no_terminal_an_audit_goes_through_the_questions_unanswered(
                 "what_would_settle": "A word from the owner."}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
-        "checker": [checker_turn()]}
+        "final_judge": [final_judge_turn()]}
     agents = {name: ScriptedAgent(name, schema, turns.get(name, []))
               for name, schema in ANSWERS.items()}
 

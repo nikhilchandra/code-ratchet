@@ -1,7 +1,7 @@
 """The module contains the deterministic merge of an audit, which labels every finding from every
 source, places each one in the code, joins the findings that are about the same problem into groups,
-and gives each group its text, status, area and tests. The only judgment it asks for is the pair
-judge's, on the few pairs that its rules cannot settle.
+and gives each group its text, status, area and tests. The only judgment it asks for is the
+duplicate judge's, on the few pairs that its rules cannot settle.
 """
 
 from __future__ import annotations
@@ -19,14 +19,14 @@ from ratchet.target_design import TargetDesign
 # the source letters, which are also the first letters of the labels
 CODE = "C"
 LISTED = "L"
-ADDED_A = "A"
-ADDED_B = "B"
+ADDED_A = "A"  # the findings that the rules reviewer added
+ADDED_B = "B"  # the findings that the standard reviewer added
 OLD = "O"
 NOTES = "R"
-FRESH = "F"
+BLIND_AUDITOR = "F"
 
 # the order in which a source's text is chosen for a group
-TEXT_ORDER = (OLD, NOTES, LISTED, ADDED_A, ADDED_B, FRESH, CODE)
+TEXT_ORDER = (OLD, NOTES, LISTED, ADDED_A, ADDED_B, BLIND_AUDITOR, CODE)
 
 # the statuses a group can have
 NEW = "new"
@@ -55,12 +55,12 @@ class Item:
         label: The item's label, such as "C1", "L3", "A2", "B1", "O P7", "R1" or "F4".
         source: The source letter, which is the first letter of the label.
         finding: The finding as the source gave it. For an old entry it is the entry as the
-            rechecker reads it now.
+            old list checker reads it now.
         subject: The module, class or function that the finding is about.
         ranges: The cited places as (file, first line, last line), taken from the finding's
-            evidence. For an old entry these are the rechecker's current citations.
+            evidence. For an old entry these are the old list checker's current citations.
         old_id: The old problem's id such as "P7" for an old entry, and "" otherwise.
-        old_verdict: The rechecker's verdict for an old entry, and None otherwise.
+        old_verdict: The old list checker's verdict for an old entry, and None otherwise.
         modules: The names of the project modules whose files the finding cites.
     """
 
@@ -110,7 +110,7 @@ class PairCandidate:
     """Two ungrouped findings that might be about the same problem.
 
     Attributes:
-        pair: The number the pair judge answers with, counted from 1.
+        pair: The number the duplicate judge answers with, counted from 1.
         first: The first finding.
         second: The second finding.
         score: How likely the pair is to be the same, where larger is likelier.
@@ -130,8 +130,8 @@ class PairRecord:
         pair: The candidate's number.
         first: The label of the first finding.
         second: The label of the second finding.
-        same: The judge's answer, or None when the judge gave none.
-        reason: The judge's reason, or the reason that code refused the join.
+        same: The duplicate judge's answer, or None when the duplicate judge gave none.
+        reason: The duplicate judge's reason, or the reason that code refused the join.
         joined: True when the two findings ended up in one group.
     """
 
@@ -148,7 +148,7 @@ class GroupingResult:
     """The groups that the merge ends with.
 
     Attributes:
-        groups: The groups that go on to the checker.
+        groups: The groups that go on to the final judge.
         done: The groups that hold only an old entry that is done or gone, which go to the done
             list.
     """
@@ -167,7 +167,7 @@ def make_items(
     added_b: list[Finding],
     old: list[OldEntryCheck],
     from_notes: list[Finding],
-    fresh: list[Finding],
+    blind_auditor: list[Finding],
 ) -> list[Item]:
     """Labels every finding from every source and places it in the code.
 
@@ -176,11 +176,11 @@ def make_items(
         design: The target design, or None when rules.md has no TOML block.
         code: The code checker's findings.
         listed: The auditor's list.
-        added_a: The findings that reviewer A added.
-        added_b: The findings that reviewer B added.
-        old: The rechecker's check of each old problem. The finding of each is its current text.
-        from_notes: The findings that the rechecker took from reviewer notes.
-        fresh: The findings of the blind audit.
+        added_a: The findings that the rules reviewer added.
+        added_b: The findings that the standard reviewer added.
+        old: The old list checker's check of each old problem. The finding of each is its current text.
+        from_notes: The findings that the old list checker took from reviewer notes.
+        blind_auditor: The findings of the blind auditor.
 
     Returns:
         The items, source by source in the order of the arguments, each labeled in order from 1.
@@ -194,7 +194,7 @@ def make_items(
         (ADDED_A, added_a),
         (ADDED_B, added_b),
         (NOTES, from_notes),
-        (FRESH, fresh),
+        (BLIND_AUDITOR, blind_auditor),
     ):
         for number, finding in enumerate(findings, start=1):
             items.append(_make_item(project, modules, f"{source}{number}", source, finding, "", None))
@@ -233,7 +233,7 @@ def group_items(items: list[Item]) -> list[list[Item]]:
 
 
 def pair_candidates(groups: list[list[Item]], max_pairs: int) -> list[PairCandidate]:
-    """Picks the pairs of ungrouped items that the pair judge should decide.
+    """Picks the pairs of ungrouped items that the duplicate judge should decide.
 
     Two items are a candidate when they come from different sources, neither has been joined to
     another item, and they share a file, share a parent class or module, or have titles that share
@@ -265,14 +265,14 @@ def pair_candidates(groups: list[list[Item]], max_pairs: int) -> list[PairCandid
 def join_pairs(
     groups: list[list[Item]], candidates: list[PairCandidate], verdicts: list[PairVerdict]
 ) -> tuple[list[list[Item]], list[PairRecord]]:
-    """Joins the pairs that the judge called the same.
+    """Joins the pairs that the duplicate judge called the same.
 
     A join that would put two items of one source in a group is refused.
 
     Args:
         groups: The groups, as made by group_items.
-        candidates: The pairs that were put to the judge.
-        verdicts: The judge's decisions, matched to the candidates by their numbers.
+        candidates: The pairs that were put to the duplicate judge.
+        verdicts: The duplicate judge's decisions, matched to the candidates by their numbers.
 
     Returns:
         The groups after the joins, and one record for each candidate.
@@ -309,13 +309,13 @@ def finish_groups(
         project: The project, as read from its .ratchet folder.
         design: The target design, or None when rules.md has no TOML block.
         items: Every item that went into the merge.
-        groups: The groups, after the pair judge's joins.
+        groups: The groups, after the duplicate judge's joins.
         reaudit: True for a re-audit, where a group with no old entry is new.
 
     Returns:
-        The groups for the checker and the groups for the done list. The other items of a group
-        whose old entry is done or gone come back as a new group for the checker, with a note that
-        names the old id, unless a fresh item reopens the group.
+        The groups for the final judge and the groups for the done list. The other items of a group
+        whose old entry is done or gone come back as a new group for the final judge, with a note that
+        names the old id, unless the blind auditor's item reopens the group.
 
     Raises:
         ValueError: If a label is used twice, or if the groups do not hold every item exactly once.
@@ -345,19 +345,19 @@ def _split_done(groups: list[list[Item]]) -> list[tuple[list[Item], str]]:
     """Takes the other items out of each group whose old entry is done or gone.
 
     Args:
-        groups: The groups, after the pair judge's joins.
+        groups: The groups, after the duplicate judge's joins.
 
     Returns:
         The groups in order, each with a note for the owner, which is empty except on a group that
-        was split off. A done or gone group with no fresh item is replaced by the old item alone,
-        followed by the rest of its items as a group of their own. A group that holds a fresh item
-        stays whole, since it is reopened.
+        was split off. A done or gone group with no blind auditor's item is replaced by the old item
+        alone, followed by the rest of its items as a group of their own. A group that holds a blind
+        auditor's item stays whole, since it is reopened.
     """
     split: list[tuple[list[Item], str]] = []
     for members in groups:
         old = next((item for item in members if item.source == OLD), None)
         finished = old is not None and _OLD_STATUS[old.old_verdict] == DONE
-        if finished and len(members) > 1 and all(item.source != FRESH for item in members):
+        if finished and len(members) > 1 and all(item.source != BLIND_AUDITOR for item in members):
             split.append(([old], ""))
             rest = [item for item in members if item is not old]
             split.append((rest, f"{old.old_id} was found {old.old_verdict.value}, so the findings "
@@ -424,7 +424,7 @@ def _make_item(
         source: The source letter.
         finding: The finding to place.
         old_id: The old problem's id, or "" for a finding that is not an old entry.
-        old_verdict: The rechecker's verdict for an old entry, or None.
+        old_verdict: The old list checker's verdict for an old entry, or None.
 
     Returns:
         The item. Its subject is the finding's subject, or the function or class that holds the
@@ -555,10 +555,10 @@ def _make_group(
     notes = []
     if old is not None and old.old_verdict is not None:
         status = _OLD_STATUS[old.old_verdict]
-        if status == DONE and FRESH in by_source:
+        if status == DONE and BLIND_AUDITOR in by_source:
             status = REOPENED
             notes.append(
-                f"{old.old_id} was found done, but the fresh audit found a problem in the same place"
+                f"{old.old_id} was found done, but the blind auditor found a problem in the same place"
             )
     else:
         status = NEW if reaudit else OPEN
@@ -580,7 +580,7 @@ def _related(live: list[Group]) -> dict[str, tuple[str, ...]]:
     """Finds the groups that cite shared lines but are separate.
 
     Args:
-        live: The groups that go to the checker.
+        live: The groups that go to the final judge.
 
     Returns:
         The keys of the related groups for each group key that has any.

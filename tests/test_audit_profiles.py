@@ -22,13 +22,14 @@ from ratchet.audit.agent_answers import (
     ReviewVerdict,
 )
 from ratchet.audit.agent_profiles import (
-    FRESH,
+    BLIND_AUDITOR,
+    PROMPTS,
     Role,
     build_profile,
     format_auditor_prompt,
-    format_check_prompt,
-    format_pair_prompt,
-    format_recheck_prompt,
+    format_duplicate_judge_prompt,
+    format_final_judge_prompt,
+    format_old_list_checker_prompt,
     format_review_prompt,
     make_agents,
     write_profile,
@@ -75,7 +76,7 @@ def make_group(old_id: str = "") -> Group:
         text=first.finding, old_id=old_id, area="views", tests=(),
         notes=(
             "a note",
-            "P3 was found done, but the fresh audit found a problem in the same place",
+            "P3 was found done, but the blind auditor found a problem in the same place",
         ),
     )
 
@@ -93,14 +94,47 @@ def test_a_profile_is_filled_in(tmp_path: Path, role: Role) -> None:
     assert "$" not in profile
 
 
-def test_the_rechecker_asks_for_current_citations_for_every_id(tmp_path: Path) -> None:
-    """Proves the rechecker's instructions and prompt ask for current citations and a current
+@pytest.mark.parametrize("role", list(Role))
+def test_the_role_heading_names_the_role(tmp_path: Path, role: Role) -> None:
+    """Proves every profile's role heading gives the role's name, with spaces for underscores,
+    so that each agent reads the name the audit knows it by."""
+    profile = build_profile(make_project(tmp_path), role)
+
+    assert f"# Your role: the {str(role).replace('_', ' ')}\n" in profile
+
+
+def test_the_audit_agents_are_keyed_by_what_they_do(tmp_path: Path) -> None:
+    """Proves make_agents keys each audit agent by the name of what it does."""
+    project = make_project(tmp_path)
+
+    agents = make_agents(project, load_settings(project), tmp_path / "audit")
+
+    assert set(agents) == {
+        "auditor", "blind_auditor", "rules_reviewer", "standard_reviewer", "old_list_checker",
+        "duplicate_judge", "final_judge",
+    }
+    assert {name: agent.name for name, agent in agents.items()} == {name: name for name in agents}
+
+
+def test_each_prompt_file_has_its_new_name() -> None:
+    """Proves the audit's prompt files are named after the roles and the audit's basics, and that
+    no prompt file keeps an old name."""
+    for name in ("audit_basics", "auditor", "rules_reviewer", "standard_reviewer",
+                 "old_list_checker", "duplicate_judge", "final_judge"):
+        assert (PROMPTS / f"{name}.md").is_file(), name
+    for name in ("shared", "list_reviewer_a", "list_reviewer_b", "rechecker", "pair_judge",
+                 "checker"):
+        assert not (PROMPTS / f"{name}.md").exists(), name
+
+
+def test_the_old_list_checker_asks_for_current_citations_for_every_id(tmp_path: Path) -> None:
+    """Proves the old list checker's instructions and prompt ask for current citations and a current
     subject for every old id, and that a retry names the ids that are missing."""
-    profile = build_profile(make_project(tmp_path), Role.RECHECKER)
-    prompt = format_recheck_prompt(
+    profile = build_profile(make_project(tmp_path), Role.OLD_LIST_CHECKER)
+    prompt = format_old_list_checker_prompt(
         "old list", {"P1": "history one", "P2": "history two"}, ["abc1234 publish"], "log", "hints"
     )
-    retry = format_recheck_prompt("old list", {"P1": "h"}, [], "log", "hints", missing=["P1"])
+    retry = format_old_list_checker_prompt("old list", {"P1": "h"}, [], "log", "hints", missing=["P1"])
 
     assert "current citations" in profile and "current subject" in profile
     assert "the done and gone ones included" in profile
@@ -111,21 +145,21 @@ def test_the_rechecker_asks_for_current_citations_for_every_id(tmp_path: Path) -
     assert "Answer for every old id again: P1" in retry
 
 
-def test_the_checker_describes_its_outcomes(tmp_path: Path) -> None:
-    """Proves the checker's instructions name every outcome and continues_old."""
-    profile = build_profile(make_project(tmp_path), Role.CHECKER)
+def test_the_final_judge_describes_its_outcomes(tmp_path: Path) -> None:
+    """Proves the final judge's instructions name every outcome and continues_old."""
+    profile = build_profile(make_project(tmp_path), Role.FINAL_JUDGE)
 
     for outcome in ("keep", "split", "merge_into", "drop", "question", "bug"):
         assert f"`{outcome}`" in profile
     assert "`continues_old`" in profile
 
 
-def test_the_checker_lets_a_merge_give_entries_and_keeps_old_ids_out_of_questions(
+def test_the_final_judge_lets_a_merge_give_entries_and_keeps_old_ids_out_of_questions(
     tmp_path: Path,
 ) -> None:
-    """Proves the checker is told a merge gives entries, and that a group with an old id never
+    """Proves the final judge is told a merge gives entries, and that a group with an old id never
     comes out as a question or a bug."""
-    profile = build_profile(make_project(tmp_path), Role.CHECKER)
+    profile = build_profile(make_project(tmp_path), Role.FINAL_JUDGE)
     merge_bullet = profile.split("- `merge_into`")[1].split("- `drop`")[0]
 
     assert "Give no entries for `drop`." in profile
@@ -155,40 +189,40 @@ def test_the_blind_audits_prompt_takes_no_list(tmp_path: Path) -> None:
 
 
 def test_a_review_prompt_labels_the_list() -> None:
-    """Proves the list reviewers are given the list as JSON under its labels."""
+    """Proves the reviewers are given the list as JSON under its labels."""
     prompt = format_review_prompt({"L1": make_finding("Listed title")}, [])
 
     assert '"L1"' in prompt
     assert "Listed title" in prompt
 
 
-def test_a_pair_prompt_numbers_the_pairs() -> None:
-    """Proves the pair judge is given each pair under its number."""
+def test_a_duplicate_judge_prompt_numbers_the_pairs() -> None:
+    """Proves the duplicate judge is given each pair under its number."""
     pair = PairCandidate(7, make_item("L1", "First"), make_item("A1", "Second"), 0.5)
 
-    prompt = format_pair_prompt([pair])
+    prompt = format_duplicate_judge_prompt([pair])
 
     assert '"pair": 7' in prompt
     assert "First" in prompt and "Second" in prompt
     assert "src/app/views.py:3-4" in prompt
 
 
-def test_a_check_prompt_hides_the_sources() -> None:
-    """Proves the checker is given each group's text, other texts and related groups, but no
+def test_a_final_judge_prompt_hides_the_sources() -> None:
+    """Proves the final judge is given each group's text, other texts and related groups, but no
     label that names a source."""
-    prompt = format_check_prompt([make_group("P3")], "a report", [])
+    prompt = format_final_judge_prompt([make_group("P3")], "a report", [])
 
     assert "Main text" in prompt and "Other text" in prompt
     assert '"related": [\n      "G2"' in prompt
     assert '"old_id": "P3"' in prompt
     assert "a report" in prompt
     assert '"L1"' not in prompt and '"A1"' not in prompt
-    assert "fresh audit" not in prompt
+    assert "blind auditor" not in prompt
 
 
-def test_a_check_prompt_shows_the_verdicts_without_their_sources() -> None:
-    """Proves the checker is given a dispute reason next to the text it disputes and the
-    rechecker's verdict on an old entry, and that no label names a source."""
+def test_a_final_judge_prompt_shows_the_verdicts_without_their_sources() -> None:
+    """Proves the final judge is given a dispute reason next to the text it disputes and the
+    old list checker's verdict on an old entry, and that no label names a source."""
     old = Item(
         "R1", "R", make_finding("Old text"), "app.views", (), "P3", OldVerdict.OPEN, ()
     )
@@ -202,7 +236,7 @@ def test_a_check_prompt_shows_the_verdicts_without_their_sources() -> None:
         finding=other.finding,
     )
 
-    prompt = format_check_prompt([group], "", [], {"L1": [review]})
+    prompt = format_final_judge_prompt([group], "", [], {"L1": [review]})
 
     assert "the copies differ on empty input" in prompt
     assert '"verdict": "dispute"' in prompt
@@ -210,8 +244,8 @@ def test_a_check_prompt_shows_the_verdicts_without_their_sources() -> None:
     assert '"L1"' not in prompt and '"R1"' not in prompt
 
 
-def test_a_check_prompt_shows_a_corrected_text_without_its_source() -> None:
-    """Proves the checker is given the corrected finding next to a `correct` verdict, and that
+def test_a_final_judge_prompt_shows_a_corrected_text_without_its_source() -> None:
+    """Proves the final judge is given the corrected finding next to a `correct` verdict, and that
     no label names a source."""
     item = make_item("L1", "Listed title")
     group = Group(
@@ -223,7 +257,7 @@ def test_a_check_prompt_shows_a_corrected_text_without_its_source() -> None:
         finding=make_finding("Corrected title"),
     )
 
-    prompt = format_check_prompt([group], "", [], {"L1": [review]})
+    prompt = format_final_judge_prompt([group], "", [], {"L1": [review]})
 
     assert '"verdict": "correct"' in prompt
     assert "Corrected title" in prompt
@@ -231,15 +265,15 @@ def test_a_check_prompt_shows_a_corrected_text_without_its_source() -> None:
     assert '"L"' not in prompt
 
 
-def test_a_check_prompt_shows_each_question_with_its_answer() -> None:
-    """Proves the checker is given the text of each answered question next to the owner's answer."""
+def test_a_final_judge_prompt_shows_each_question_with_its_answer() -> None:
+    """Proves the final judge is given the text of each answered question next to the owner's answer."""
     place = Citation(file="src/app/views.py", line=3, end_line=4, quote="x = 1", shows="the copy")
     question = Question(
         kind=QuestionKind.DESIGN, title="Why two stores", evidence=[place],
         why_it_may_be_deliberate="a migration", what_would_settle="the owner's plan",
     )
 
-    prompt = format_check_prompt([make_group()], "", [("Q1", question, "yes, keep both")])
+    prompt = format_final_judge_prompt([make_group()], "", [("Q1", question, "yes, keep both")])
 
     assert '"label": "Q1"' in prompt
     assert "Why two stores" in prompt
@@ -248,14 +282,14 @@ def test_a_check_prompt_shows_each_question_with_its_answer() -> None:
 
 
 def test_written_profiles_are_accepted_by_agents(tmp_path: Path) -> None:
-    """Proves make_agents gives an agent for each role and one for the blind audit, with the
+    """Proves make_agents gives an agent for each role and one for the blind auditor, with the
     profiles written, without running them."""
     project = make_project(tmp_path)
     settings = load_settings(project)
 
     agents = make_agents(project, settings, tmp_path / "audit")
 
-    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    assert set(agents) == {str(role) for role in Role} | {BLIND_AUDITOR}
     path = write_profile(project, Role.AUDITOR, tmp_path / "audit" / "profiles")
     assert path.read_text(encoding="utf-8") == build_profile(project, Role.AUDITOR)
 
@@ -266,9 +300,9 @@ OUTSIDE_OPTIONS = ("--no-index", "--contents", "--output", "-C", "--git-dir", "-
 
 
 def test_audit_agents_work_in_the_project_with_ratchet_and_git_hidden(tmp_path: Path) -> None:
-    """Proves every audit agent, the blind audit's included, works in the project's folder, has
+    """Proves every audit agent, the blind auditor included, works in the project's folder, has
     .ratchet and .git as hidden, both bare and with everything under them, and is denied Read on
-    them. Every agent but the pair judge, which runs no command, has the git options that reach
+    them. Every agent but the duplicate judge, which runs no command, has the git options that reach
     outside the project as its forbidden options."""
     project = make_project(tmp_path)
     settings = load_settings(project)
@@ -276,32 +310,32 @@ def test_audit_agents_work_in_the_project_with_ratchet_and_git_hidden(tmp_path: 
     agents = make_agents(project, settings, tmp_path / "audit")
 
     assert agent_profiles.FORBIDDEN_OPTIONS == OUTSIDE_OPTIONS
-    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    assert set(agents) == {str(role) for role in Role} | {BLIND_AUDITOR}
     for name, agent in agents.items():
         assert Path(agent.cwd) == project.root, name
         assert agent.hidden == (".ratchet", ".ratchet/**", ".git", ".git/**"), name
         rules = set(agent._options().disallowed_tools)
         assert {"Read(.ratchet/**)", "Read(.git/**)"} <= rules, name
-        expected = () if name == str(Role.PAIR_JUDGE) else OUTSIDE_OPTIONS
+        expected = () if name == str(Role.DUPLICATE_JUDGE) else OUTSIDE_OPTIONS
         assert tuple(agent.forbidden_options) == expected, name
 
 
 def test_hide_patterns_are_denied_in_the_project(tmp_path: Path) -> None:
-    """Proves every audit agent, the blind audit's included, has each [audit] hide pattern as
+    """Proves every audit agent, the blind auditor included, has each [audit] hide pattern as
     hidden, relative to the project it works in, and is denied Read on it."""
     project = make_project(tmp_path)
     settings = load_settings(project).model_copy(update={"hide": ["vendor/**"]})
 
     agents = make_agents(project, settings, tmp_path / "audit")
 
-    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    assert set(agents) == {str(role) for role in Role} | {BLIND_AUDITOR}
     for name, agent in agents.items():
         assert "vendor/**" in agent.hidden, name
         assert "Read(vendor/**)" in agent._options().disallowed_tools, name
 
 
 def test_audit_agents_are_confined_to_the_project(tmp_path: Path) -> None:
-    """Proves every audit agent, the blind audit's and the pair judge's included, has its file
+    """Proves every audit agent, the blind auditor and the duplicate judge included, has its file
     tools confined to the project's folder, through a single PreToolUse matcher that matches
     every tool."""
     project = make_project(tmp_path)
@@ -309,7 +343,7 @@ def test_audit_agents_are_confined_to_the_project(tmp_path: Path) -> None:
 
     agents = make_agents(project, settings, tmp_path / "audit")
 
-    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    assert set(agents) == {str(role) for role in Role} | {BLIND_AUDITOR}
     for name, agent in agents.items():
         assert Path(agent.confined_to) == project.root, name
         matchers = agent._options().hooks["PreToolUse"]
@@ -318,27 +352,27 @@ def test_audit_agents_are_confined_to_the_project(tmp_path: Path) -> None:
 
 
 def test_audit_agents_load_no_settings_files(tmp_path: Path) -> None:
-    """Proves every audit agent, the blind audit's included, loads no Claude settings files, so
+    """Proves every audit agent, the blind auditor included, loads no Claude settings files, so
     no allow rule in the user's or the project's settings can approve a call."""
     project = make_project(tmp_path)
 
     agents = make_agents(project, load_settings(project), tmp_path / "audit")
 
-    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    assert set(agents) == {str(role) for role in Role} | {BLIND_AUDITOR}
     for name, agent in agents.items():
         assert agent._options().setting_sources == [], name
 
 
 def test_an_ignored_env_is_hidden_and_refused_by_the_hook(tmp_path: Path) -> None:
     """Proves a .env file that the project's git ignores is hidden from every audit agent, the
-    blind audit's included, is denied Read by its rules, and is refused by its PreToolUse hook."""
+    blind auditor included, is denied Read by its rules, and is refused by its PreToolUse hook."""
     project = make_project(tmp_path)
     (tmp_path / ".gitignore").write_text(".env\n", encoding="utf-8")
     (tmp_path / ".env").write_text("KEY=secret\n", encoding="utf-8")
 
     agents = make_agents(project, load_settings(project), tmp_path / "audit")
 
-    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    assert set(agents) == {str(role) for role in Role} | {BLIND_AUDITOR}
     for name, agent in agents.items():
         assert ".env" in agent.hidden, name
         assert "Read(.env)" in agent._options().disallowed_tools, name

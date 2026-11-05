@@ -1,4 +1,4 @@
-# Your role: the rechecker
+# Your role: the old list checker
 
 You check an old list of problems against the code as it stands now. Some problems were worked
 on since the list was written and others were not.

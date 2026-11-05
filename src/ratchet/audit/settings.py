@@ -14,21 +14,22 @@ COMMAND = "audit"
 
 
 class AuditSettings(BaseModel):
-    """Holds the audit command's limits and how each of its five roles runs."""
+    """Holds the audit command's limits and how each of its roles runs."""
 
     model_config = ConfigDict(extra="forbid")
 
     # Path patterns, relative to the project, that the agents' file tools may not read in the project.
     hide: list[str] = []
-    # The most pairs of findings that the pair judge is asked about.
+    # The most pairs of findings that the duplicate judge is asked about.
     max_pairs: int = Field(default=40, gt=0)
     # The most one audit may spend in dollars, counting every agent's budget.
     max_cost_usd: float = Field(default=40.0, gt=0)
     auditor: RoleSettings = RoleSettings(model="opus", budget_usd=10.0, timeout_s=3600)
-    list_reviewer: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
-    rechecker: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
-    pair_judge: RoleSettings = RoleSettings(model="sonnet", budget_usd=1.0, timeout_s=600)
-    checker: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
+    rules_reviewer: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
+    standard_reviewer: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
+    old_list_checker: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
+    duplicate_judge: RoleSettings = RoleSettings(model="sonnet", budget_usd=1.0, timeout_s=600)
+    final_judge: RoleSettings = RoleSettings(model="opus", budget_usd=6.0, timeout_s=2400)
 
 
 def load_settings(project: Project) -> AuditSettings:

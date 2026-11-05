@@ -19,13 +19,13 @@ from rooster import Agent, Command, Tool
 from ratchet.architecture import CodeFinding
 from ratchet.audit.agent_answers import (
     AuditorAnswer,
-    CheckAnswer,
+    DuplicateJudgeAnswer,
     EntryReview,
+    FinalJudgeAnswer,
     Finding,
     ListReview,
-    PairAnswer,
+    OldListCheckerAnswer,
     Question,
-    RecheckAnswer,
     ReviewVerdict,
 )
 from ratchet.audit.code_facts import InventoryItem
@@ -38,7 +38,7 @@ from ratchet.refactor.agent_profiles import STANDARD
 PROMPTS = Path(__file__).parent / "prompts"
 
 # the name of the blind audit's agent, which has the auditor's profile
-FRESH = "fresh"
+BLIND_AUDITOR = "blind_auditor"
 
 # git options that reach outside the project: --no-index and --contents read any file, --output
 # writes one, and the rest point git at another repository, config or program
@@ -51,11 +51,15 @@ class Role(StrEnum):
     """Names the audit's agents, each of which has a prompt of its own."""
 
     AUDITOR = "auditor"
-    LIST_REVIEWER_A = "list_reviewer_a"
-    LIST_REVIEWER_B = "list_reviewer_b"
-    RECHECKER = "rechecker"
-    PAIR_JUDGE = "pair_judge"
-    CHECKER = "checker"
+    RULES_REVIEWER = "rules_reviewer"
+    STANDARD_REVIEWER = "standard_reviewer"
+    OLD_LIST_CHECKER = "old_list_checker"
+    DUPLICATE_JUDGE = "duplicate_judge"
+    FINAL_JUDGE = "final_judge"
+
+
+# the two agents that review the auditor's list, which both answer in the shape of ListReview
+REVIEWERS = (Role.RULES_REVIEWER, Role.STANDARD_REVIEWER)
 
 
 def build_profile(project: Project, role: Role) -> str:
@@ -72,7 +76,7 @@ def build_profile(project: Project, role: Role) -> str:
         "rules": project.rules.strip(),
         "standard": STANDARD.read_text(encoding="utf-8").strip(),
     }
-    parts = [PROMPTS / "shared.md", PROMPTS / f"{role}.md"]
+    parts = [PROMPTS / "audit_basics.md", PROMPTS / f"{role}.md"]
     return "\n\n".join(
         Template(path.read_text(encoding="utf-8")).substitute(values).strip() for path in parts
     ) + "\n"
@@ -102,9 +106,9 @@ def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict
     .ratchet folder, git's own files, a file or folder that git ignores, or a path that matches a
     pattern of the hide setting. Every agent loads no Claude settings files, so the allow rules of
     the user's and the project's settings cannot approve a call, and their env, apiKeyHelper and
-    model settings do not reach the agents. All but the pair judge may read the project's git
+    model settings do not reach the agents. All but the duplicate judge may read the project's git
     history, with the options in FORBIDDEN_OPTIONS refused. The blind audit's agent has the
-    auditor's profile and settings, and is keyed "fresh".
+    auditor's profile and settings, and is keyed "blind_auditor".
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -112,17 +116,17 @@ def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict
         folder: The folder for the agents' profiles and logs.
 
     Returns:
-        The agents, keyed by their role's name, with the blind audit's agent keyed "fresh".
+        The agents, keyed by their role's name, with the blind audit's agent keyed "blind_auditor".
     """
     profiles = folder / "profiles"
     logs = folder / "logs"
     answers = {
         Role.AUDITOR: (settings.auditor, AuditorAnswer),
-        Role.LIST_REVIEWER_A: (settings.list_reviewer, ListReview),
-        Role.LIST_REVIEWER_B: (settings.list_reviewer, ListReview),
-        Role.RECHECKER: (settings.rechecker, RecheckAnswer),
-        Role.PAIR_JUDGE: (settings.pair_judge, PairAnswer),
-        Role.CHECKER: (settings.checker, CheckAnswer),
+        Role.RULES_REVIEWER: (settings.rules_reviewer, ListReview),
+        Role.STANDARD_REVIEWER: (settings.standard_reviewer, ListReview),
+        Role.OLD_LIST_CHECKER: (settings.old_list_checker, OldListCheckerAnswer),
+        Role.DUPLICATE_JUDGE: (settings.duplicate_judge, DuplicateJudgeAnswer),
+        Role.FINAL_JUDGE: (settings.final_judge, FinalJudgeAnswer),
     }
     hidden = hidden_paths(project, settings)
     agents = {}
@@ -130,7 +134,7 @@ def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict
         profile = write_profile(project, role, profiles)
         agents[str(role)] = _make_agent(str(role), profile, role, role_settings, answer, project.root, logs, hidden)
         if role == Role.AUDITOR:
-            agents[FRESH] = _make_agent(FRESH, profile, role, role_settings, answer, project.root, logs, hidden)
+            agents[BLIND_AUDITOR] = _make_agent(BLIND_AUDITOR, profile, role, role_settings, answer, project.root, logs, hidden)
     return agents
 
 
@@ -186,10 +190,10 @@ def _make_agent(
         hidden: The path patterns that the agent may never read.
 
     Returns:
-        The agent, whose file tools may not leave 'root', and which can inspect files and, unless it is the pair judge, read git history.
+        The agent, whose file tools may not leave 'root', and which can inspect files and, unless it is the duplicate judge, read git history.
     """
     permissions = (
-        {} if role == Role.PAIR_JUDGE
+        {} if role == Role.DUPLICATE_JUDGE
         else {"commands": Command.GIT_READ, "forbidden_options": FORBIDDEN_OPTIONS}
     )
     return Agent(
@@ -299,7 +303,7 @@ def format_auditor_prompt(
 
 
 def format_review_prompt(entries: dict[str, Finding], code_findings: list[CodeFinding]) -> str:
-    """Returns the prompt of a list reviewer.
+    """Returns the prompt of a reviewer.
 
     Args:
         entries: The auditor's list, as findings keyed by label such as "L1".
@@ -315,7 +319,7 @@ def format_review_prompt(entries: dict[str, Finding], code_findings: list[CodeFi
     ]) + "\n"
 
 
-def format_recheck_prompt(
+def format_old_list_checker_prompt(
     old_list: str,
     histories: dict[str, str],
     records_log: list[str],
@@ -323,7 +327,7 @@ def format_recheck_prompt(
     hints: str,
     missing: list[str] | None = None,
 ) -> str:
-    """Returns the prompt of the rechecker.
+    """Returns the prompt of the old list checker.
 
     Args:
         old_list: The text of the old problem list.
@@ -360,8 +364,8 @@ def format_recheck_prompt(
     return "\n\n".join(parts) + "\n"
 
 
-def format_pair_prompt(pairs: list[PairCandidate]) -> str:
-    """Returns the prompt of the pair judge.
+def format_duplicate_judge_prompt(pairs: list[PairCandidate]) -> str:
+    """Returns the prompt of the duplicate judge.
 
     Args:
         pairs: The numbered pairs of findings to decide.
@@ -381,7 +385,7 @@ def format_pair_prompt(pairs: list[PairCandidate]) -> str:
 
 
 def _pair_member(finding: Finding) -> dict:
-    """Returns the part of a finding that the pair judge needs, as plain data.
+    """Returns the part of a finding that the duplicate judge needs, as plain data.
 
     Args:
         finding: One finding of a pair.
@@ -398,16 +402,16 @@ def _pair_member(finding: Finding) -> dict:
 
 
 def _checked_text(item: Item, finding: Finding, reviews: dict[str, list[EntryReview]]) -> dict:
-    """Returns a text for the checker, with the verdicts given to it and without its source.
+    """Returns a text for the final judge, with the verdicts given to it and without its source.
 
     Args:
         item: The item that holds the text.
         finding: The text to show.
-        reviews: The list reviewers' verdicts, keyed by item label.
+        reviews: The reviewers' verdicts, keyed by item label.
 
     Returns:
-        The finding's data, with the list reviewers' verdicts and reasons under "verdicts" and the
-        rechecker's verdict under "old_verdict" when the item has them. A verdict of `correct`
+        The finding's data, with the reviewers' verdicts and reasons under "verdicts" and the
+        old list checker's verdict under "old_verdict" when the item has them. A verdict of `correct`
         also carries the reviewer's corrected finding under "corrected".
     """
     data = _finding_data(finding)
@@ -424,17 +428,17 @@ def _checked_text(item: Item, finding: Finding, reviews: dict[str, list[EntryRev
     return data
 
 
-def format_check_prompt(
+def format_final_judge_prompt(
     groups: list[Group],
     citation_report: str,
     answers: list[tuple[str, Question, str]],
     reviews: dict[str, list[EntryReview]] | None = None,
 ) -> str:
-    """Returns the prompt of the checker.
+    """Returns the prompt of the final judge.
 
-    The groups are given without their sources, so the checker weighs each text and not who wrote
-    it. Each text carries the verdicts that the list reviewers gave it, with the corrected
-    finding next to each `correct` verdict, and an old entry's text carries the rechecker's
+    The groups are given without their sources, so the final judge weighs each text and not who wrote
+    it. Each text carries the verdicts that the reviewers gave it, with the corrected
+    finding next to each `correct` verdict, and an old entry's text carries the old list checker's
     verdict.
 
     Args:
@@ -442,7 +446,7 @@ def format_check_prompt(
         citation_report: The report on the citations.
         answers: The owner's answered questions, each as the question's label, the question and
             the owner's answer.
-        reviews: The list reviewers' verdicts on each entry, keyed by the label of the item that
+        reviews: The reviewers' verdicts on each entry, keyed by the label of the item that
             holds the entry. None when no reviewer gave a verdict.
 
     Returns:

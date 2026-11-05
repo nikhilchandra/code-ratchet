@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from ratchet.audit.audit_run import APPROVE, settle_audit, start_audit
-from ratchet.audit.settings import COMMAND
+from ratchet.audit.settings import COMMAND, load_settings
 from ratchet.init_project import init_project
 from ratchet.project import load_project
 
@@ -27,22 +27,27 @@ model = "sonnet"
 budget_usd = 1.0
 timeout_s = 600
 
-[audit.list_reviewer]
+[audit.rules_reviewer]
 model = "sonnet"
 budget_usd = 0.5
 timeout_s = 600
 
-[audit.rechecker]
+[audit.standard_reviewer]
 model = "sonnet"
 budget_usd = 0.5
 timeout_s = 600
 
-[audit.pair_judge]
+[audit.old_list_checker]
+model = "sonnet"
+budget_usd = 0.5
+timeout_s = 600
+
+[audit.duplicate_judge]
 model = "sonnet"
 budget_usd = 0.2
 timeout_s = 300
 
-[audit.checker]
+[audit.final_judge]
 model = "sonnet"
 budget_usd = 0.6
 timeout_s = 600
@@ -72,6 +77,24 @@ def price_for_display(amount):
 def _git(root: Path, *arguments: str) -> None:
     """Runs one git command in the folder, failing the test when git fails."""
     subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
+
+
+def test_the_live_tests_config_loads(tmp_path: Path) -> None:
+    """Proves the live test's CONFIG loads, with each role read from its own section, and that
+    the budgets of a first audit's agents fit within CAP_USD."""
+    (tmp_path / ".ratchet").mkdir()
+    (tmp_path / ".ratchet" / "config.toml").write_text(CONFIG, encoding="utf-8")
+    (tmp_path / ".ratchet" / "rules.md").write_text(RULES, encoding="utf-8")
+
+    settings = load_settings(load_project(tmp_path, commands=[COMMAND]))
+
+    roles = [settings.auditor, settings.rules_reviewer, settings.standard_reviewer,
+             settings.old_list_checker, settings.duplicate_judge, settings.final_judge]
+    assert [role.model for role in roles] == ["sonnet"] * len(roles)
+    assert settings.max_cost_usd == CAP_USD
+    first_audit = [settings.auditor, settings.rules_reviewer, settings.standard_reviewer,
+                   settings.duplicate_judge, settings.final_judge]
+    assert sum(role.budget_usd for role in first_audit) <= CAP_USD
 
 
 @pytest.mark.live

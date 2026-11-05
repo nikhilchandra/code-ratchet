@@ -56,7 +56,7 @@ def finding(subject: str, title: str, *places: Citation) -> Finding:
 
 
 def old_check(old_id: str, verdict: OldVerdict, found: Finding) -> OldEntryCheck:
-    """Returns the rechecker's check of one old problem."""
+    """Returns the old list checker's check of one old problem."""
     return OldEntryCheck(id=old_id, verdict=verdict, what_is_left="left", finding=found)
 
 
@@ -64,7 +64,7 @@ def build(project: Project, **sources: list) -> list[Item]:
     """Makes the items of the given sources, with the other sources empty."""
     empty = {
         "code": [], "listed": [], "added_a": [], "added_b": [], "old": [], "from_notes": [],
-        "fresh": [],
+        "blind_auditor": [],
     }
     return make_items(project, make_design(), **{**empty, **sources})
 
@@ -83,7 +83,7 @@ def test_overlap_groups_and_distant_ranges_stay_apart(tmp_path: Path) -> None:
             finding("app.core.model", "one", cite(MODEL_FILE, 5, 9)),
             finding("app.core.rules", "two", cite(RULES_FILE, 1)),
         ],
-        fresh=[
+        blind_auditor=[
             finding("app.core.model.other", "three", cite(MODEL_FILE, 8, 12)),
             finding("app.core.model.far", "four", cite(MODEL_FILE, 30)),
         ],
@@ -110,7 +110,7 @@ def test_findings_with_no_subject_in_other_files_stay_apart(tmp_path: Path) -> N
     items = build(
         project,
         listed=[finding("", "one", cite("README.md", 1))],
-        fresh=[finding("", "two", cite("tests/test_model.py", 1))],
+        blind_auditor=[finding("", "two", cite("tests/test_model.py", 1))],
     )
 
     assert labels(group_items(items)) == [["L1"], ["F1"]]
@@ -130,14 +130,14 @@ def test_one_source_never_groups_with_itself(tmp_path: Path) -> None:
     assert labels(group_items(items)) == [["L1"], ["L2"]]
 
 
-def test_an_old_entry_is_placed_by_the_rechecker_citations(tmp_path: Path) -> None:
+def test_an_old_entry_is_placed_by_the_old_list_checker_citations(tmp_path: Path) -> None:
     """Proves the old entry joins the finding at its current place, not at its old lines."""
     project = project_with_files(tmp_path)
     moved = finding("app.core.model.moved", "old title", cite(MODEL_FILE, 30, 33))
     items = build(
         project,
         old=[old_check("P7", OldVerdict.OPEN, moved)],
-        fresh=[
+        blind_auditor=[
             finding("app.core.model.near", "at the old place", cite(MODEL_FILE, 1, 4)),
             finding("app.core.model.here", "at the new place", cite(MODEL_FILE, 31)),
         ],
@@ -150,8 +150,8 @@ def test_an_old_entry_is_placed_by_the_rechecker_citations(tmp_path: Path) -> No
     assert items[-1].ranges == ((MODEL_FILE, 30, 33),)
 
 
-def test_a_fresh_finding_over_two_old_entries_makes_them_related(tmp_path: Path) -> None:
-    """Proves a fresh finding joins one old entry and is related to the other."""
+def test_a_blind_auditor_finding_over_two_old_entries_makes_them_related(tmp_path: Path) -> None:
+    """Proves a blind auditor finding joins one old entry and is related to the other."""
     project = project_with_files(tmp_path)
     items = build(
         project,
@@ -159,7 +159,7 @@ def test_a_fresh_finding_over_two_old_entries_makes_them_related(tmp_path: Path)
             old_check("P1", OldVerdict.OPEN, finding("app.core.model.a", "a", cite(MODEL_FILE, 1, 5))),
             old_check("P2", OldVerdict.OPEN, finding("app.core.model.b", "b", cite(MODEL_FILE, 8, 12))),
         ],
-        fresh=[finding("app.core.model.c", "big", cite(MODEL_FILE, 3, 10))],
+        blind_auditor=[finding("app.core.model.c", "big", cite(MODEL_FILE, 3, 10))],
     )
 
     result = finish_groups(project, make_design(), items, group_items(items), reaudit=True)
@@ -181,7 +181,7 @@ def test_pairs_are_capped_and_the_judge_joins_the_same_ones(tmp_path: Path) -> N
             finding("app.core.model.a", "vote tally written twice", cite(MODEL_FILE, 1)),
             finding("app.core.rules.b", "unrelated", cite(RULES_FILE, 1)),
         ],
-        fresh=[
+        blind_auditor=[
             finding("app.core.model.c", "vote tally repeated", cite(MODEL_FILE, 20)),
             finding("app.core.rules.d", "other", cite(RULES_FILE, 30)),
         ],
@@ -211,7 +211,7 @@ def test_a_join_that_would_hold_two_of_one_source_is_refused(tmp_path: Path) -> 
             finding("app.core.model.a", "a", cite(MODEL_FILE, 1)),
             finding("app.core.model.b", "b", cite(MODEL_FILE, 20)),
         ],
-        fresh=[finding("app.core.model.c", "c", cite(MODEL_FILE, 30))],
+        blind_auditor=[finding("app.core.model.c", "c", cite(MODEL_FILE, 30))],
     )
     groups = group_items(items)
     candidates = pair_candidates(groups, max_pairs=5)
@@ -230,7 +230,7 @@ def test_a_missing_judge_answer_is_recorded(tmp_path: Path) -> None:
     items = build(
         project,
         listed=[finding("app.core.model.a", "a", cite(MODEL_FILE, 1))],
-        fresh=[finding("app.core.model.b", "b", cite(MODEL_FILE, 30))],
+        blind_auditor=[finding("app.core.model.b", "b", cite(MODEL_FILE, 30))],
     )
     groups = group_items(items)
 
@@ -240,7 +240,7 @@ def test_a_missing_judge_answer_is_recorded(tmp_path: Path) -> None:
     assert records[0].same is None
 
 
-def test_status_follows_the_rechecker(tmp_path: Path) -> None:
+def test_status_follows_the_old_list_checker(tmp_path: Path) -> None:
     """Proves each verdict gives its status, done goes to the done list, and no old entry is new."""
     project = project_with_files(tmp_path)
     verdicts = [
@@ -254,31 +254,32 @@ def test_status_follows_the_rechecker(tmp_path: Path) -> None:
         )
         for number, verdict in enumerate(verdicts, start=1)
     ]
-    items = build(project, old=old, fresh=[finding("app.core.model.n", "n", cite(MODEL_FILE, 1))])
+    items = build(project, old=old, blind_auditor=[finding("app.core.model.n", "n", cite(MODEL_FILE, 1))])
 
     result = finish_groups(project, make_design(), items, group_items(items), reaudit=True)
 
-    assert {group.old_id or "fresh": group.status for group in result.groups} == {
-        "P1": REOPENED, "P2": OPEN, "P3": BLOCKED, "fresh": NEW,
+    assert {group.old_id or "blind_auditor": group.status for group in result.groups} == {
+        "P1": REOPENED, "P2": OPEN, "P3": BLOCKED, "blind_auditor": NEW,
     }
     assert sorted(group.old_id for group in result.done) == ["P4", "P5"]
     assert {group.status for group in result.done} == {DONE}
 
 
-def test_a_done_entry_with_a_fresh_finding_is_reopened(tmp_path: Path) -> None:
-    """Proves done with a fresh finding in the group gives reopened and an owner note."""
+def test_a_done_entry_with_a_blind_auditor_finding_is_reopened(tmp_path: Path) -> None:
+    """Proves done with a blind auditor finding in the group gives reopened and an owner note."""
     project = project_with_files(tmp_path)
     items = build(
         project,
         old=[old_check("P3", OldVerdict.DONE, finding("app.core.model.a", "a", cite(MODEL_FILE, 1, 5)))],
-        fresh=[finding("app.core.model.b", "b", cite(MODEL_FILE, 4))],
+        blind_auditor=[finding("app.core.model.b", "b", cite(MODEL_FILE, 4))],
     )
 
     result = finish_groups(project, make_design(), items, group_items(items), reaudit=True)
 
     assert [group.status for group in result.groups] == [REOPENED]
     assert result.done == ()
-    assert "P3" in result.groups[0].notes[0]
+    assert result.groups[0].notes[0] == (
+        "P3 was found done, but the blind auditor found a problem in the same place")
 
 
 def test_a_first_audit_is_open_with_text_area_and_tests(tmp_path: Path) -> None:
@@ -287,7 +288,7 @@ def test_a_first_audit_is_open_with_text_area_and_tests(tmp_path: Path) -> None:
     items = build(
         project,
         listed=[finding("app.core.model", "listed", cite(MODEL_FILE, 1, 5))],
-        fresh=[finding("app.core.model", "fresh", cite(MODEL_FILE, 2))],
+        blind_auditor=[finding("app.core.model", "blind_auditor", cite(MODEL_FILE, 2))],
     )
 
     result = finish_groups(project, make_design(), items, group_items(items), reaudit=False)
@@ -332,7 +333,7 @@ def test_coverage_is_checked(tmp_path: Path) -> None:
     items = build(
         project,
         listed=[finding("app.core.model.a", "a", cite(MODEL_FILE, 1))],
-        fresh=[finding("app.core.model.b", "b", cite(MODEL_FILE, 30))],
+        blind_auditor=[finding("app.core.model.b", "b", cite(MODEL_FILE, 30))],
     )
     groups = group_items(items)
 
@@ -345,7 +346,7 @@ def test_a_done_or_gone_entry_keeps_only_its_own_item_and_the_rest_go_on_as_new(
     tmp_path: Path,
 ) -> None:
     """Proves a done or gone old entry goes to the done list alone, and the code and note findings
-    grouped with it come back as a new group for the checker, with a note naming the old id."""
+    grouped with it come back as a new group for the final judge, with a note naming the old id."""
     project = project_with_files(tmp_path)
 
     def code_finding(subject: str, line: int, end: int) -> CodeFinding:

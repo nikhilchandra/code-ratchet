@@ -1,5 +1,5 @@
 """The module contains the functions that follow the evidence of an old problem list into the
-code as it stands now, so that the rechecker starts from where each cited line went.
+code as it stands now, so that the old list checker starts from where each cited line went.
 """
 
 from __future__ import annotations
@@ -74,9 +74,9 @@ def renamed_files(repo: Repo, since: str) -> dict[str, str]:
 def build_evidence_hints(
     root: Path, entries: list[Entry], renames: dict[str, str] | None = None
 ) -> str:
-    """Writes the hints for the rechecker, one line for each citation of each old problem.
+    """Writes the hints for the old list checker, one line for each citation of each old problem.
 
-    The old line numbers are only used to find the quote again. The rechecker must still give the
+    The old line numbers are only used to find the quote again. The old list checker must still give the
     current citations itself.
 
     Args:

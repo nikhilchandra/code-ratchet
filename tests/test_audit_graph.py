@@ -16,10 +16,10 @@ from rooster import JobStatus
 
 from ratchet.audit.agent_answers import (
     AuditorAnswer,
-    CheckAnswer,
+    FinalJudgeAnswer,
     ListReview,
-    PairAnswer,
-    RecheckAnswer,
+    DuplicateJudgeAnswer,
+    OldListCheckerAnswer,
 )
 from ratchet.audit.agent_profiles import make_agents
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
@@ -145,9 +145,9 @@ def auditor_turn(project: Project, **changes: object) -> dict:
             "bugs": []} | changes
 
 
-def review_turn(**changes: object) -> dict:
-    """Returns a list reviewer's answer that agrees with both entries."""
-    reviews = [{"label": label, "verdict": "agree", "reason": "", "finding": entry}
+def review_turn(reason: str = "", **changes: object) -> dict:
+    """Returns a reviewer's answer that agrees with both entries, giving 'reason' for each."""
+    reviews = [{"label": label, "verdict": "agree", "reason": reason, "finding": entry}
                for label, entry in (("L1", FIRST), ("L2", SECOND))]
     return {"reviews": reviews, "added": [], "questions": [], "bugs": []} | changes
 
@@ -157,14 +157,14 @@ def rows_of(prompt: str) -> list[dict]:
     return json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
 
 
-def judge_turn(prompt: str) -> dict:
+def duplicate_judge_turn(prompt: str) -> dict:
     """Answers every pair as different."""
     return {"pairs": [{"pair": row["pair"], "same": False, "reason": "different"}
                       for row in rows_of(prompt)]}
 
 
-def checker_turn(seen: list[str] | None = None, decisions: list[dict] | None = None) -> Turn:
-    """Returns a checker turn that keeps every group it is given as it reads, and decides the
+def final_judge_turn(seen: list[str] | None = None, decisions: list[dict] | None = None) -> Turn:
+    """Returns a final judge turn that keeps every group it is given as it reads, and decides the
     owner's answers as given. The keys of the groups it saw are added to 'seen'."""
     def turn(prompt: str) -> dict:
         rows = rows_of(prompt)
@@ -184,10 +184,10 @@ def default_turns(project: Project) -> dict[str, list[Turn]]:
     """Returns the turns of a first audit in which every agent answers."""
     return {
         "auditor": [auditor_turn(project)],
-        "list_reviewer_a": [review_turn(added=[ADDED])],
-        "list_reviewer_b": [review_turn()],
-        "pair_judge": [judge_turn],
-        "checker": [checker_turn()],
+        "rules_reviewer": [review_turn(added=[ADDED])],
+        "standard_reviewer": [review_turn()],
+        "duplicate_judge": [duplicate_judge_turn],
+        "final_judge": [final_judge_turn()],
     }
 
 
@@ -198,9 +198,9 @@ def start(audit_project: Project):
     other agent spends 0.5 dollars."""
     def run(turns: dict[str, list[Turn]] | None = None, settings: AuditSettings | None = None,
             prompt: str = "", slug: str = SLUG, costs: dict[str, float] | None = None):
-        answers = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
-                   "list_reviewer_b": ListReview, "rechecker": RecheckAnswer,
-                   "pair_judge": PairAnswer, "checker": CheckAnswer}
+        answers = {"auditor": AuditorAnswer, "blind_auditor": AuditorAnswer, "rules_reviewer": ListReview,
+                   "standard_reviewer": ListReview, "old_list_checker": OldListCheckerAnswer,
+                   "duplicate_judge": DuplicateJudgeAnswer, "final_judge": FinalJudgeAnswer}
         given = turns or default_turns(audit_project)
         agents = {name: ScriptedAgent(name, schema, given.get(name, []),
                                       cost_usd=(costs or {}).get(name, 0.5))
@@ -222,13 +222,13 @@ def test_a_full_walk_publishes_a_readable_list_and_commits(
     """Proves a first audit walks every step, waits at the draft, and on approval writes a list
     whose problems have opened events, and commits the records."""
     seen: list[str] = []
-    turns = default_turns(audit_project) | {"checker": [checker_turn(seen)]}
+    turns = default_turns(audit_project) | {"final_judge": [final_judge_turn(seen)]}
     job, agents, graph = start(turns, prompt="look at rounding")
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
     folder = audit_folder(audit_project)
-    for name in ("code-findings.json", "inventory.json", "auditor.json", "review-a.json",
-                 "review-b.json", "groups.json", "pairs.json", "citations.md", "check.json",
+    for name in ("code-findings.json", "inventory.json", "auditor.json", "rules_reviewer.json",
+                 "standard_reviewer.json", "groups.json", "pairs.json", "citations.md", "final_judge.json",
                  "verdicts.md", "draft.json", "draft.md"):
         assert (folder / name).is_file(), name
 
@@ -257,16 +257,16 @@ def test_the_auditor_is_asked_with_the_request(audit_project: Project, start) ->
 
     assert "look at rounding" in agents["auditor"].prompts[0]
     assert "app.cli.main" in agents["auditor"].prompts[0]
-    assert "list_reviewer_a" not in agents["auditor"].prompts[0]
+    assert "rules_reviewer" not in agents["auditor"].prompts[0]
 
 
-def test_a_stated_code_finding_skips_the_checker_but_is_listed(
+def test_a_stated_code_finding_skips_the_final_judge_but_is_listed(
     audit_project: Project, start
 ) -> None:
-    """Proves a group that is one stated code finding is not shown to the checker, and still
+    """Proves a group that is one stated code finding is not shown to the final judge, and still
     comes out as a problem graded stated."""
     seen: list[str] = []
-    job, agents, graph = start(default_turns(audit_project) | {"checker": [checker_turn(seen)]})
+    job, agents, graph = start(default_turns(audit_project) | {"final_judge": [final_judge_turn(seen)]})
     folder = audit_folder(audit_project)
     groups = json.loads((folder / "groups.json").read_text(encoding="utf-8"))["groups"]
     skipped = [group["key"] for group in groups
@@ -280,22 +280,24 @@ def test_a_stated_code_finding_skips_the_checker_but_is_listed(
     assert stated and stated[0].fields["Sources"].startswith("C")
 
 
-def test_the_pair_judge_is_asked_and_every_pair_is_recorded(
+def test_the_duplicate_judge_is_asked_and_every_pair_is_recorded(
     audit_project: Project, start
 ) -> None:
-    """Proves pairs that the rules cannot settle go to the pair judge and into pairs.json."""
+    """Proves pairs that the rules cannot settle go to the duplicate judge and into pairs.json."""
     job, agents, graph = start()
 
-    assert len(agents["pair_judge"].prompts) == 1
+    assert len(agents["duplicate_judge"].prompts) == 1
     records = json.loads((audit_folder(audit_project) / "pairs.json").read_text(encoding="utf-8"))
     assert records and all(record["same"] is False for record in records)
 
 
-def test_the_questions_gate_waits_and_the_owners_answers_reach_the_checker(
+def test_the_questions_gate_waits_and_the_owners_answers_reach_the_final_judge(
     audit_project: Project, start
 ) -> None:
-    """Proves a question stops the job at the gate, and that an answer reaches the checker's
-    prompt and a rule decision is added to rules.md."""
+    """Proves a question stops the job at the gate, and that an answer reaches the final judge's
+    prompt and a rule decision is added to rules.md. The rules reviewer, the standard reviewer
+    and the final judge write their answers under their own names, and the reviewers' reasons
+    reach the final judge from those files."""
     question = {"kind": "rules", "title": "Is rounding twice deliberate",
                 "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
                 "what_would_settle": "A word from the owner."}
@@ -303,19 +305,29 @@ def test_the_questions_gate_waits_and_the_owners_answers_reach_the_checker(
             "rule_text": "Amounts are rounded to cents in one place only."}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
-        "checker": [checker_turn(decisions=[rule])],
+        "rules_reviewer": [review_turn("agreed against the rules")],
+        "standard_reviewer": [review_turn("agreed against the standard")],
+        "final_judge": [final_judge_turn(decisions=[rule])],
     }
     job, agents, graph = start(turns)
+    folder = audit_folder(audit_project)
+    for name in ("rules_reviewer.json", "standard_reviewer.json"):
+        assert (folder / name).is_file(), name
+    for name in ("review-a.json", "review-b.json"):
+        assert not (folder / name).exists(), name
 
     assert job.status == JobStatus.WAITING and job.next_step == "check"
     assert job.data["questions"][0]["id"] == "Q1"
     assert "Is rounding twice deliberate" in (audit_folder(audit_project) / "questions.md").read_text(
         encoding="utf-8")
-    assert agents["checker"].prompts == []
+    assert agents["final_judge"].prompts == []
 
     job = graph.resume(SLUG, {"answers": {"Q1": "Round only in pricing.", "Q9": " "}})
 
-    assert "Round only in pricing." in agents["checker"].prompts[0]
+    assert "Round only in pricing." in agents["final_judge"].prompts[0]
+    assert "agreed against the rules" in agents["final_judge"].prompts[0]
+    assert "agreed against the standard" in agents["final_judge"].prompts[0]
+    assert (folder / "final_judge.json").is_file() and not (folder / "check.json").exists()
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
     graph.resume(SLUG, {"decision": "approve"})
     rules = (audit_project.folder / "rules.md").read_text(encoding="utf-8")
@@ -334,7 +346,7 @@ def wait_at_questions(project: Project, start, slug: str = SLUG):
                 "what_would_settle": "A word from the owner."}
     turns = default_turns(project) | {
         "auditor": [auditor_turn(project, questions=[question])],
-        "checker": [checker_turn()],
+        "final_judge": [final_judge_turn()],
     }
     job, agents, graph = start(turns, slug=slug)
     assert job.status == JobStatus.WAITING and job.next_step == "check"
@@ -350,7 +362,7 @@ def commit_later(project: Project) -> None:
 
 def test_a_moved_head_stops_the_audit_at_check(audit_project: Project, start) -> None:
     """Proves a commit made while the job waits at the questions gate halts the check before the
-    checker is asked, with a reason that asks for a new audit."""
+    final judge is asked, with a reason that asks for a new audit."""
     job, agents, graph = wait_at_questions(audit_project, start)
     commit_later(audit_project)
 
@@ -360,12 +372,12 @@ def test_a_moved_head_stops_the_audit_at_check(audit_project: Project, start) ->
     assert "HEAD has moved" in str(caught.value)
     assert re.search(r"(?i)run `ratchet audit` again", str(caught.value))
     assert graph.load(SLUG).status == JobStatus.HALTED
-    assert agents["checker"].prompts == []
+    assert agents["final_judge"].prompts == []
 
 
 def test_a_dirty_tree_stops_the_audit_at_check(audit_project: Project, start) -> None:
     """Proves a file left uncommitted in the project while the job waits at the questions gate
-    halts the check before the checker is asked, with a reason that names the file and asks for
+    halts the check before the final judge is asked, with a reason that names the file and asks for
     a new audit."""
     job, agents, graph = wait_at_questions(audit_project, start)
     (audit_project.root / "stray.py").write_text("x = 1\n", encoding="utf-8")
@@ -377,13 +389,13 @@ def test_a_dirty_tree_stops_the_audit_at_check(audit_project: Project, start) ->
     assert "stray.py" in str(caught.value)
     assert re.search(r"(?i)run `ratchet audit` again", str(caught.value))
     assert graph.load(SLUG).status == JobStatus.HALTED
-    assert agents["checker"].prompts == []
+    assert agents["final_judge"].prompts == []
 
 
 def test_a_discard_at_the_questions_gate_ignores_a_moved_head(
     audit_project: Project, start
 ) -> None:
-    """Proves a discard decided at the questions gate ends the job as discarded, with no checker
+    """Proves a discard decided at the questions gate ends the job as discarded, with no final judge
     turn, even after a commit has moved HEAD."""
     job, agents, graph = wait_at_questions(audit_project, start)
     commit_later(audit_project)
@@ -391,11 +403,11 @@ def test_a_discard_at_the_questions_gate_ignores_a_moved_head(
     job = graph.resume(SLUG, {"decision": "discard"})
 
     assert job.status == JobStatus.DONE and job.data["outcome"] == "discarded"
-    assert agents["checker"].prompts == []
+    assert agents["final_judge"].prompts == []
 
 
 def test_an_answered_question_can_become_a_problem(audit_project: Project, start) -> None:
-    """Proves a question the checker turns into a problem is listed with a new id."""
+    """Proves a question the final judge turns into a problem is listed with a new id."""
     question = {"kind": "design", "title": "Is the tax in the report", "evidence": [],
                 "why_it_may_be_deliberate": "x", "what_would_settle": "y"}
     problem = finding("app.core.model", "tax belongs in the model", MODEL, 7, "return round(a + b, 2)")
@@ -403,7 +415,7 @@ def test_an_answered_question_can_become_a_problem(audit_project: Project, start
                 "finding": problem, "rule_text": ""}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
-        "checker": [checker_turn(decisions=[decision])],
+        "final_judge": [final_judge_turn(decisions=[decision])],
     }
     job, agents, graph = start(turns)
     graph.resume(SLUG, {"answers": {"Q1": "yes, move it"}})
@@ -419,7 +431,7 @@ def test_an_answered_question_can_become_a_problem(audit_project: Project, start
 def test_the_citations_of_a_question_made_problem_are_checked(
     audit_project: Project, start
 ) -> None:
-    """Proves the checker's finding for an answered question has its moved citation fixed and its
+    """Proves the final judge's finding for an answered question has its moved citation fixed and its
     unmatched citation removed."""
     question = {"kind": "design", "title": "Is the tax in the report", "evidence": [],
                 "why_it_may_be_deliberate": "x", "what_would_settle": "y"}
@@ -430,7 +442,7 @@ def test_the_citations_of_a_question_made_problem_are_checked(
                 "finding": problem, "rule_text": ""}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
-        "checker": [checker_turn(decisions=[decision])],
+        "final_judge": [final_judge_turn(decisions=[decision])],
     }
     job, agents, graph = start(turns)
     graph.resume(SLUG, {"answers": {"Q1": "yes, move it"}})
@@ -459,13 +471,13 @@ def test_a_question_nobody_answered_stays_in_the_list(audit_project: Project, st
 def test_a_failed_reviewer_does_not_stop_the_audit(audit_project: Project, start) -> None:
     """Proves the audit goes on with one reviewer's work when the other gives no answer, and
     tells the owner."""
-    turns = default_turns(audit_project) | {"list_reviewer_a": [None]}
+    turns = default_turns(audit_project) | {"rules_reviewer": [None]}
     job, agents, graph = start(turns)
 
     folder = audit_folder(audit_project)
     assert job.status == JobStatus.WAITING
-    assert not (folder / "review-a.json").exists() and (folder / "review-b.json").is_file()
-    assert "list_reviewer_a gave no answer" in (folder / "draft.md").read_text(encoding="utf-8")
+    assert not (folder / "rules_reviewer.json").exists() and (folder / "standard_reviewer.json").is_file()
+    assert "rules_reviewer gave no answer" in (folder / "draft.md").read_text(encoding="utf-8")
     assert "Owner note" not in graph.resume(SLUG, {"decision": "approve"}).data["list"]
     assert "gave no answer" not in find_latest_problem_list(audit_project).text
 
@@ -514,17 +526,17 @@ def test_an_agent_that_passes_output_to_git_halts_the_audit(
     assert [job.status for job in jobs] == [JobStatus.HALTED]
     assert "--output" in jobs[0].halt_reason
     folder = audit_folder(audit_project)
-    assert not (folder / "review-a.json").exists() and not (folder / "draft.md").exists()
+    assert not (folder / "rules_reviewer.json").exists() and not (folder / "draft.md").exists()
 
 
-def test_a_list_reviewer_that_passes_output_to_git_halts_the_audit(
+def test_a_rules_reviewer_that_passes_output_to_git_halts_the_audit(
     audit_project: Project, start
 ) -> None:
-    """Proves a list reviewer that ran git with --output halts the audit, as the auditor does."""
-    reviewer = running_bash("list_reviewer_a", "git diff --output=out.txt", review_turn())
+    """Proves a reviewer that ran git with --output halts the audit, as the auditor does."""
+    reviewer = running_bash("rules_reviewer", "git diff --output=out.txt", review_turn())
 
     with pytest.raises(AuditError, match="--output"):
-        start(default_turns(audit_project) | {"list_reviewer_a": [reviewer]})
+        start(default_turns(audit_project) | {"rules_reviewer": [reviewer]})
     jobs = halted_jobs(audit_project)
 
     assert [job.status for job in jobs] == [JobStatus.HALTED]
@@ -552,6 +564,34 @@ def test_the_cost_cap_halts_the_job_before_a_call(audit_project: Project, start)
     job = graph.load("capped")
     assert job.status == JobStatus.HALTED and "cap" in job.halt_reason
     assert len(agents["auditor"].prompts) == 1 and job.cost_usd == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(("rules_budget", "standard_budget"), [(1.0, 5.0), (5.0, 1.0)])
+def test_the_review_step_counts_both_reviewers_budgets_toward_the_cap(
+    audit_project: Project, start, rules_budget: float, standard_budget: float
+) -> None:
+    """Proves the cost check before the review adds the rules reviewer's budget to the standard
+    reviewer's. The auditor's budget of 1 dollar fits the cap of 4 dollars, and after the
+    auditor spends 0.5 dollars, two budgets of 1 dollar would fit too. A budget of 1 dollar and
+    one of 5 dollars do not, so the audit halts before either reviewer is asked."""
+    role = AuditSettings().auditor
+    settings = AuditSettings(
+        max_cost_usd=4.0,
+        auditor=role.model_copy(update={"budget_usd": 1.0}),
+        rules_reviewer=role.model_copy(update={"budget_usd": rules_budget}),
+        standard_reviewer=role.model_copy(update={"budget_usd": standard_budget}),
+    )
+
+    with pytest.raises(AuditError, match="cap"):
+        start(settings=settings)
+    job = halted_jobs(audit_project)[0]
+
+    assert job.status == JobStatus.HALTED and job.halt_reason.startswith("step 'review'")
+    assert "$6.00" in job.halt_reason
+    prompts = audit_folder(audit_project) / "prompts"
+    assert (prompts / "auditor-prompt.md").is_file()
+    for name in ("rules_reviewer", "standard_reviewer"):
+        assert not (prompts / f"{name}-prompt.md").exists(), name
 
 
 def test_discard_writes_no_list(audit_project: Project, start) -> None:
@@ -682,8 +722,8 @@ def test_the_prompts_and_profiles_are_kept(audit_project: Project, start) -> Non
     job, agents, graph = start()
 
     prompts = sorted(path.name for path in (audit_folder(audit_project) / "prompts").iterdir())
-    assert prompts == ["auditor-prompt.md", "checker-prompt.md", "list_reviewer_a-prompt.md",
-                       "list_reviewer_b-prompt.md", "pair_judge-prompt.md"]
+    assert prompts == ["auditor-prompt.md", "duplicate_judge-prompt.md", "final_judge-prompt.md",
+                       "rules_reviewer-prompt.md", "standard_reviewer-prompt.md"]
 
 
 # ---------------------------------------------------------------- the re-audit
@@ -721,7 +761,7 @@ def entry_titled(entries: list, title: str):
 
 
 def old_check(entry, verdict: str, left: str = "") -> dict:
-    """Returns the rechecker's check of an old entry, citing the entry's first place as it stands."""
+    """Returns the old list checker's check of an old entry, citing the entry's first place as it stands."""
     places = old_citations(entry)
     if places:
         place = places[0]
@@ -733,22 +773,22 @@ def old_check(entry, verdict: str, left: str = "") -> dict:
     return {"id": entry.id, "verdict": verdict, "what_is_left": left, "finding": current}
 
 
-def recheck_turn(entries: list, verdicts: dict[str, str] | None = None, left: str = "",
+def old_list_checker_turn(entries: list, verdicts: dict[str, str] | None = None, left: str = "",
                  **changes: object) -> dict:
-    """Returns the rechecker's answer, with a check for every entry. The verdict of an entry is
+    """Returns the old list checker's answer, with a check for every entry. The verdict of an entry is
     looked up by its title and is open when the title is not given."""
     given = verdicts or {}
     checks = [old_check(entry, given.get(entry.title, "open"), left) for entry in entries]
     return {"checks": checks, "answered_questions": [], "from_reviewer_notes": []} | changes
 
 
-def fresh_turn(project: Project, problems: list[dict] | None = None) -> dict:
-    """Returns the blind audit's answer, with a verdict on every inventory item."""
+def blind_auditor_turn(project: Project, problems: list[dict] | None = None) -> dict:
+    """Returns the blind auditor's answer, with a verdict on every inventory item."""
     return auditor_turn(project, problems=problems or [])
 
 
-def continuing_checker(split: dict[str, list[dict]] | None = None) -> Turn:
-    """Returns a checker turn that keeps every group and marks the entry of an old problem as
+def continuing_final_judge(split: dict[str, list[dict]] | None = None) -> Turn:
+    """Returns a final judge turn that keeps every group and marks the entry of an old problem as
     continuing it. A group whose old id is a key of 'split' is split into the given entries."""
     def turn(prompt: str) -> dict:
         checks = []
@@ -771,10 +811,10 @@ def continuing_checker(split: dict[str, list[dict]] | None = None) -> Turn:
 def reaudit_turns(project: Project, entries: list, **changes: object) -> dict[str, list[Turn]]:
     """Returns the turns of a re-audit in which every agent answers and every old problem is open."""
     return {
-        "fresh": [fresh_turn(project)],
-        "rechecker": [recheck_turn(entries)],
-        "pair_judge": [judge_turn],
-        "checker": [continuing_checker()],
+        "blind_auditor": [blind_auditor_turn(project)],
+        "old_list_checker": [old_list_checker_turn(entries)],
+        "duplicate_judge": [duplicate_judge_turn],
+        "final_judge": [continuing_final_judge()],
     } | changes
 
 
@@ -789,13 +829,13 @@ def test_a_blind_audit_that_diffs_the_old_list_through_dotdot_halts_the_job(
     command = json.dumps(f"git diff --no-index {climb} /dev/null")
     message = '{"content": [{"name": "Bash", "input": {"command": %s}}]}' % command
 
-    def fresh(prompt: str) -> dict:
-        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
-        return fresh_turn(audit_project)
+    def blind_auditor(prompt: str) -> dict:
+        Path("blind_auditor.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return blind_auditor_turn(audit_project)
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 def test_a_blind_audit_that_reads_through_home_halts_the_job(
@@ -806,13 +846,13 @@ def test_a_blind_audit_that_reads_through_home_halts_the_job(
     command = json.dumps("git diff --no-index $HOME/code/x/.ratchet/problems-x.md /dev/null")
     message = '{"content": [{"name": "Bash", "input": {"command": %s}}]}' % command
 
-    def fresh(prompt: str) -> dict:
-        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
-        return fresh_turn(audit_project)
+    def blind_auditor(prompt: str) -> dict:
+        Path("blind_auditor.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return blind_auditor_turn(audit_project)
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 def test_a_blind_audit_that_cds_to_the_root_halts_the_job(
@@ -825,57 +865,60 @@ def test_a_blind_audit_that_cds_to_the_root_halts_the_job(
     command = json.dumps(f"cd / && cat {below_root}")
     message = '{"content": [{"name": "Bash", "input": {"command": %s}}]}' % command
 
-    def fresh(prompt: str) -> dict:
-        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
-        return fresh_turn(audit_project)
+    def blind_auditor(prompt: str) -> dict:
+        Path("blind_auditor.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return blind_auditor_turn(audit_project)
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
-def test_a_reaudit_runs_the_blind_audit_and_the_rechecker_and_skips_the_rest(
+def test_a_reaudit_runs_the_blind_auditor_and_the_old_list_checker_and_skips_the_rest(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a project with a list gets a re-audit in which only the blind audit, the rechecker,
-    the pair judge and the checker are asked, and which waits at the draft."""
+    """Proves a project with a list gets a re-audit in which only the blind auditor, the old list
+    checker, the duplicate judge and the final judge are asked, which waits at the draft, and
+    whose blind auditor and old list checker write their answers under their own names."""
     job, agents, graph = start(reaudit_turns(audit_project, old_list), slug=AGAIN)
 
     folder = audit_folder(audit_project, AGAIN)
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
     assert job.data["reaudit"] and job.data["old_list"] == OLD_NAME
-    for name in ("evidence-hints.md", "fresh.json", "recheck.json", "groups.json", "draft.md"):
+    for name in ("evidence-hints.md", "blind_auditor.json", "old_list_checker.json", "groups.json", "draft.md"):
         assert (folder / name).is_file(), name
-    assert not (folder / "auditor.json").exists() and not (folder / "review-a.json").exists()
-    for name in ("auditor", "list_reviewer_a", "list_reviewer_b"):
+    assert not (folder / "auditor.json").exists() and not (folder / "rules_reviewer.json").exists()
+    for name in ("auditor", "rules_reviewer", "standard_reviewer"):
         assert agents[name].prompts == []
-    assert len(agents["fresh"].prompts) == 1 and len(agents["rechecker"].prompts) == 1
+    assert len(agents["blind_auditor"].prompts) == 1 and len(agents["old_list_checker"].prompts) == 1
+    for name in ("fresh.json", "recheck.json"):
+        assert not (folder / name).exists(), name
 
 
 def test_the_blind_audits_prompt_holds_none_of_the_old_titles(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves the blind audit is not told of the old list while the rechecker is."""
+    """Proves the blind auditor is not told of the old list while the old list checker is."""
     job, agents, graph = start(reaudit_turns(audit_project, old_list), slug=AGAIN)
 
     # the code checker's findings are given to every agent, so only the agents' entries count
     agents_entries = [entry for entry in old_list if not entry.fields["Sources"].startswith("C")]
     assert len(agents_entries) == 2
     for entry in agents_entries:
-        assert entry.title not in agents["fresh"].prompts[0]
-        assert entry.title in agents["rechecker"].prompts[0]
-    assert "Events:" in agents["rechecker"].prompts[0]
-    assert "# Evidence hints" in agents["rechecker"].prompts[0]
+        assert entry.title not in agents["blind_auditor"].prompts[0]
+        assert entry.title in agents["old_list_checker"].prompts[0]
+    assert "Events:" in agents["old_list_checker"].prompts[0]
+    assert "# Evidence hints" in agents["old_list_checker"].prompts[0]
 
 
 def test_the_agents_work_in_the_project_with_ratchet_hidden(
     audit_project: Project, old_list: list
 ) -> None:
-    """Proves a re-audit builds its agents, the blind audit and the rechecker included, to work in
+    """Proves a re-audit builds its agents, the blind auditor and the old list checker included, to work in
     the project's folder with .ratchet hidden, and reaches its draft with no copy of the code."""
-    answers = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
-               "list_reviewer_b": ListReview, "rechecker": RecheckAnswer,
-               "pair_judge": PairAnswer, "checker": CheckAnswer}
+    answers = {"auditor": AuditorAnswer, "blind_auditor": AuditorAnswer, "rules_reviewer": ListReview,
+               "standard_reviewer": ListReview, "old_list_checker": OldListCheckerAnswer,
+               "duplicate_judge": DuplicateJudgeAnswer, "final_judge": FinalJudgeAnswer}
     turns = reaudit_turns(audit_project, old_list)
     scripted = {name: ScriptedAgent(name, schema, turns.get(name, []))
                 for name, schema in answers.items()}
@@ -890,7 +933,7 @@ def test_the_agents_work_in_the_project_with_ratchet_hidden(
     job = graph.start("", slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
-    assert len(scripted["fresh"].prompts) == 1 and len(scripted["rechecker"].prompts) == 1
+    assert len(scripted["blind_auditor"].prompts) == 1 and len(scripted["old_list_checker"].prompts) == 1
     assert "copy" not in job.data
     assert set(built) == set(answers)
     for name, agent in built.items():
@@ -898,73 +941,73 @@ def test_the_agents_work_in_the_project_with_ratchet_hidden(
         assert ".ratchet/**" in agent.hidden, name
 
 
-def test_the_rechecker_is_asked_again_for_a_missing_id_and_a_missing_citation(
+def test_the_old_list_checker_is_asked_again_for_a_missing_id_and_a_missing_citation(
     audit_project: Project, start, old_list: list
 ) -> None:
     """Proves an id left out and an id with a citation that does not match the code are asked for
     again, in one retry that lists exactly those ids, and that the retry's checks are used."""
     left_out, bogus = old_list[0], old_list[1]
-    first = recheck_turn(old_list)
+    first = old_list_checker_turn(old_list)
     first["checks"] = [check for check in first["checks"] if check["id"] != left_out.id]
     wrong = next(check for check in first["checks"] if check["id"] == bogus.id)
     wrong["finding"]["evidence"][0]["quote"] = "this text is not in the file"
 
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [first, recheck_turn(old_list, {left_out.title: "reopen"})]}
+        "old_list_checker": [first, old_list_checker_turn(old_list, {left_out.title: "reopen"})]}
     job, agents, graph = start(turns, slug=AGAIN)
 
-    retry = agents["rechecker"].prompts[1].split("# A retry", 1)[1]
-    assert len(agents["rechecker"].prompts) == 2
+    retry = agents["old_list_checker"].prompts[1].split("# A retry", 1)[1]
+    assert len(agents["old_list_checker"].prompts) == 2
     assert f"{left_out.id}, {bogus.id}" in retry.split(". Answer for")[0]
     folder = audit_folder(audit_project, AGAIN)
-    assert (folder / "prompts" / "retry" / "rechecker-prompt.md").is_file()
+    assert (folder / "prompts" / "retry" / "old_list_checker-prompt.md").is_file()
     assert job.status == JobStatus.WAITING
     groups = json.loads((folder / "groups.json").read_text(encoding="utf-8"))["groups"]
     assert {group["old_id"]: group["status"] for group in groups}[left_out.id] == "reopened"
 
 
-def test_a_rechecker_that_stays_wrong_halts_the_audit(
+def test_an_old_list_checker_that_stays_wrong_halts_the_audit(
     audit_project: Project, start, old_list: list
 ) -> None:
     """Proves the audit halts when the retry still leaves an id without a current citation."""
-    first = recheck_turn(old_list)
+    first = old_list_checker_turn(old_list)
     first["checks"] = first["checks"][1:]
-    turns = reaudit_turns(audit_project, old_list) | {"rechecker": [first, first]}
+    turns = reaudit_turns(audit_project, old_list) | {"old_list_checker": [first, first]}
 
     with pytest.raises(AuditError, match=f"{old_list[0].id}.*even when asked again"):
         start(turns, slug=AGAIN)
 
 
-def test_a_rechecker_that_passes_output_to_git_halts_the_reaudit(
+def test_an_old_list_checker_that_passes_output_to_git_halts_the_reaudit(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a rechecker that ran git with --output halts the re-audit before its checks are
+    """Proves an old list checker that ran git with --output halts the re-audit before its checks are
     kept."""
-    rechecker = running_bash("rechecker", "git log -1 --output=out.txt", recheck_turn(old_list))
-    turns = reaudit_turns(audit_project, old_list) | {"rechecker": [rechecker]}
+    old_list_checker = running_bash("old_list_checker", "git log -1 --output=out.txt", old_list_checker_turn(old_list))
+    turns = reaudit_turns(audit_project, old_list) | {"old_list_checker": [old_list_checker]}
 
     with pytest.raises(AuditError, match="--output"):
         start(turns, slug=AGAIN)
     jobs = {job.slug: job for job in halted_jobs(audit_project)}
 
     assert jobs[AGAIN].status == JobStatus.HALTED and "--output" in jobs[AGAIN].halt_reason
-    assert not (audit_folder(audit_project, AGAIN) / "recheck.json").exists()
+    assert not (audit_folder(audit_project, AGAIN) / "old_list_checker.json").exists()
 
 
 def test_the_retry_cost_check_counts_what_the_step_already_spent(
     audit_project: Project, old_list: list
 ) -> None:
-    """Proves the cost cap check before the rechecker's retry counts what the blind audit and the
-    rechecker spent earlier in the same step. With a cap of 20 dollars, the blind audit spends 8
-    and the rechecker spends 7, so a retry with a budget of 6 would pass the cap and is not run."""
-    answers = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
-               "list_reviewer_b": ListReview, "rechecker": RecheckAnswer,
-               "pair_judge": PairAnswer, "checker": CheckAnswer}
-    costs = {"fresh": 8.0, "rechecker": 7.0}
-    first = recheck_turn(old_list)
+    """Proves the cost cap check before the old list checker's retry counts what the blind auditor and the
+    old list checker spent earlier in the same step. With a cap of 20 dollars, the blind auditor spends 8
+    and the old list checker spends 7, so a retry with a budget of 6 would pass the cap and is not run."""
+    answers = {"auditor": AuditorAnswer, "blind_auditor": AuditorAnswer, "rules_reviewer": ListReview,
+               "standard_reviewer": ListReview, "old_list_checker": OldListCheckerAnswer,
+               "duplicate_judge": DuplicateJudgeAnswer, "final_judge": FinalJudgeAnswer}
+    costs = {"blind_auditor": 8.0, "old_list_checker": 7.0}
+    first = old_list_checker_turn(old_list)
     first["checks"] = first["checks"][1:]
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [first, recheck_turn(old_list)]}
+        "old_list_checker": [first, old_list_checker_turn(old_list)]}
     scripted = {name: ScriptedAgent(name, schema, turns.get(name, []),
                                     cost_usd=costs.get(name, 0.5))
                 for name, schema in answers.items()}
@@ -976,9 +1019,9 @@ def test_the_retry_cost_check_counts_what_the_step_already_spent(
     job = graph.load(AGAIN)
 
     prompts = audit_folder(audit_project, AGAIN) / "prompts"
-    assert len(scripted["rechecker"].prompts) == 1
-    assert (prompts / "rechecker-prompt.md").is_file()
-    assert not (prompts / "retry" / "rechecker-prompt.md").exists()
+    assert len(scripted["old_list_checker"].prompts) == 1
+    assert (prompts / "old_list_checker-prompt.md").is_file()
+    assert not (prompts / "retry" / "old_list_checker-prompt.md").exists()
     assert job.status == JobStatus.HALTED
     assert job.halt_reason.startswith("step 'audit'") and "$15.00" in job.halt_reason
     assert job.cost_usd == pytest.approx(15.0)
@@ -987,11 +1030,11 @@ def test_the_retry_cost_check_counts_what_the_step_already_spent(
 def test_a_reopened_problem_keeps_its_id_with_carried_and_reopened_events(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a problem the rechecker reopens keeps its id and is listed as reopened and carried
+    """Proves a problem the old list checker reopens keeps its id and is listed as reopened and carried
     from the old list, and that its ledger holds a carried and a reopened event."""
     target = entry_titled(old_list, FIRST["title"])
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [recheck_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
+        "old_list_checker": [old_list_checker_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
     job, agents, graph = start(turns, slug=AGAIN)
     graph.resume(AGAIN, {"decision": "approve"})
 
@@ -1012,7 +1055,7 @@ def test_a_reopened_problem_keeps_its_id_with_carried_and_reopened_events(
 def test_a_problem_done_in_the_old_ledger_is_reopened_and_published(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a problem that refactor marked done, and that the rechecker reopens, passes the
+    """Proves a problem that refactor marked done, and that the old list checker reopens, passes the
     draft check and publish under its old id, listed as reopened and carried from the old list."""
     target = entry_titled(old_list, FIRST["title"])
     path = audit_project.state_dir / OLD_NAME / "ledger.json"
@@ -1022,7 +1065,7 @@ def test_a_problem_done_in_the_old_ledger_is_reopened_and_published(
         ProblemEvent(when="2026-01-02 09:00", kind="done", by="J01", job="J01"))
     save_ledger(ledger, path)
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [recheck_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
+        "old_list_checker": [old_list_checker_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
     job, agents, graph = start(turns, slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
@@ -1053,7 +1096,7 @@ def test_a_blocked_problem_comes_back_abandoned_with_its_sendbacks(
     ledger.problems[target.id].sendbacks = 2
     save_ledger(ledger, path)
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [recheck_turn(old_list, {target.title: "blocked"}, left="needs a decision")]}
+        "old_list_checker": [old_list_checker_turn(old_list, {target.title: "blocked"}, left="needs a decision")]}
     job, agents, graph = start(turns, slug=AGAIN)
     graph.resume(AGAIN, {"decision": "approve"})
 
@@ -1065,11 +1108,11 @@ def test_a_blocked_problem_comes_back_abandoned_with_its_sendbacks(
     assert [event.kind for event in record.events] == ["carried", "abandoned"]
 
 
-def test_a_fresh_finding_with_a_reopened_problem_is_split_and_the_old_id_stays(
+def test_a_blind_auditor_finding_with_a_reopened_problem_is_split_and_the_old_id_stays(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a fresh finding that holds a reopened problem and another is split by the checker,
-    and that the old id stays on the part that continues the old problem."""
+    """Proves a blind auditor finding that holds a reopened problem and another is split by the
+    final judge,    and that the old id stays on the part that continues the old problem."""
     target = entry_titled(old_list, FIRST["title"])
     broad = finding("app.cli.main.run", "run does two things wrong", MAIN, 5,
                     "return round(model.total(1, 2), 2)")
@@ -1077,9 +1120,9 @@ def test_a_fresh_finding_with_a_reopened_problem_is_split_and_the_old_id_stays(
                               "quote": "return round(a + b, 2)", "shows": "the line"})
     extra = finding("app.cli.main", "run has no description", MAIN, 4, "def run():")
     turns = reaudit_turns(audit_project, old_list) | {
-        "fresh": [fresh_turn(audit_project, [broad])],
-        "rechecker": [recheck_turn(old_list, {target.title: "reopen"})],
-        "checker": [continuing_checker({target.id: [FIRST, extra]})],
+        "blind_auditor": [blind_auditor_turn(audit_project, [broad])],
+        "old_list_checker": [old_list_checker_turn(old_list, {target.title: "reopen"})],
+        "final_judge": [continuing_final_judge({target.id: [FIRST, extra]})],
     }
     job, agents, graph = start(turns, slug=AGAIN)
     graph.resume(AGAIN, {"decision": "approve"})
@@ -1099,7 +1142,7 @@ def test_the_history_reads_as_one_timeline_across_both_lists(
     """Proves `ratchet problems P7 --history` follows a carried problem back into the old list."""
     target = entry_titled(old_list, FIRST["title"])
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [recheck_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
+        "old_list_checker": [old_list_checker_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
     start(turns, slug=AGAIN)[2].resume(AGAIN, {"decision": "approve"})
     latest = find_latest_problem_list(audit_project).name
 
@@ -1120,13 +1163,13 @@ def test_a_blind_audit_that_leaves_the_copy_halts_the_job(
     outside = json.dumps(str(audit_project.root / ".ratchet" / "problems.md"))
     message = '{"content": [{"name": "Read", "input": {"file_path": %s}}]}' % outside
 
-    def fresh(prompt: str) -> dict:
-        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
-        return fresh_turn(audit_project)
+    def blind_auditor(prompt: str) -> dict:
+        Path("blind_auditor.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return blind_auditor_turn(audit_project)
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 # The text that Claude Code gives as the result of a Read call that its permission rules refuse.
@@ -1160,15 +1203,15 @@ def test_a_search_for_an_api_path_does_not_halt_a_blind_audit(
 ) -> None:
     """Proves a blind audit that searches the history for the text "/api/v1" reaches its draft,
     since the text names no path."""
-    fresh = calling_tools(
-        "fresh", [("Bash", {"command": 'git log -S "/api/v1" --oneline'}, None)],
-        fresh_turn(audit_project))
+    blind_auditor = calling_tools(
+        "blind_auditor", [("Bash", {"command": 'git log -S "/api/v1" --oneline'}, None)],
+        blind_auditor_turn(audit_project))
 
-    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]},
+    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]},
                                slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
-    assert (audit_folder(audit_project, AGAIN) / "fresh.json").is_file()
+    assert (audit_folder(audit_project, AGAIN) / "blind_auditor.json").is_file()
 
 
 def test_an_allowed_call_that_names_ratchet_halts_the_blind_audit(
@@ -1176,13 +1219,13 @@ def test_an_allowed_call_that_names_ratchet_halts_the_blind_audit(
 ) -> None:
     """Proves a blind audit that ran a command naming .ratchet, which the permission rules let
     through, stops the job before its answer is kept."""
-    fresh = calling_tools(
-        "fresh", [("Bash", {"command": "git show HEAD:.ratchet/problems.md"}, None)],
-        fresh_turn(audit_project))
+    blind_auditor = calling_tools(
+        "blind_auditor", [("Bash", {"command": "git show HEAD:.ratchet/problems.md"}, None)],
+        blind_auditor_turn(audit_project))
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 def test_a_denied_call_is_noted_not_counted(
@@ -1190,11 +1233,11 @@ def test_a_denied_call_is_noted_not_counted(
 ) -> None:
     """Proves a blind audit's Read of .ratchet that the permission rules refused does not stop the
     job, and is noted for the owner in the draft."""
-    fresh = calling_tools(
-        "fresh", [("Read", {"file_path": ".ratchet/problems.md"}, READ_DENIED)],
-        fresh_turn(audit_project))
+    blind_auditor = calling_tools(
+        "blind_auditor", [("Read", {"file_path": ".ratchet/problems.md"}, READ_DENIED)],
+        blind_auditor_turn(audit_project))
 
-    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]},
+    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]},
                                slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
@@ -1221,13 +1264,13 @@ def test_an_allowed_read_of_a_short_name_path_into_ratchet_halts_the_blind_audit
     short = short_name(audit_project.root / ".ratchet")
     if not short or Path(short).name == ".ratchet":
         pytest.skip("this volume makes no short name for .ratchet")
-    fresh = calling_tools(
-        "fresh", [("Read", {"file_path": f"{short}\\{OLD_NAME}.md"}, None)],
-        fresh_turn(audit_project))
+    blind_auditor = calling_tools(
+        "blind_auditor", [("Read", {"file_path": f"{short}\\{OLD_NAME}.md"}, None)],
+        blind_auditor_turn(audit_project))
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 def test_an_allowed_grep_outside_the_project_halts_the_blind_audit(
@@ -1235,13 +1278,13 @@ def test_an_allowed_grep_outside_the_project_halts_the_blind_audit(
 ) -> None:
     """Proves a blind audit whose Grep searched the folder above the project, which the rules let
     through, stops the job before its answer is kept."""
-    fresh = calling_tools(
-        "fresh", [("Grep", {"pattern": "P1", "path": str(audit_project.root.parent)}, None)],
-        fresh_turn(audit_project))
+    blind_auditor = calling_tools(
+        "blind_auditor", [("Grep", {"pattern": "P1", "path": str(audit_project.root.parent)}, None)],
+        blind_auditor_turn(audit_project))
 
-    with pytest.raises(AuditError, match="blind audit"):
-        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    with pytest.raises(AuditError, match="blind auditor"):
+        start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 # The text that Claude Code gives as the result of a Read of a file in a folder that a Read deny
@@ -1255,11 +1298,11 @@ def test_a_read_of_ratchet_refused_in_the_cli_file_wording_is_noted_not_halted(
 ) -> None:
     """Proves a blind audit's Read of .ratchet that Claude Code refused with its wording for a
     denied folder does not stop the job, and is noted for the owner in the draft."""
-    fresh = calling_tools(
-        "fresh", [("Read", {"file_path": ".ratchet/problems.md"}, FOLDER_DENIED)],
-        fresh_turn(audit_project))
+    blind_auditor = calling_tools(
+        "blind_auditor", [("Read", {"file_path": ".ratchet/problems.md"}, FOLDER_DENIED)],
+        blind_auditor_turn(audit_project))
 
-    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]},
+    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"blind_auditor": [blind_auditor]},
                                slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
@@ -1267,25 +1310,25 @@ def test_a_read_of_ratchet_refused_in_the_cli_file_wording_is_noted_not_halted(
     assert "the permission rules refused" in draft
 
 
-def test_an_allowed_read_outside_the_project_halts_the_rechecker(
+def test_an_allowed_read_outside_the_project_halts_the_old_list_checker(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a rechecker that read a file outside the project, such as a session transcript of
+    """Proves an old list checker that read a file outside the project, such as a session transcript of
     Claude Code, stops the job."""
     outside = audit_project.root.parent / "transcript.jsonl"
     outside.write_text("{}\n", encoding="utf-8")
-    rechecker = calling_tools(
-        "rechecker", [("Read", {"file_path": str(outside)}, None)], recheck_turn(old_list))
+    old_list_checker = calling_tools(
+        "old_list_checker", [("Read", {"file_path": str(outside)}, None)], old_list_checker_turn(old_list))
 
-    with pytest.raises(AuditError, match="rechecker"):
-        start(reaudit_turns(audit_project, old_list) | {"rechecker": [rechecker]}, slug=AGAIN)
+    with pytest.raises(AuditError, match="old_list_checker"):
+        start(reaudit_turns(audit_project, old_list) | {"old_list_checker": [old_list_checker]}, slug=AGAIN)
 
 
-def test_an_answered_old_question_is_decided_by_the_rechecker(
+def test_an_answered_old_question_is_decided_by_the_old_list_checker(
     audit_project: Project, start
 ) -> None:
-    """Proves the owner's answer under an old question reaches the rechecker, and a rule the
-    rechecker settles from it is added to rules.md."""
+    """Proves the owner's answer under an old question reaches the old list checker, and a rule the
+    old list checker settles from it is added to rules.md."""
     question = {"kind": "rules", "title": "Is rounding twice deliberate", "evidence": [],
                 "why_it_may_be_deliberate": "Money is rounded at each step.",
                 "what_would_settle": "A word from the owner."}
@@ -1303,10 +1346,10 @@ def test_an_answered_old_question_is_decided_by_the_rechecker(
     decision = {"id": "Q1", "decision": "rule", "reason": "settled", "finding": SECOND,
                 "rule_text": "Amounts are rounded to cents in one place only."}
     turns = reaudit_turns(audit_project, entries) | {
-        "rechecker": [recheck_turn(entries, answered_questions=[decision])]}
+        "old_list_checker": [old_list_checker_turn(entries, answered_questions=[decision])]}
     job, agents, graph = start(turns, slug=AGAIN)
 
-    assert "Answer: Round only in pricing." in agents["rechecker"].prompts[0]
+    assert "Answer: Round only in pricing." in agents["old_list_checker"].prompts[0]
     graph.resume(AGAIN, {"decision": "approve"})
     rules = (audit_project.folder / "rules.md").read_text(encoding="utf-8")
     assert f"- Amounts are rounded to cents in one place only. (decided in {AGAIN})\n" in rules
@@ -1314,22 +1357,22 @@ def test_an_answered_old_question_is_decided_by_the_rechecker(
             if not entry.is_problem] == []
 
 
-def test_findings_grouped_with_a_done_problem_reach_the_checker_and_the_done_list_is_published(
+def test_findings_grouped_with_a_done_problem_reach_the_final_judge_and_the_done_list_is_published(
     audit_project: Project, start, old_list: list
 ) -> None:
-    """Proves a note finding that cites the place of a problem the rechecker found done is shown
-    to the checker and published as a new problem, and that the done problem is listed under
+    """Proves a note finding that cites the place of a problem the old list checker found done is shown
+    to the final judge and published as a new problem, and that the done problem is listed under
     Done instead of under Open."""
     target = entry_titled(old_list, FIRST["title"])
     place = old_citations(target)[0]
     noted = finding("app.cli.main.run", "run hides the rounding from the caller", place.file,
                     place.line, place.quote)
     turns = reaudit_turns(audit_project, old_list) | {
-        "rechecker": [recheck_turn(old_list, {target.title: "done"}, left="nothing is left",
+        "old_list_checker": [old_list_checker_turn(old_list, {target.title: "done"}, left="nothing is left",
                                    from_reviewer_notes=[noted])]}
     job, agents, graph = start(turns, slug=AGAIN)
 
-    rows = rows_of(agents["checker"].prompts[0])
+    rows = rows_of(agents["final_judge"].prompts[0])
     assert any(row["text"]["title"] == noted["title"] and row["old_id"] == "" for row in rows)
     groups = json.loads((audit_folder(audit_project, AGAIN) / "groups.json")
                         .read_text(encoding="utf-8"))
@@ -1399,10 +1442,10 @@ def leave_in_reflog(root: Path, commit: str) -> None:
 
 
 def non_blind_turns(project: Project, entries: list, **changes: object) -> dict[str, list[Turn]]:
-    """Returns the turns of a re-audit in which the auditor answers in place of the blind audit,
+    """Returns the turns of a re-audit in which the auditor answers in place of the blind auditor,
     every agent answers and every old problem is open."""
     turns = reaudit_turns(project, entries)
-    turns["auditor"] = turns.pop("fresh")
+    turns["auditor"] = turns.pop("blind_auditor")
     return turns | changes
 
 
@@ -1421,8 +1464,8 @@ def test_a_reaudit_whose_history_holds_ratchet_skips_the_blind_audit(
     job, agents, graph = start(non_blind_turns(audit_project, old_list), slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
-    assert agents["fresh"].prompts == []
-    assert len(agents["auditor"].prompts) == 1 and len(agents["rechecker"].prompts) == 1
+    assert agents["blind_auditor"].prompts == []
+    assert len(agents["auditor"].prompts) == 1 and len(agents["old_list_checker"].prompts) == 1
     assert job.data["ratchet_commit"] == short_hash(root, first)
     draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
     assert f"Not blind: {note}" in draft.splitlines()
@@ -1446,7 +1489,7 @@ def test_ratchet_only_in_the_reflog_counts(
     job, agents, graph = start(non_blind_turns(audit_project, old_list), slug=AGAIN)
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
-    assert agents["fresh"].prompts == [] and len(agents["auditor"].prompts) == 1
+    assert agents["blind_auditor"].prompts == [] and len(agents["auditor"].prompts) == 1
     assert job.data["ratchet_commit"] == short_hash(root, commit)
     draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
     assert f"Not blind: {note}" in draft.splitlines()
@@ -1462,11 +1505,11 @@ def test_a_non_blind_audit_whose_auditor_reads_outside_the_project_halts(
     outside = root.parent / "elsewhere.md"
     outside.write_text("x\n", encoding="utf-8")
     auditor = calling_tools(
-        "auditor", [("Read", {"file_path": str(outside)}, None)], fresh_turn(audit_project))
+        "auditor", [("Read", {"file_path": str(outside)}, None)], blind_auditor_turn(audit_project))
 
     with pytest.raises(AuditError, match="elsewhere.md"):
         start(non_blind_turns(audit_project, old_list, auditor=[auditor]), slug=AGAIN)
-    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+    assert not (audit_folder(audit_project, AGAIN) / "blind_auditor.json").exists()
 
 
 def test_a_first_audit_with_ratchet_in_history_has_no_note(
@@ -1480,7 +1523,7 @@ def test_a_first_audit_with_ratchet_in_history_has_no_note(
     job, agents, graph = start()
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
-    assert len(agents["auditor"].prompts) == 1 and agents["fresh"].prompts == []
+    assert len(agents["auditor"].prompts) == 1 and agents["blind_auditor"].prompts == []
     assert job.data.get("ratchet_commit", "") == ""
     draft = (audit_folder(audit_project) / "draft.md").read_text(encoding="utf-8")
     assert "Not blind" not in draft
@@ -1495,7 +1538,7 @@ def test_a_draft_step_of_a_job_without_ratchet_commit_still_runs(
                 "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
                 "what_would_settle": "A word from the owner."}
     turns = reaudit_turns(audit_project, old_list) | {
-        "fresh": [auditor_turn(audit_project, problems=[], questions=[question])]}
+        "blind_auditor": [auditor_turn(audit_project, problems=[], questions=[question])]}
     job, agents, graph = start(turns, slug=AGAIN)
     assert job.status == JobStatus.WAITING and job.next_step == "check"
 
@@ -1522,7 +1565,7 @@ def test_a_non_blind_audit_with_a_denied_ratchet_read_is_noted_not_halted(
     git_output(root, "update-ref", "refs/heads/other", commit_ratchet(root))
     auditor = calling_tools(
         "auditor", [("Read", {"file_path": ".ratchet/problems.md"}, READ_DENIED)],
-        fresh_turn(audit_project))
+        blind_auditor_turn(audit_project))
 
     job, agents, graph = start(
         non_blind_turns(audit_project, old_list, auditor=[auditor]), slug=AGAIN)
@@ -1532,20 +1575,20 @@ def test_a_non_blind_audit_with_a_denied_ratchet_read_is_noted_not_halted(
     assert "the permission rules refused" in draft
 
 
-def test_a_checker_answer_for_no_group_is_noted_in_the_verdicts(
+def test_a_final_judge_answer_for_no_group_is_noted_in_the_verdicts(
     audit_project: Project, start
 ) -> None:
-    """Proves a checker answer whose key names no group is left out, and that verdicts.md says
+    """Proves a final judge answer whose key names no group is left out, and that verdicts.md says
     so in a note line."""
-    def checker(prompt: str) -> dict:
-        answer = checker_turn()(prompt)
+    def final_judge(prompt: str) -> dict:
+        answer = final_judge_turn()(prompt)
         stray = dict(answer["checks"][0], key="G999")
         return answer | {"checks": [*answer["checks"], stray]}
 
-    start(default_turns(audit_project) | {"checker": [checker]})
+    start(default_turns(audit_project) | {"final_judge": [final_judge]})
 
     verdicts = (audit_folder(audit_project) / "verdicts.md").read_text(encoding="utf-8")
-    assert "- note: the checker answered for G999, which is not a group" in verdicts
+    assert "- note: the final judge answered for G999, which is not a group" in verdicts
 
 
 def ignore_env(project: Project) -> None:
@@ -1589,7 +1632,7 @@ def test_an_allowed_read_of_an_ignored_env_halts_the_audit(audit_project: Projec
 
     assert "auditor" in str(caught.value)
     assert "a secret" in str(caught.value)
-    assert not (audit_folder(audit_project) / "review-a.json").exists()
+    assert not (audit_folder(audit_project) / "rules_reviewer.json").exists()
 
 
 def test_a_hook_refused_forbidden_option_is_noted_not_halted(

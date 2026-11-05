@@ -10,11 +10,11 @@ from pydantic import BaseModel, ValidationError
 
 from ratchet.audit.agent_answers import (
     AuditorAnswer,
-    CheckAnswer,
+    FinalJudgeAnswer,
     ListReview,
     Outcome,
-    PairAnswer,
-    RecheckAnswer,
+    DuplicateJudgeAnswer,
+    OldListCheckerAnswer,
 )
 
 ANSWERS = Path(__file__).parent / "answers"
@@ -22,9 +22,9 @@ ANSWERS = Path(__file__).parent / "answers"
 SAVED = [
     ("audit-auditor.json", AuditorAnswer),
     ("audit-list-review.json", ListReview),
-    ("audit-recheck.json", RecheckAnswer),
-    ("audit-pairs.json", PairAnswer),
-    ("audit-check.json", CheckAnswer),
+    ("audit-old-list-checker.json", OldListCheckerAnswer),
+    ("audit-duplicate-judge.json", DuplicateJudgeAnswer),
+    ("audit-final-judge.json", FinalJudgeAnswer),
 ]
 
 
@@ -41,9 +41,9 @@ def test_a_saved_answer_fits_and_comes_back_unchanged(name: str, shape: type[Bas
     assert answer.model_dump(mode="json", by_alias=True) == saved(name)
 
 
-def test_the_saved_check_holds_every_outcome() -> None:
-    """Proves the saved checker answer has a group check for each of the six outcomes."""
-    answer = CheckAnswer.model_validate(saved("audit-check.json"))
+def test_the_saved_final_judge_answer_holds_every_outcome() -> None:
+    """Proves the saved final judge answer has a group check for each of the six outcomes."""
+    answer = FinalJudgeAnswer.model_validate(saved("audit-final-judge.json"))
 
     assert {check.outcome for check in answer.checks} == set(Outcome)
 
@@ -59,11 +59,11 @@ def test_a_missing_field_is_refused() -> None:
 
 def test_an_unknown_field_is_refused() -> None:
     """Proves a field the shape does not name is refused inside a nested finding."""
-    answer = saved("audit-recheck.json")
+    answer = saved("audit-old-list-checker.json")
     answer["checks"][0]["finding"]["severity"] = "high"
 
     with pytest.raises(ValidationError, match="severity"):
-        RecheckAnswer.model_validate(answer)
+        OldListCheckerAnswer.model_validate(answer)
 
 
 def test_a_citation_line_below_one_is_refused() -> None:
@@ -85,7 +85,7 @@ def test_an_unknown_grade_is_refused() -> None:
 
 
 @pytest.mark.parametrize(
-    "shape", [AuditorAnswer, ListReview, RecheckAnswer, PairAnswer, CheckAnswer]
+    "shape", [AuditorAnswer, ListReview, OldListCheckerAnswer, DuplicateJudgeAnswer, FinalJudgeAnswer]
 )
 def test_the_schema_requires_every_field(shape: type[BaseModel]) -> None:
     """Proves the schema sent to Claude requires every field and refuses others."""

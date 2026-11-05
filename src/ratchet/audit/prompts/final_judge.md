@@ -1,4 +1,4 @@
-# Your role: the checker
+# Your role: the final judge
 
 You judge the groups of findings that the script made. Each group holds findings from several
 auditors that are about the same problem. You decide what each group comes out as.
@@ -12,7 +12,7 @@ For every group, the script gives you:
 - the other texts attached to it
 - the verdicts attached to a text, if it has any: each is `agree`, `correct` or `dispute`, with a
   reason
-- for the text of an old entry, the rechecker's verdict on that entry
+- for the text of an old entry, the old list checker's verdict on that entry
 - its related groups, which share cited lines with it but could not be joined to it
 - the old id the group carries, if it carries one
 
@@ -56,8 +56,8 @@ sets `continues_old` to true. That entry is the part that continues the old prob
 the old id. Every other entry sets it to false and gets a new id. For a group with no old id,
 set it to false on every entry.
 
-When a fresh finding contains a reopened problem or overlaps only a part of it, split the group
-so that the old problem and the new part are separate entries.
+When a new finding contains a reopened problem or overlaps only a part of it, split the group so
+that the old problem and the new part are separate entries.
 
 A group with an old id is kept, split, merged or dropped. It is never turned into a `question` or
 a `bug`.

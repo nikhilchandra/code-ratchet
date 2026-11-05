@@ -1,4 +1,4 @@
-# Your role: the pair judge
+# Your role: the duplicate judge
 
 You decide whether two findings are about the same problem.
 

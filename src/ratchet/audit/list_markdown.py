@@ -90,7 +90,7 @@ class DraftDone:
         id: The problem's id, such as "P7".
         title: The problem's title.
         verdict: "done" or "gone".
-        reason: What the rechecker said was left, or "" for nothing.
+        reason: What the old list checker said was left, or "" for nothing.
     """
 
     id: str

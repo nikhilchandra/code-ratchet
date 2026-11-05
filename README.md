@@ -121,14 +121,14 @@ one audit may wait at a time, and `--approve` is refused when HEAD has moved sin
 began.
 
 Agents work in the project. Their file tools are confined to it and denied `.ratchet`,
-`.git` and the `hide` patterns. All but the pair judge may run read-only git (status, diff,
+`.git` and the `hide` patterns. All but the duplicate judge may run read-only git (status, diff,
 log, show, blame), and a command with `--no-index`, `--contents`, `--output`, `-C`,
 `--git-dir`, `--work-tree`, `-c` or `--exec-path` is refused before it runs. After each turn
 its log is checked: a call that got through halts the audit, and a refused call is only noted.
 
 When `.ratchet` appears anywhere in the project's git history (any branch, tag, stash or
 reflog entry), a re-audit skips the blind audit and runs the auditor in its place beside the
-rechecker. It shows the note "The blind audit was skipped. .ratchet was committed to git
+old list checker. It shows the note "The blind audit was skipped. .ratchet was committed to git
 history in <commit>, so the old problem lists can still be read there." and marks the
 published list "Not blind". A first audit shows no note.
 
@@ -165,14 +165,15 @@ line that the next re-audit reads), "Dropped" (ids `D1`) and "Bugs noticed".
 ```toml
 [audit]
 hide = []                       # path patterns denied to the agents' file tools in the project
-max_pairs = 40                  # most pairs the pair judge is asked about
+max_pairs = 40                  # most pairs the duplicate judge is asked about
 max_cost_usd = 40.0             # the most one audit may spend, at list price
 
 [audit.auditor]                 # opus, $10, 3600 s
-[audit.list_reviewer]           # opus, $6, 2400 s
-[audit.rechecker]               # opus, $6, 2400 s
-[audit.pair_judge]              # sonnet, $1, 600 s
-[audit.checker]                 # opus, $6, 2400 s
+[audit.rules_reviewer]          # opus, $6, 2400 s
+[audit.standard_reviewer]       # opus, $6, 2400 s
+[audit.old_list_checker]        # opus, $6, 2400 s
+[audit.duplicate_judge]         # sonnet, $1, 600 s
+[audit.final_judge]             # opus, $6, 2400 s
 ```
 
 Before each agent step the audit checks that what it has spent plus that step's budget stays
