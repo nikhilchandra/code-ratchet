@@ -175,3 +175,21 @@ def test_the_done_list_is_rendered_as_bullets_the_readers_ignore(tmp_path: Path)
     (folder / "rules.md").write_text("rules\n", encoding="utf-8")
     (folder / "problems-20261102-14h05m.md").write_text(text, encoding="utf-8")
     assert find_latest_problem_list(load_project(tmp_path, commands=[])).ids == ["P7"]
+
+
+def test_the_not_blind_line_survives_strip_owner_notes() -> None:
+    """Proves a draft whose not_blind is set has a "Not blind:" line right under "# Problems",
+    and that removing the owner notes keeps that line while it removes an owner note of the same
+    draft."""
+    note = ("The blind audit was skipped. .ratchet was committed to git history in a1b2c3d, so "
+            "the old problem lists can still be read there.")
+    draft = Draft(problems=[problem(7, notes=["check this one"])], notes=["HEAD was at abc"],
+                  not_blind=note)
+
+    text = render_draft(draft)
+
+    assert text.startswith(f"# Problems\n\nNot blind: {note}\n\n")
+    stripped = strip_owner_notes(text)
+    assert f"Not blind: {note}" in stripped
+    assert "check this one" not in stripped and "HEAD was at abc" not in stripped
+    assert check_draft(stripped, done_ids=[]) == []

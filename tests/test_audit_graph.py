@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 from rooster import JobStatus
 
-from ratchet.agent_calls import NoAnswerError
 from ratchet.audit.agent_answers import (
     AuditorAnswer,
     CheckAnswer,
@@ -24,7 +23,6 @@ from ratchet.audit.agent_answers import (
 )
 from ratchet.audit.agent_profiles import make_agents
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
-from ratchet.audit.code_copy import remove_copy
 from ratchet.audit.code_facts import build_inventory
 from ratchet.audit.evidence_hints import old_citations
 from ratchet.audit.settings import COMMAND, AuditSettings
@@ -233,7 +231,6 @@ def test_a_full_walk_publishes_a_readable_list_and_commits(
                  "review-b.json", "groups.json", "pairs.json", "citations.md", "check.json",
                  "verdicts.md", "draft.json", "draft.md"):
         assert (folder / name).is_file(), name
-    assert not Path(job.data["copy"]).exists()
 
     job = graph.resume(SLUG, {"decision": "approve"})
 
@@ -344,41 +341,56 @@ def wait_at_questions(project: Project, start, slug: str = SLUG):
     return job, agents, graph
 
 
-def test_a_copy_deleted_at_the_questions_gate_halts_the_check(
-    audit_project: Project, start
-) -> None:
-    """Proves a copy deleted while the job waits at the questions gate halts the check with a
-    reason that names the copy, before the checker is asked."""
-    job, agents, graph = wait_at_questions(audit_project, start)
-    copy = Path(job.data["copy"])
-    remove_copy(copy)
+def commit_later(project: Project) -> None:
+    """Commits a new file later.py in the project, which moves HEAD."""
+    (project.root / "later.py").write_text("x = 1\n", encoding="utf-8")
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "later")
 
-    with pytest.raises(AuditError, match="copy"):
+
+def test_a_moved_head_stops_the_audit_at_check(audit_project: Project, start) -> None:
+    """Proves a commit made while the job waits at the questions gate halts the check before the
+    checker is asked, with a reason that asks for a new audit."""
+    job, agents, graph = wait_at_questions(audit_project, start)
+    commit_later(audit_project)
+
+    with pytest.raises(AuditError) as caught:
         graph.resume(SLUG, {"answers": {"Q1": "yes"}})
 
-    job = graph.load(SLUG)
-    assert job.status == JobStatus.HALTED
-    assert "copy" in job.halt_reason and str(copy) in job.halt_reason
+    assert "HEAD has moved" in str(caught.value)
+    assert re.search(r"(?i)run `ratchet audit` again", str(caught.value))
+    assert graph.load(SLUG).status == JobStatus.HALTED
     assert agents["checker"].prompts == []
 
 
-def test_a_discard_at_the_questions_gate_needs_no_copy(audit_project: Project, start) -> None:
-    """Proves a discard decided at the questions gate ends the job as discarded even when the
-    copy is gone, while answers given with the copy gone halt the check, so the copy is looked
-    for only once the job is not discarded."""
+def test_a_dirty_tree_stops_the_audit_at_check(audit_project: Project, start) -> None:
+    """Proves a file left uncommitted in the project while the job waits at the questions gate
+    halts the check before the checker is asked, with a reason that names the file and asks for
+    a new audit."""
     job, agents, graph = wait_at_questions(audit_project, start)
-    remove_copy(Path(job.data["copy"]))
+    (audit_project.root / "stray.py").write_text("x = 1\n", encoding="utf-8")
+
+    with pytest.raises(AuditError) as caught:
+        graph.resume(SLUG, {"answers": {"Q1": "yes"}})
+
+    assert "working tree has changes" in str(caught.value)
+    assert "stray.py" in str(caught.value)
+    assert re.search(r"(?i)run `ratchet audit` again", str(caught.value))
+    assert graph.load(SLUG).status == JobStatus.HALTED
+    assert agents["checker"].prompts == []
+
+
+def test_a_discard_at_the_questions_gate_ignores_a_moved_head(
+    audit_project: Project, start
+) -> None:
+    """Proves a discard decided at the questions gate ends the job as discarded, with no checker
+    turn, even after a commit has moved HEAD."""
+    job, agents, graph = wait_at_questions(audit_project, start)
+    commit_later(audit_project)
 
     job = graph.resume(SLUG, {"decision": "discard"})
 
     assert job.status == JobStatus.DONE and job.data["outcome"] == "discarded"
-    assert agents["checker"].prompts == []
-
-    answered, agents, graph = wait_at_questions(audit_project, start, slug="audit-2")
-    remove_copy(Path(answered.data["copy"]))
-    with pytest.raises(AuditError, match="copy"):
-        graph.resume("audit-2", {"answers": {"Q1": "yes"}})
-    assert graph.load("audit-2").status == JobStatus.HALTED
     assert agents["checker"].prompts == []
 
 
@@ -458,16 +470,9 @@ def test_a_failed_reviewer_does_not_stop_the_audit(audit_project: Project, start
     assert "gave no answer" not in find_latest_problem_list(audit_project).text
 
 
-def test_a_missing_verdict_and_a_path_outside_the_copy_are_noted(
-    audit_project: Project, start
-) -> None:
-    """Proves the audit tells the owner of an inventory item with no verdict and of a path
-    outside the copy that the auditor named."""
-    outside = json.dumps(str(audit_project.root / "secret.txt"))
-    message = '{"content": [{"name": "Read", "input": {"file_path": %s}}]}' % outside
-
+def test_a_missing_verdict_is_noted(audit_project: Project, start) -> None:
+    """Proves the audit tells the owner of an inventory item with no verdict."""
     def auditor(prompt: str) -> dict:
-        Path("auditor.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
         answer = auditor_turn(audit_project)
         answer["units"] = answer["units"][:-1]
         return answer
@@ -476,7 +481,6 @@ def test_a_missing_verdict_and_a_path_outside_the_copy_are_noted(
 
     text = (audit_folder(audit_project) / "draft.md").read_text(encoding="utf-8")
     assert "gave no verdict on 1 items of the inventory" in text
-    assert "named paths outside the copy of the code" in text
 
 
 def running_bash(name: str, command: str, answer: Turn) -> Turn:
@@ -491,11 +495,8 @@ def running_bash(name: str, command: str, answer: Turn) -> Turn:
 
 
 def halted_jobs(project: Project) -> list:
-    """Returns the audit's jobs after removing the copy of each one."""
-    jobs = build_audit_graph(project, AuditSettings()).jobs()
-    for job in jobs:
-        remove_copy(Path(job.data["copy"]))
-    return jobs
+    """Returns the audit's jobs."""
+    return build_audit_graph(project, AuditSettings()).jobs()
 
 
 def test_an_agent_that_passes_output_to_git_halts_the_audit(
@@ -549,7 +550,6 @@ def test_the_cost_cap_halts_the_job_before_a_call(audit_project: Project, start)
     with pytest.raises(AuditError, match="cap"):
         graph.start("", slug="capped")
     job = graph.load("capped")
-    remove_copy(Path(job.data["copy"]))
     assert job.status == JobStatus.HALTED and "cap" in job.halt_reason
     assert len(agents["auditor"].prompts) == 1 and job.cost_usd == pytest.approx(0.5)
 
@@ -575,6 +575,16 @@ def test_approval_is_refused_when_head_has_moved(audit_project: Project, start) 
     git(audit_project.root, "commit", "-q", "-m", "later")
 
     with pytest.raises(AuditError, match="HEAD has moved"):
+        graph.resume(SLUG, {"decision": "approve"})
+    assert find_problem_lists(audit_project) == []
+
+
+def test_a_dirty_tree_stops_publish(audit_project: Project, start) -> None:
+    """Proves a list is not published while the project holds a file that the audit did not see."""
+    job, agents, graph = start()
+    (audit_project.root / "stray.py").write_text("x = 1\n", encoding="utf-8")
+
+    with pytest.raises(AuditError, match="working tree has changes"):
         graph.resume(SLUG, {"decision": "approve"})
     assert find_problem_lists(audit_project) == []
 
@@ -665,17 +675,6 @@ def test_the_diagram_matches_the_table(audit_project: Project) -> None:
         ("publish", "finish"),
     }
     assert gates == {"questions", "draft"}
-
-
-def test_the_copy_is_deleted_even_when_the_checker_fails(audit_project: Project, start) -> None:
-    """Proves the copy of the code is removed when the checker gives no answer."""
-    agents_turns = default_turns(audit_project) | {"checker": [None]}
-    with pytest.raises(NoAnswerError):
-        start(agents_turns)
-    copies = [job.data["copy"] for job in build_audit_graph(
-        audit_project, AuditSettings()).jobs()]
-
-    assert copies and not Path(copies[0]).exists()
 
 
 def test_the_prompts_and_profiles_are_kept(audit_project: Project, start) -> None:
@@ -796,8 +795,6 @@ def test_a_blind_audit_that_diffs_the_old_list_through_dotdot_halts_the_job(
 
     with pytest.raises(AuditError, match="blind audit"):
         start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
-        remove_copy(Path(job.data["copy"]))
     assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
 
 
@@ -815,8 +812,6 @@ def test_a_blind_audit_that_reads_through_home_halts_the_job(
 
     with pytest.raises(AuditError, match="blind audit"):
         start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
-        remove_copy(Path(job.data["copy"]))
     assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
 
 
@@ -836,8 +831,6 @@ def test_a_blind_audit_that_cds_to_the_root_halts_the_job(
 
     with pytest.raises(AuditError, match="blind audit"):
         start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
-        remove_copy(Path(job.data["copy"]))
     assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
 
 
@@ -875,12 +868,11 @@ def test_the_blind_audits_prompt_holds_none_of_the_old_titles(
     assert "# Evidence hints" in agents["rechecker"].prompts[0]
 
 
-def test_the_agents_hide_the_project_but_not_the_copy_they_work_in(
+def test_the_agents_work_in_the_project_with_ratchet_hidden(
     audit_project: Project, old_list: list
 ) -> None:
     """Proves a re-audit builds its agents, the blind audit and the rechecker included, to work in
-    the copy that prepare made, with the project and its .ratchet folder hidden and the copy
-    outside every hidden folder."""
+    the project's folder with .ratchet hidden, and reaches its draft with no copy of the code."""
     answers = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
                "list_reviewer_b": ListReview, "rechecker": RecheckAnswer,
                "pair_judge": PairAnswer, "checker": CheckAnswer}
@@ -899,14 +891,11 @@ def test_the_agents_hide_the_project_but_not_the_copy_they_work_in(
 
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
     assert len(scripted["fresh"].prompts) == 1 and len(scripted["rechecker"].prompts) == 1
+    assert "copy" not in job.data
     assert set(built) == set(answers)
-    copy = Path(job.data["copy"])
     for name, agent in built.items():
-        assert Path(agent.cwd) == copy, name
-        folders = {Path(pattern).parent if Path(pattern).name == "**" else Path(pattern)
-                   for pattern in agent.hidden}
-        assert folders == {audit_project.root, audit_project.folder}, name
-        assert not any(copy.is_relative_to(folder) for folder in folders), name
+        assert Path(agent.cwd) == audit_project.root, name
+        assert ".ratchet/**" in agent.hidden, name
 
 
 def test_the_rechecker_is_asked_again_for_a_missing_id_and_a_missing_citation(
@@ -944,8 +933,6 @@ def test_a_rechecker_that_stays_wrong_halts_the_audit(
 
     with pytest.raises(AuditError, match=f"{old_list[0].id}.*even when asked again"):
         start(turns, slug=AGAIN)
-    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
-        remove_copy(Path(job.data["copy"]))
 
 
 def test_a_rechecker_that_passes_output_to_git_halts_the_reaudit(
@@ -987,7 +974,6 @@ def test_the_retry_cost_check_counts_what_the_step_already_spent(
     with pytest.raises(AuditError, match="cap"):
         graph.start("", slug=AGAIN)
     job = graph.load(AGAIN)
-    remove_copy(Path(job.data["copy"]))
 
     prompts = audit_folder(audit_project, AGAIN) / "prompts"
     assert len(scripted["rechecker"].prompts) == 1
@@ -1140,9 +1126,159 @@ def test_a_blind_audit_that_leaves_the_copy_halts_the_job(
 
     with pytest.raises(AuditError, match="blind audit"):
         start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
-    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
-        remove_copy(Path(job.data["copy"]))
     assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
+# The text that Claude Code gives as the result of a Read call that its permission rules refuse.
+READ_DENIED = ("Permission to use Read has been denied because Claude Code is running in don't "
+               "ask mode.")
+
+
+def calling_tools(name: str, calls: list[tuple[str, dict, str | None]], answer: Turn) -> Turn:
+    """Returns a turn that writes a log in which the agent 'name' made each of 'calls', and then
+    gives the answer of the turn 'answer'.
+
+    Each call is a tool's name, its input and the text of a refusal. A call with a refusal is
+    followed by an error result that holds the text, as Claude Code logs a call that its
+    permission rules refused. A call whose refusal is None has no result.
+    """
+    def turn(prompt: str) -> dict:
+        lines = ["--- messages ---"]
+        for number, (tool, arguments, refusal) in enumerate(calls):
+            use = {"id": f"toolu_{number}", "name": tool, "input": arguments}
+            lines.append(json.dumps({"type": "AssistantMessage", "content": [use]}))
+            if refusal is not None:
+                result = {"tool_use_id": f"toolu_{number}", "content": refusal, "is_error": True}
+                lines.append(json.dumps({"type": "UserMessage", "content": [result]}))
+        Path(f"{name}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return answer(prompt) if callable(answer) else answer
+    return turn
+
+
+def test_a_search_for_an_api_path_does_not_halt_a_blind_audit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit that searches the history for the text "/api/v1" reaches its draft,
+    since the text names no path."""
+    fresh = calling_tools(
+        "fresh", [("Bash", {"command": 'git log -S "/api/v1" --oneline'}, None)],
+        fresh_turn(audit_project))
+
+    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]},
+                               slug=AGAIN)
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    assert (audit_folder(audit_project, AGAIN) / "fresh.json").is_file()
+
+
+def test_an_allowed_call_that_names_ratchet_halts_the_blind_audit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit that ran a command naming .ratchet, which the permission rules let
+    through, stops the job before its answer is kept."""
+    fresh = calling_tools(
+        "fresh", [("Bash", {"command": "git show HEAD:.ratchet/problems.md"}, None)],
+        fresh_turn(audit_project))
+
+    with pytest.raises(AuditError, match="blind audit"):
+        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
+def test_a_denied_call_is_noted_not_counted(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit's Read of .ratchet that the permission rules refused does not stop the
+    job, and is noted for the owner in the draft."""
+    fresh = calling_tools(
+        "fresh", [("Read", {"file_path": ".ratchet/problems.md"}, READ_DENIED)],
+        fresh_turn(audit_project))
+
+    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]},
+                               slug=AGAIN)
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
+    assert "the permission rules refused" in draft
+
+
+def short_name(path: Path) -> str:
+    """Returns the Windows 8.3 short form of an existing path, such as C:\\X\\RATCHE~1 for
+    C:\\X\\.ratchet, or "" when Windows gives none."""
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(1024)
+    ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+    return buffer.value
+
+
+@pytest.mark.skipif(os.name != "nt", reason="8.3 short names exist only on Windows")
+def test_an_allowed_read_of_a_short_name_path_into_ratchet_halts_the_blind_audit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit that read the old list through the 8.3 short name of .ratchet, which
+    names no '.ratchet' in its text, stops the job before its answer is kept."""
+    short = short_name(audit_project.root / ".ratchet")
+    if not short or Path(short).name == ".ratchet":
+        pytest.skip("this volume makes no short name for .ratchet")
+    fresh = calling_tools(
+        "fresh", [("Read", {"file_path": f"{short}\\{OLD_NAME}.md"}, None)],
+        fresh_turn(audit_project))
+
+    with pytest.raises(AuditError, match="blind audit"):
+        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
+def test_an_allowed_grep_outside_the_project_halts_the_blind_audit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit whose Grep searched the folder above the project, which the rules let
+    through, stops the job before its answer is kept."""
+    fresh = calling_tools(
+        "fresh", [("Grep", {"pattern": "P1", "path": str(audit_project.root.parent)}, None)],
+        fresh_turn(audit_project))
+
+    with pytest.raises(AuditError, match="blind audit"):
+        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
+# The text that Claude Code gives as the result of a Read of a file in a folder that a Read deny
+# rule covers.
+FOLDER_DENIED = ("<tool_use_error>File is in a directory that is denied by your permission "
+                 "settings.</tool_use_error>")
+
+
+def test_a_read_of_ratchet_refused_in_the_cli_file_wording_is_noted_not_halted(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit's Read of .ratchet that Claude Code refused with its wording for a
+    denied folder does not stop the job, and is noted for the owner in the draft."""
+    fresh = calling_tools(
+        "fresh", [("Read", {"file_path": ".ratchet/problems.md"}, FOLDER_DENIED)],
+        fresh_turn(audit_project))
+
+    job, agents, graph = start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]},
+                               slug=AGAIN)
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
+    assert "the permission rules refused" in draft
+
+
+def test_an_allowed_read_outside_the_project_halts_the_rechecker(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a rechecker that read a file outside the project, such as a session transcript of
+    Claude Code, stops the job."""
+    outside = audit_project.root.parent / "transcript.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    rechecker = calling_tools(
+        "rechecker", [("Read", {"file_path": str(outside)}, None)], recheck_turn(old_list))
+
+    with pytest.raises(AuditError, match="rechecker"):
+        start(reaudit_turns(audit_project, old_list) | {"rechecker": [rechecker]}, slug=AGAIN)
 
 
 def test_an_answered_old_question_is_decided_by_the_rechecker(
@@ -1215,3 +1351,198 @@ def test_findings_grouped_with_a_done_problem_reach_the_checker_and_the_done_lis
     lines = [line for line in done_section.splitlines()
              if line.startswith(f"- {target.id}. {target.title} (done)")]
     assert len(lines) == 1 and "nothing is left" in lines[0]
+
+
+# ---------------------------------------------------------------- .ratchet in the git history
+
+# The note that a re-audit gives when .ratchet is in the git history, with {commit} to fill in.
+NOT_BLIND = ("The blind audit was skipped. .ratchet was committed to git history in {commit}, so "
+             "the old problem lists can still be read there.")
+
+
+def git_output(root: Path, *arguments: str, env: dict[str, str] | None = None,
+               given: str | None = None) -> str:
+    """Runs git in the project, with 'given' as its input, checks that it worked, and returns its
+    output without the trailing newline."""
+    return subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True,
+                          text=True, env=env, input=given).stdout.strip()
+
+
+def commit_ratchet(root: Path, parent: str = "HEAD", name: str = "problems-old.md") -> str:
+    """Commits a file .ratchet/<name> on top of the commit 'parent', and returns the new commit's
+    hash. The project's work tree, index and branches are left as they were, so no branch holds
+    the commit until the caller moves one there."""
+    with tempfile.TemporaryDirectory() as scratch:
+        # build the commit's tree in an index of its own
+        env = os.environ | {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        git_output(root, "read-tree", parent, env=env)
+        blob = git_output(root, "hash-object", "-w", "--stdin",
+                          given="# Problems\n\n## P1. an old problem\n")
+        git_output(root, "update-index", "--add", "--cacheinfo",
+                   f"100644,{blob},.ratchet/{name}", env=env)
+        tree = git_output(root, "write-tree", env=env)
+        return git_output(root, "commit-tree", tree, "-p", parent, "-m", f"add {name}", env=env)
+
+
+def short_hash(root: Path, commit: str) -> str:
+    """Returns a commit's hash in git's short form."""
+    return git_output(root, "rev-parse", "--short", commit)
+
+
+def leave_in_reflog(root: Path, commit: str) -> None:
+    """Moves the current branch to a commit and back again, so that only the reflog reaches the
+    commit."""
+    branch = git_output(root, "symbolic-ref", "HEAD")
+    head = git_output(root, "rev-parse", "HEAD")
+    git_output(root, "update-ref", "-m", "move away", branch, commit)
+    git_output(root, "update-ref", "-m", "move back", branch, head)
+
+
+def non_blind_turns(project: Project, entries: list, **changes: object) -> dict[str, list[Turn]]:
+    """Returns the turns of a re-audit in which the auditor answers in place of the blind audit,
+    every agent answers and every old problem is open."""
+    turns = reaudit_turns(project, entries)
+    turns["auditor"] = turns.pop("fresh")
+    return turns | changes
+
+
+def test_a_reaudit_whose_history_holds_ratchet_skips_the_blind_audit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a re-audit of a project with .ratchet committed on another branch asks the auditor
+    in place of the blind audit, names the oldest such commit in the draft, and publishes a list
+    that says the audit was not blind."""
+    root = audit_project.root
+    first = commit_ratchet(root)
+    second = commit_ratchet(root, first, "problems-newer.md")
+    git_output(root, "update-ref", "refs/heads/other", second)
+    note = NOT_BLIND.format(commit=short_hash(root, first))
+
+    job, agents, graph = start(non_blind_turns(audit_project, old_list), slug=AGAIN)
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    assert agents["fresh"].prompts == []
+    assert len(agents["auditor"].prompts) == 1 and len(agents["rechecker"].prompts) == 1
+    assert job.data["ratchet_commit"] == short_hash(root, first)
+    draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
+    assert f"Not blind: {note}" in draft.splitlines()
+
+    job = graph.resume(AGAIN, {"decision": "approve"})
+
+    assert job.data["outcome"] == "published"
+    assert f"Not blind: {note}" in find_latest_problem_list(audit_project).text.splitlines()
+
+
+def test_ratchet_only_in_the_reflog_counts(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a .ratchet commit that only the reflog reaches still skips the blind audit, and is
+    the commit that the draft names."""
+    root = audit_project.root
+    commit = commit_ratchet(root)
+    leave_in_reflog(root, commit)
+    note = NOT_BLIND.format(commit=short_hash(root, commit))
+
+    job, agents, graph = start(non_blind_turns(audit_project, old_list), slug=AGAIN)
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    assert agents["fresh"].prompts == [] and len(agents["auditor"].prompts) == 1
+    assert job.data["ratchet_commit"] == short_hash(root, commit)
+    draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
+    assert f"Not blind: {note}" in draft.splitlines()
+
+
+def test_a_non_blind_audit_whose_auditor_reads_outside_the_project_halts(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves the auditor that stands in for the blind audit, when .ratchet is in the history, is
+    held to the same rule, so its Read of a file outside the project stops the job."""
+    root = audit_project.root
+    git_output(root, "update-ref", "refs/heads/other", commit_ratchet(root))
+    outside = root.parent / "elsewhere.md"
+    outside.write_text("x\n", encoding="utf-8")
+    auditor = calling_tools(
+        "auditor", [("Read", {"file_path": str(outside)}, None)], fresh_turn(audit_project))
+
+    with pytest.raises(AuditError, match="elsewhere.md"):
+        start(non_blind_turns(audit_project, old_list, auditor=[auditor]), slug=AGAIN)
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
+def test_a_first_audit_with_ratchet_in_history_has_no_note(
+    audit_project: Project, start
+) -> None:
+    """Proves a first audit, which has no blind part, runs as usual on a history that holds
+    .ratchet and writes no "Not blind" line."""
+    root = audit_project.root
+    git_output(root, "update-ref", "refs/heads/other", commit_ratchet(root))
+
+    job, agents, graph = start()
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    assert len(agents["auditor"].prompts) == 1 and agents["fresh"].prompts == []
+    assert job.data.get("ratchet_commit", "") == ""
+    draft = (audit_folder(audit_project) / "draft.md").read_text(encoding="utf-8")
+    assert "Not blind" not in draft
+
+
+def test_a_draft_step_of_a_job_without_ratchet_commit_still_runs(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a re-audit saved at the questions gate without ratchet_commit, as a job saved before
+    ratchet recorded it would be, still reaches its draft when resumed, with no "Not blind" line."""
+    question = {"kind": "rules", "title": "Is rounding twice deliberate",
+                "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
+                "what_would_settle": "A word from the owner."}
+    turns = reaudit_turns(audit_project, old_list) | {
+        "fresh": [auditor_turn(audit_project, problems=[], questions=[question])]}
+    job, agents, graph = start(turns, slug=AGAIN)
+    assert job.status == JobStatus.WAITING and job.next_step == "check"
+
+    # remove ratchet_commit from the saved job
+    saved = graph.state_dir / f"{AGAIN}.json"
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    del data["data"]["ratchet_commit"]
+    saved.write_text(json.dumps(data), encoding="utf-8")
+
+    job = graph.resume(AGAIN, {"answers": {"Q1": "Round only in pricing."}})
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
+    assert "Not blind" not in draft
+
+
+def test_a_non_blind_audit_with_a_denied_ratchet_read_is_noted_not_halted(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves that when the history holds .ratchet, a Read of .ratchet that the permission rules
+    refused the auditor, in place of the blind audit, is noted for the owner and does not halt the
+    job."""
+    root = audit_project.root
+    git_output(root, "update-ref", "refs/heads/other", commit_ratchet(root))
+    auditor = calling_tools(
+        "auditor", [("Read", {"file_path": ".ratchet/problems.md"}, READ_DENIED)],
+        fresh_turn(audit_project))
+
+    job, agents, graph = start(
+        non_blind_turns(audit_project, old_list, auditor=[auditor]), slug=AGAIN)
+
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    draft = (audit_folder(audit_project, AGAIN) / "draft.md").read_text(encoding="utf-8")
+    assert "the permission rules refused" in draft
+
+
+def test_a_checker_answer_for_no_group_is_noted_in_the_verdicts(
+    audit_project: Project, start
+) -> None:
+    """Proves a checker answer whose key names no group is left out, and that verdicts.md says
+    so in a note line."""
+    def checker(prompt: str) -> dict:
+        answer = checker_turn()(prompt)
+        stray = dict(answer["checks"][0], key="G999")
+        return answer | {"checks": [*answer["checks"], stray]}
+
+    start(default_turns(audit_project) | {"checker": [checker]})
+
+    verdicts = (audit_folder(audit_project) / "verdicts.md").read_text(encoding="utf-8")
+    assert "- note: the checker answered for G999, which is not a group" in verdicts

@@ -7,7 +7,7 @@ need. You do not talk to each other except through what the script passes on.
 
 ## How you work
 
-- You work in a read-only copy of the code. You may read files. If you have a shell, it runs
+- You work read-only in the project. The .ratchet folder and git's own files are closed to you. You may read other files. If you have a shell, it runs
   only `git log`, `git show`, `git blame`, `git diff` and `git status`. You never edit a file.
 - Stay inside the current working directory. Never read a path outside it.
 - Every claim needs evidence. A citation gives a file, a first line, a last line, the exact text

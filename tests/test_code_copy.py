@@ -38,7 +38,7 @@ def make_repo(path: Path) -> None:
 
 @pytest.fixture
 def source(tmp_path: Path) -> Path:
-    """Returns a repository with a branch, a tag, a remote and a history that holds .ratchet."""
+    """Returns a repository with a branch, a tag and a remote."""
     origin = tmp_path / "origin"
     make_repo(origin)
     commit_file(origin, "app.py", "x = 1\n", "start")
@@ -46,9 +46,6 @@ def source(tmp_path: Path) -> Path:
     git(tmp_path, "clone", "-q", str(origin), str(project))
     git(project, "config", "user.email", "a@example.com")
     git(project, "config", "user.name", "a")
-    commit_file(project, ".ratchet/problems-1.md", f"# {CANARY}\n", "add records")
-    git(project, "rm", "-r", "-q", "--cached", ".ratchet")
-    git(project, "commit", "-q", "-m", "untrack records")
     commit_file(project, "app.py", "x = 2\n", "change")
     git(project, "branch", "side")
     git(project, "tag", "v1")
@@ -57,7 +54,7 @@ def source(tmp_path: Path) -> Path:
 
 def test_copy_has_no_branch_tag_or_remote(source: Path) -> None:
     """Proves the copy is at HEAD and holds no branch, tag or remote."""
-    folder = make_copy(source, [], "strip")
+    folder = make_copy(source)
     try:
         copy = Repo(folder)
         assert copy.run("for-each-ref", "--format=%(refname)").strip() == ""
@@ -68,46 +65,9 @@ def test_copy_has_no_branch_tag_or_remote(source: Path) -> None:
     assert not folder.exists()
 
 
-def test_history_with_ratchet_is_stripped(source: Path) -> None:
-    """Proves a history that held .ratchet is rewritten, and the canary is in no commit."""
-    folder = make_copy(source, [], "strip")
-    try:
-        copy = Repo(folder)
-        assert copy.run("log", "--all", "--format=%h", "--", ".ratchet").strip() == ""
-        assert copy.run("log", "--all", "-S", CANARY, "--format=%h").strip() == ""
-        assert ".ratchet" not in copy.run("rev-list", "--all", "--objects")
-        assert copy.run("rev-list", "--all", "--count").strip() == "4"
-    finally:
-        remove_copy(folder)
-
-
-def test_hidden_paths_are_stripped_too(source: Path) -> None:
-    """Proves paths listed in 'hide' are removed from the copy's history."""
-    commit_file(source, "vendor/lib.py", "y = 1\n", "add vendor")
-    folder = make_copy(source, ["vendor"], "strip")
-    try:
-        assert not (folder / "vendor").exists()
-        assert Repo(folder).run("log", "--all", "--format=%h", "--", "vendor").strip() == ""
-    finally:
-        remove_copy(folder)
-
-
-def test_refuse_setting_raises_and_leaves_no_copy(
-    source: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Proves the refuse setting stops the copy when the history holds .ratchet."""
-    made = tmp_path / "temp"
-    made.mkdir()
-    monkeypatch.setattr("tempfile.tempdir", str(made))
-    with pytest.raises(CopyError, match="refuse"):
-        make_copy(source, [], "refuse")
-    assert list(made.iterdir()) == []
-
-
 def test_list_on_another_branch_is_not_copied(tmp_path: Path) -> None:
     """Proves a list committed only on another branch is not in the copy, not even as a loose
-    object, and that the refuse setting does not raise for it.
-    """
+    object."""
     project = tmp_path / "project"
     make_repo(project)
     commit_file(project, "app.py", "x = 1\n", "start")
@@ -117,7 +77,7 @@ def test_list_on_another_branch_is_not_copied(tmp_path: Path) -> None:
     commit_file(project, "app.py", "x = 2\n", "change")
     source = Repo(project)
     blob = source.run("rev-parse", "side:.ratchet/problems-1.md").strip()
-    folder = make_copy(project, [], "refuse")
+    folder = make_copy(project)
     try:
         copy = Repo(folder)
         found = subprocess.run(
@@ -136,11 +96,11 @@ def test_list_on_another_branch_is_not_copied(tmp_path: Path) -> None:
 
 
 def test_clean_history_is_copied_as_it_is(tmp_path: Path) -> None:
-    """Proves a history with no .ratchet files is not rewritten, even under the refuse setting."""
+    """Proves a history with no .ratchet files is not rewritten."""
     project = tmp_path / "project"
     make_repo(project)
     commit_file(project, "app.py", "x = 1\n", "start")
-    folder = make_copy(project, [], "refuse")
+    folder = make_copy(project)
     try:
         assert Repo(folder).run("rev-parse", "HEAD") == Repo(project).run("rev-parse", "HEAD")
     finally:

@@ -23,7 +23,13 @@ from rooster import AgentGraph, Job, JobStatus
 
 from ratchet.audit.agent_answers import Citation
 from ratchet.audit.agent_profiles import make_agents
-from ratchet.audit.audit_graph import AgentMaker, AuditError, build_audit_graph, done_ids
+from ratchet.audit.audit_graph import (
+    NOT_BLIND_NOTE,
+    AgentMaker,
+    AuditError,
+    build_audit_graph,
+    done_ids,
+)
 from ratchet.audit.code_copy import CopyError, remove_copy
 from ratchet.audit.list_markdown import (
     Draft,
@@ -106,6 +112,7 @@ def _load_draft(path: Path) -> Draft:
         dropped=[DraftDropped(**row) for row in data["dropped"]],
         bugs=data["bugs"],
         notes=data["notes"],
+        not_blind=data.get("not_blind", ""),
     )
 
 
@@ -277,7 +284,8 @@ def start_audit(
         edit: Opens a file for the owner to change.
 
     The copies that earlier audits left behind are deleted first, including those of audits that
-    were cut off by Ctrl-C. The copy of this audit is deleted unless it waits.
+    were cut off by Ctrl-C. The copy of this audit is deleted unless it waits. When a re-audit
+    could not be blind, because the project's git history holds .ratchet, the note is shown.
 
     Returns:
         The run. Its outcome is "waiting" when the owner has yet to decide on the draft.
@@ -286,8 +294,6 @@ def start_audit(
         AuditError: The audit may not start or it halted. An audit may not start while another
             waits, while rules.md is the template, or before `ratchet init`.
         ProjectError: The [audit] section of config.toml is wrong.
-        CopyError: The code's history holds .ratchet or a hidden path and history_with_ratchet is
-            "refuse", or the strip failed.
         TargetDesignError: The toml block of rules.md is malformed.
         GitError: A git command failed.
         NoAnswerError: An agent gave no answer in a step that needs it.
@@ -311,6 +317,8 @@ def start_audit(
     slug = _new_slug(graph, datetime.now().strftime("audit-%Y%m%d-%Hh%Mm"))
     try:
         job = graph.start(prompt, slug=slug)
+        if job.data.get("ratchet_commit", ""):
+            show(NOT_BLIND_NOTE.format(commit=job.data["ratchet_commit"]))
         if job.status == JobStatus.WAITING and job.next_step == AFTER_QUESTIONS:
             job = _answer_questions(graph, job, interactive, ask, show)
         if job.status == JobStatus.WAITING and job.next_step == AFTER_DRAFT:

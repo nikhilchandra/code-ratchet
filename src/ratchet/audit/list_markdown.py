@@ -15,6 +15,8 @@ from ratchet.refactor.problem_list import split_entries
 VALID_STATUSES = ("open", "new", "reopened", "blocked")
 # The marker that starts a note for the owner, which is removed when the list is published.
 NOTE_MARKER = "> Owner note:"
+# The label of the line that says why an audit was not blind, which is kept when the list is published.
+NOT_BLIND_LABEL = "Not blind:"
 # The heading of the section that holds the notes that belong to no entry.
 NOTES_HEADING = "## Owner notes"
 OPEN_HEADING = "## Open"
@@ -108,6 +110,7 @@ class Draft:
         done: The old problems that are done or gone.
         bugs: One line for each bug noticed.
         notes: Notes for the owner that belong to no entry.
+        not_blind: Why the audit was not blind, or "" for a blind audit or a first audit.
     """
 
     problems: list[DraftProblem] = field(default_factory=list)
@@ -116,6 +119,7 @@ class Draft:
     done: list[DraftDone] = field(default_factory=list)
     bugs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    not_blind: str = ""
 
 
 def render_draft(draft: Draft) -> str:
@@ -130,6 +134,8 @@ def render_draft(draft: Draft) -> str:
         bullet, so no reader takes it for a problem.
     """
     lines = ["# Problems", ""]
+    if draft.not_blind:
+        lines += [f"{NOT_BLIND_LABEL} {' '.join(draft.not_blind.split())}", ""]
     if draft.notes:
         lines += [NOTES_HEADING, ""]
         lines += [f"- {' '.join(note.split())}" for note in draft.notes]

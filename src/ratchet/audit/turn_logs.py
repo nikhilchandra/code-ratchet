@@ -1,8 +1,11 @@
-"""The module contains the functions that read an agent's turn log and report which paths the
-agent's tool calls touched, and which git commands the agent ran that write a file.
+"""The module contains the functions that read an agent's turn log and report which tool calls the
+agent made, which of them name .ratchet, reach into .ratchet or .git or out of the project through
+a file tool, or use a git option that reaches outside the project, and which inventory files the
+agent never opened.
 
-The audit uses them to tell whether an agent stayed inside its copy of the code, to list the
-inventory files that the agent never opened, and to halt on a git command that writes a file.
+The audit uses them as a backstop after a turn: the agents' permission rules and rooster's list of
+forbidden options stop such calls, and the log shows whether any call got through. The functions
+that guess from shell text whether a path leaves the project are kept for now and are not called.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import json
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 MESSAGES_MARK = "--- messages ---"
@@ -36,6 +39,27 @@ OPTION_PREFIX = re.compile(r"^-{0,2}[\w-]+=")
 # A word that is git's --output option, written in full or cut short to at least --ou, with or without a value.
 OUTPUT_OPTION = re.compile(r"^--ou(?:t(?:p(?:u(?:t)?)?)?)?(?:=|$)")
 
+# The quotes, spaces, slashes and shell operators that a command or a path is cut at to find its pieces.
+PIECE_SEPARATORS = re.compile(r"[\s\"'=:;&|<>(){},\\/]+")
+# The name of the folder that holds the old problem lists.
+RATCHET_FOLDER = ".ratchet"
+# The wording that a tool result opens with when the permission rules or rooster's hook refused the call.
+DENIAL_STARTS = (
+    "Permission to use",
+    "Permission denied by hook",
+    "Hook PreToolUse",
+    "File is in a directory that is denied",
+    "File is covered by a Read deny rule",
+    "the option ",
+    "the path ",
+)
+# The tag that the CLI wraps around a refusal that the permission rules or an input check made.
+ERROR_TAG = "<tool_use_error>"
+# The characters that start a wildcard in a Glob pattern.
+WILDCARDS = ("*", "?", "[", "{")
+# The folders inside the project that no file tool may reach.
+HIDDEN_FOLDERS = (RATCHET_FOLDER, ".git")
+
 # Absolute paths that every command may name.
 ALLOWED_PATHS = ("/dev/null",)
 
@@ -47,6 +71,8 @@ class ToolCall:
     name: str
     # The call's input, such as {"file_path": "src/a.py"} for Read.
     arguments: dict
+    # True when the call's result is an error that opens with the wording of a refusal.
+    denied: bool = False
 
 
 def read_tool_calls(log_path: Path) -> list[ToolCall]:
@@ -56,10 +82,13 @@ def read_tool_calls(log_path: Path) -> list[ToolCall]:
         log_path: The log file that the agent wrote for the turn.
 
     Returns:
-        One ToolCall for each tool use block in the log's messages. Lines that are not JSON, and
-        messages with no tool use, are skipped.
+        One ToolCall for each tool use block in the log's messages. A call is marked denied when
+        a later tool result block for its id is an error that opens with the wording of a refusal. Lines
+        that are not JSON, and messages with no tool use, are skipped.
     """
     calls: list[ToolCall] = []
+    ids: list[str] = []
+    refused: set[str] = set()
     in_messages = False
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line == MESSAGES_MARK:
@@ -75,20 +104,152 @@ def read_tool_calls(log_path: Path) -> list[ToolCall]:
             if not isinstance(content, list):
                 continue
             for block in content:
-                if isinstance(block, dict) and "name" in block and isinstance(block.get("input"), dict):
+                if not isinstance(block, dict):
+                    continue
+                if "name" in block and isinstance(block.get("input"), dict):
                     calls.append(ToolCall(str(block["name"]), block["input"]))
-    return calls
+                    ids.append(str(block.get("id", "")))
+                elif block.get("is_error") is True and _is_denial(block.get("content")):
+                    refused.add(str(block.get("tool_use_id", "")))
+    return [replace(call, denied=True) if call_id in refused else call for call, call_id in zip(calls, ids)]
 
 
-def paths_named(calls: list[ToolCall]) -> list[str]:
-    """Collects every path that a list of tool calls names.
+def _is_denial(content: object) -> bool:
+    """Tells whether the content of a tool result says that a call was refused.
+
+    Args:
+        content: The result block's content, which is a string or a list of blocks with 'text'.
+
+    Returns:
+        True when the text, after an ERROR_TAG and an "Error: " prefix are removed, opens with one
+        of DENIAL_STARTS. The same wording in the middle of an error, as in a message from a
+        command that was run, does not count.
+    """
+    if isinstance(content, list):
+        content = " ".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+    text = str(content).strip().removeprefix(ERROR_TAG).removeprefix("Error: ")
+    return text.startswith(DENIAL_STARTS)
+
+
+def forbidden_calls(log_path: Path, options: tuple[str, ...], root: Path) -> list[ToolCall]:
+    """Lists the tool calls in a turn that name .ratchet, use a forbidden git option, or reach
+    through a file tool into .ratchet or .git or out of the project.
+
+    Args:
+        log_path: The log file that the agent wrote for the turn.
+        options: The option words that no Bash command may contain, such as ("--no-index", "-C").
+        root: The project's folder, which relative paths are read from.
+
+    Returns:
+        Each such call in the order made, with its denied flag. A denied call was stopped by the
+        permission rules, so it did not touch anything.
+    """
+    found = []
+    for call in read_tool_calls(log_path):
+        command = call.arguments.get("command")
+        uses_option = call.name == "Bash" and isinstance(command, str) and _forbidden_option(command, options)
+        if uses_option or _names_ratchet(call) or _lands_out_of_bounds(call, root):
+            found.append(call)
+    return found
+
+
+def _names_ratchet(call: ToolCall) -> bool:
+    """Tells whether a tool call names the .ratchet folder.
+
+    Args:
+        call: One tool call.
+
+    Returns:
+        True when a path field, a Glob pattern, a Grep glob or a Bash command has a piece, once cut
+        at slashes, quotes, spaces, '=', ':' and shell operators, that is exactly '.ratchet'. The
+        regex 'pattern' of a Grep call is never checked, and a name such as not.ratchet.txt is not
+        the folder.
+    """
+    texts = [call.arguments.get(field) for field in PATH_FIELDS]
+    texts.append(call.arguments.get("pattern") if call.name == "Glob" else call.arguments.get("glob"))
+    if call.name == "Bash":
+        texts.append(call.arguments.get("command"))
+    return any(
+        isinstance(text, str) and RATCHET_FOLDER in PIECE_SEPARATORS.split(text) for text in texts
+    )
+
+
+def _real_place(value: str, base: str) -> str:
+    """Finds where a path really is, with links and Windows short names expanded and the case
+    form that the platform compares with."""
+    return os.path.normcase(os.path.realpath(os.path.join(base, os.path.expanduser(value))))
+
+
+def _is_below(place: str, folder: str) -> bool:
+    """Tells whether a real place is a folder itself or lies below it."""
+    return place == folder or place.startswith(folder if folder.endswith(os.sep) else folder + os.sep)
+
+
+def _lands_out_of_bounds(call: ToolCall, root: Path) -> bool:
+    """Tells whether a file tool call reaches, by where its paths really are, into .ratchet or
+    .git or out of the project.
+
+    Args:
+        call: One tool call.
+        root: The project's folder, which relative paths are read from.
+
+    Returns:
+        True when a path field, or the leading folders of a Glob pattern, resolves to a place
+        outside 'root' or inside its .ratchet or .git folder. A call with no path field works in
+        'root', so it is in bounds, and so is a call that is not a file tool.
+    """
+    base = str(root)
+    folder = _real_place(base, base)
+    hidden = [_real_place(name, base) for name in HIDDEN_FOLDERS]
+    checks = [(value, base) for field in PATH_FIELDS if isinstance(value := call.arguments.get(field), str)]
+    pattern = call.arguments.get("pattern")
+    if call.name == "Glob" and isinstance(pattern, str):
+        # the folders before the first wildcard are read from the 'path' field, else from the project
+        stops = [pattern.index(mark) for mark in WILDCARDS if mark in pattern]
+        head = pattern[: min(stops)] if stops else pattern
+        leading = head[: max(head.rfind("/"), head.rfind("\\")) + 1]
+        path = call.arguments.get("path")
+        if leading:
+            checks.append((leading, _real_place(path, base) if isinstance(path, str) else base))
+    for value, start in checks:
+        place = _real_place(value, start)
+        if not _is_below(place, folder) or any(_is_below(place, name) for name in hidden):
+            return True
+    return False
+
+
+def _forbidden_option(command: str, options: tuple[str, ...]) -> str:
+    """Finds the first forbidden option that a shell command uses, as rooster's hook does.
+
+    Args:
+        command: The shell command, which may chain several commands.
+        options: The option words to look for.
+
+    Returns:
+        The first option that a word of the command matches, or "" when none does. A word matches
+        an option when it is the option, the option followed by '=' and a value, or, for an option
+        that starts with '--', a prefix of it that git accepts, of at least 4 characters.
+    """
+    for word in _tokens(command):
+        head = word.split("=", 1)[0]
+        for option in options:
+            if word == option:
+                return option
+            if option.startswith("--") and (
+                head == option or (len(head) >= 4 and head.startswith("--") and option.startswith(head))
+            ):
+                return option
+    return ""
+
+
+def _file_tool_paths(calls: list[ToolCall]) -> list[str]:
+    """Collects the paths that the arguments of a list of tool calls name.
 
     Args:
         calls: The tool calls of one turn.
 
     Returns:
-        The path fields of every call, the pattern of a Glob call, the 'glob' field of a Grep
-        call, and every absolute, '~', '..' or variable path written in the command text of a Bash
+        The path fields of every call, the pattern of a Glob call and the 'glob' field of a Grep
         call. A relative pattern or glob is joined to the call's 'path' field. The regex 'pattern'
         of a Grep call is not a path and is left out. Relative paths are kept as written.
     """
@@ -104,6 +265,23 @@ def paths_named(calls: list[ToolCall]) -> list[str]:
         pattern = call.arguments.get("pattern") if call.name == "Glob" else call.arguments.get("glob")
         if call.name in ("Glob", "Grep") and isinstance(pattern, str) and pattern:
             paths.append(_joined(base, pattern))
+    return paths
+
+
+def paths_named(calls: list[ToolCall]) -> list[str]:
+    """Collects every path that a list of tool calls names.
+
+    Args:
+        calls: The tool calls of one turn.
+
+    Returns:
+        The path fields of every call, the pattern of a Glob call, the 'glob' field of a Grep
+        call, and every absolute, '~', '..' or variable path written in the command text of a Bash
+        call. A relative pattern or glob is joined to the call's 'path' field. The regex 'pattern'
+        of a Grep call is not a path and is left out. Relative paths are kept as written.
+    """
+    paths = _file_tool_paths(calls)
+    for call in calls:
         command = call.arguments.get("command")
         if call.name == "Bash" and isinstance(command, str):
             paths.extend(absolute_paths_in(command))
@@ -255,7 +433,7 @@ def unopened_files(log_path: Path, copy: Path, files: list[str]) -> list[str]:
         The files that no tool call opened, in the order given.
     """
     calls = read_tool_calls(log_path)
-    opened = {_resolved(copy, path) for path in paths_named(calls)}
+    opened = {_resolved(copy, path) for path in _file_tool_paths(calls)}
     commands = [str(call.arguments.get("command", "")) for call in calls if call.name == "Bash"]
     return [
         file

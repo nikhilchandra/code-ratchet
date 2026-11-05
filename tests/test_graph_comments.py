@@ -2,7 +2,6 @@
 
 import inspect
 
-from ratchet.audit import audit_graph
 from ratchet.refactor import job_graph
 
 
@@ -46,11 +45,3 @@ def test_job_graph_docstring_wraps_at_100_chars():
     lines = inspect.getsource(job_graph).split('"""')[1].splitlines()
     assert max(len(line) for line in lines) <= 100
 
-
-def test_audit_check_step_narrates_the_missing_copy():
-    source = inspect.getsource(audit_graph.build_audit_graph)
-    assert "would make every citation fail" not in source
-    assert (
-        "# halt when the copy of the code is gone, since no citation can be checked against it"
-        in source
-    )

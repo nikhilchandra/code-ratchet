@@ -12,11 +12,9 @@ frozen = []
 
 # Settings for ratchet audit. Every one has a default, so this section may stay empty.
 # [audit]
-# Path patterns, relative to the project, that are left out of the audit's copy of the code.
+# Path patterns, relative to the project, that are denied to the agents' file tools in the audit's
+# copy of the code.
 # hide = []
-# What to do when the code's git history holds old .ratchet files: "strip" removes them from the
-# copy, and "refuse" stops the audit.
-# history_with_ratchet = "strip"
 # The most pairs of findings that the pair judge is asked about.
 # max_pairs = 40
 # The most one audit may spend in dollars, counting every agent's budget.

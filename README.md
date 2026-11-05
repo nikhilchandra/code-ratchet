@@ -120,7 +120,9 @@ one audit may wait at a time, and `--approve` is refused when HEAD has moved sin
 began.
 
 Agents work in a temporary copy of the code with real git. The copy has no branches, tags or
-remote, and the old `.ratchet` files are stripped from its history.
+remote. When `.ratchet` appears anywhere in the project's git history, a re-audit skips the
+blind audit, prints a note that names the oldest commit that holds it, and marks the published list
+"Not blind".
 
 **The format of an entry.** A published list gives each problem a heading, then field lines,
 then its text, evidence, simpler option, "Done when" and tests:
@@ -145,8 +147,7 @@ line that the next re-audit reads), "Dropped" (ids `D1`) and "Bugs noticed".
 
 ```toml
 [audit]
-hide = []                       # path patterns left out of the audit's copy
-history_with_ratchet = "strip"  # or "refuse"
+hide = []                       # path patterns denied to the agents' file tools in the copy
 max_pairs = 40                  # most pairs the pair judge is asked about
 max_cost_usd = 40.0             # the most one audit may spend, at list price
 

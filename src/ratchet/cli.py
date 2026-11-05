@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit = commands.add_parser(
         AUDIT,
         help="audit the code against the target design and the standard, and write a problem list",
-        description="Has a team of agents audit a copy of the code and draft a problem list. "
+        description="Has a team of agents audit the code and draft a problem list. "
                     "In a terminal you answer their questions and approve the draft. With no "
                     "terminal, or when you choose later, the audit waits for --approve or "
                     "--discard. A project that has a list gets a re-audit of it.",

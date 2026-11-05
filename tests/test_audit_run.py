@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 
 import pytest
-from rooster import Job, JobStatus
 
 from ratchet.architecture import check_architecture
 from ratchet.audit.agent_answers import (
@@ -28,17 +26,25 @@ from ratchet.audit.audit_run import (
     start_audit,
 )
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
-from ratchet.audit.code_copy import remove_copy
 from ratchet.audit.settings import AuditSettings
 from ratchet.project import Config, Project
 from ratchet.refactor.problem_list import find_latest_problem_list, find_problem_lists
 from scripted_agents import ScriptedAgent
 from test_audit_graph import (  # noqa: F401
+    NOT_BLIND,
+    age_list,
     audit_project,
     auditor_turn,
     build_project,
     checker_turn,
+    commit_ratchet,
+    continuing_checker,
     default_turns,
+    fresh_turn,
+    git_output,
+    judge_turn,
+    recheck_turn,
+    short_hash,
 )
 
 ANSWERS = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
@@ -242,30 +248,11 @@ def test_discarding_an_audit_cut_off_at_the_questions_calls_no_checker(
 ) -> None:
     """Proves discarding an audit left at the questions gate ends it with no checker turn."""
     agents = cut_off_at_questions(audit_project)
-    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
 
     done = settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
 
     assert done.outcome == "discarded" and not find_problem_lists(audit_project)
     assert agents["checker"].prompts == []
-    assert not copy.exists()
-
-
-def test_approving_an_audit_cut_off_at_the_questions_halts_when_the_copy_is_gone(
-    audit_project: Project,
-) -> None:
-    """Proves approving an audit left at the questions gate, whose copy has since been deleted,
-    halts before the checker is called and no longer counts as a waiting audit."""
-    agents = cut_off_at_questions(audit_project)
-    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
-    remove_copy(copy)
-
-    with pytest.raises(AuditError, match="copy"):
-        settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
-
-    assert agents["checker"].prompts == []
-    with pytest.raises(AuditError, match="no audit is waiting"):
-        settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
 
 def test_fresh_audits_as_a_first_audit_when_a_list_exists(audit_project: Project) -> None:
@@ -280,97 +267,6 @@ def test_fresh_audits_as_a_first_audit_when_a_list_exists(audit_project: Project
     assert agents["rechecker"].prompts == [] and agents["auditor"].prompts
 
 
-def only_job(project: Project) -> Job:
-    """Returns the one audit job that the project has."""
-    [job] = build_audit_graph(project, AuditSettings()).jobs()
-    return job
-
-
-def test_a_halted_audit_deletes_its_copy(
-    audit_project: Project, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Proves an audit that halts at the cost cap after its copy was made leaves no copy behind."""
-    monkeypatch.setattr("ratchet.audit.audit_run.load_settings",
-                        lambda _: AuditSettings(max_cost_usd=12.0))
-    _, maker = scripted(audit_project)
-
-    with pytest.raises(AuditError, match="cap"):
-        start_audit(audit_project, agent_maker=maker, interactive=False)
-
-    job = only_job(audit_project)
-    assert job.status == JobStatus.HALTED and "copy" in job.data
-    copy = Path(job.data["copy"])
-    try:
-        assert not copy.exists()
-    finally:
-        remove_copy(copy)
-
-
-def test_an_audit_sweeps_the_copies_of_earlier_halted_audits(audit_project: Project) -> None:
-    """Proves an audit that starts deletes the copy that an earlier halted audit left behind, and
-    still reaches its draft."""
-    agents, _ = scripted(audit_project)
-    graph = build_audit_graph(audit_project, AuditSettings(max_cost_usd=12.0), lambda *_: agents)
-    with pytest.raises(AuditError, match="cap"):
-        graph.start("", slug="capped")
-    capped = Path(graph.load("capped").data["copy"])
-    assert capped.is_dir()
-
-    try:
-        run = waiting_run(audit_project)
-
-        assert run.outcome == "waiting"
-        assert not capped.exists()
-    finally:
-        remove_copy(capped)
-
-
-def test_an_audit_sweeps_the_copy_of_an_earlier_interrupted_audit(audit_project: Project) -> None:
-    """Proves an audit that starts deletes the copy of an earlier audit that was cut off mid-step
-    and stayed saved as running, and still reaches its draft."""
-    agents, _ = scripted(audit_project)
-    graph = build_audit_graph(audit_project, AuditSettings(max_cost_usd=12.0), lambda *_: agents)
-    with pytest.raises(AuditError, match="cap"):
-        graph.start("", slug="capped")
-    copy = Path(graph.load("capped").data["copy"])
-    assert copy.is_dir()
-    # save the capped job as running, as Ctrl-C in the middle of a step leaves it
-    saved = graph.state_dir / "capped.json"
-    data = json.loads(saved.read_text(encoding="utf-8"))
-    data["status"] = JobStatus.RUNNING.value
-    saved.write_text(json.dumps(data), encoding="utf-8")
-
-    try:
-        run = waiting_run(audit_project)
-
-        assert run.outcome == "waiting"
-        assert not copy.exists()
-    finally:
-        remove_copy(copy)
-
-
-def test_an_audit_interrupted_in_a_step_deletes_its_copy(audit_project: Project) -> None:
-    """Proves an audit cut off by Ctrl-C during the auditor's turn, after its copy was made, is
-    left running but deletes its copy."""
-    agents, maker = scripted(audit_project)
-
-    def interrupt(prompt: str) -> dict:
-        raise KeyboardInterrupt
-
-    agents["auditor"].turns = [interrupt]
-
-    with pytest.raises(KeyboardInterrupt):
-        start_audit(audit_project, agent_maker=maker, interactive=False)
-
-    job = only_job(audit_project)
-    assert job.status == JobStatus.RUNNING and "copy" in job.data
-    copy = Path(job.data["copy"])
-    try:
-        assert not copy.exists()
-    finally:
-        remove_copy(copy)
-
-
 def test_an_audit_after_one_that_halted_in_prepare_still_starts(audit_project: Project) -> None:
     """Proves an audit that halted on a dirty tree, before it made a copy, does not stop the next
     audit from reaching its draft."""
@@ -382,20 +278,6 @@ def test_an_audit_after_one_that_halted_in_prepare_still_starts(audit_project: P
     stray.unlink()
 
     assert waiting_run(audit_project).outcome == "waiting"
-
-
-def test_a_waiting_audit_keeps_its_copy(audit_project: Project) -> None:
-    """Proves the copy of an audit that waits at the questions gate survives both the interrupt
-    and a second audit that is refused."""
-    agents = cut_off_at_questions(audit_project)
-    job = only_job(audit_project)
-    copy = Path(job.data["copy"])
-
-    with pytest.raises(AuditError, match="--approve"):
-        start_audit(audit_project, agent_maker=lambda *_: agents, interactive=False)
-
-    assert only_job(audit_project).status == JobStatus.WAITING and copy.is_dir()
-    settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
 
 
 def test_dropping_a_copy_ignores_a_path_that_is_not_a_copy(tmp_path: Path) -> None:
@@ -449,72 +331,69 @@ def test_a_new_slug_counts_past_every_name_taken(audit_project: Project) -> None
     assert _new_slug(graph, "audit-x") == "audit-x-3"
 
 
-def test_discarding_with_another_temp_folder_leaves_the_copy_and_still_ends(
-    audit_project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def published_old_list(project: Project) -> list:
+    """Publishes a first audit with no terminal, ages its list so that a second list can be
+    published in the same minute, and returns the list's problem entries."""
+    waiting_run(project)
+    settle_audit(project, APPROVE)
+    entries = [entry for entry in find_latest_problem_list(project).entries if entry.is_problem]
+    age_list(project)
+    return entries
+
+
+def reaudit_agents(project: Project, entries: list, blind: str) -> dict[str, ScriptedAgent]:
+    """Returns scripted agents for a re-audit in which every old problem is open. The agent named
+    'blind', which is "fresh" or "auditor", gives the audit that runs beside the rechecker."""
+    turns = {blind: [fresh_turn(project)], "rechecker": [recheck_turn(entries)],
+             "pair_judge": [judge_turn], "checker": [continuing_checker()]}
+    return {name: ScriptedAgent(name, schema, turns.get(name, []))
+            for name, schema in ANSWERS.items()}
+
+
+def test_a_reaudit_whose_history_holds_ratchet_shows_the_note_and_publishes(
+    audit_project: Project,
 ) -> None:
-    """Proves a discard still ends the audit when the temp folder is not the one the copy was made
-    in, and that remove_copy's refusal leaves the copy alone."""
-    agents = cut_off_at_questions(audit_project)
-    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
-    monkeypatch.setattr("tempfile.tempdir", str(tmp_path / "othertemp"))
+    """Proves a re-audit of a project with .ratchet committed on another branch shows the owner
+    the note that names the commit, skips the blind audit, and publishes a list that says the
+    audit was not blind."""
+    entries = published_old_list(audit_project)
+    root = audit_project.root
+    commit = commit_ratchet(root)
+    git_output(root, "update-ref", "refs/heads/other", commit)
+    note = NOT_BLIND.format(commit=short_hash(root, commit))
+    agents = reaudit_agents(audit_project, entries, "auditor")
+    shown: list[str] = []
 
-    done = settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
+    run = start_audit(audit_project, agent_maker=lambda *_: agents, interactive=False,
+                      show=shown.append)
 
-    assert done.outcome == "discarded"
-    assert copy.is_dir()
-    monkeypatch.undo()
-    remove_copy(copy)
+    assert run.outcome == "waiting"
+    assert note in shown
+    assert agents["fresh"].prompts == [] and len(agents["auditor"].prompts) == 1
 
+    done = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
-def test_approving_with_another_temp_folder_still_reaches_the_draft(
-    audit_project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Proves the checker's work is kept when remove_copy refuses the copy after it."""
-    agents = cut_off_at_questions(audit_project)
-    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
-    monkeypatch.setattr("tempfile.tempdir", str(tmp_path / "othertemp"))
-
-    run = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
-
-    assert run.outcome == "waiting" and Path(run.draft_path).is_file()
-    monkeypatch.undo()
-    remove_copy(copy)
+    assert done.outcome == "published"
+    published = find_latest_problem_list(audit_project)
+    assert published.name == done.list_name
+    assert f"Not blind: {note}" in published.text.splitlines()
 
 
-def test_approving_with_a_locked_copy_still_reaches_the_draft(
-    audit_project: Project, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Proves the checker's work is kept when a locked file stops remove_copy deleting the copy."""
-    agents = cut_off_at_questions(audit_project)
-    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
+def test_a_reaudit_with_a_clean_history_runs_the_blind_audit(audit_project: Project) -> None:
+    """Proves a re-audit of a project whose history never held .ratchet asks the blind audit and
+    not the auditor, shows no note, and publishes a list with no "Not blind" line."""
+    entries = published_old_list(audit_project)
+    agents = reaudit_agents(audit_project, entries, "fresh")
+    shown: list[str] = []
 
-    def locked(folder: Path) -> None:
-        raise PermissionError(f"{folder} is locked")
+    run = start_audit(audit_project, agent_maker=lambda *_: agents, interactive=False,
+                      show=shown.append)
 
-    monkeypatch.setattr("ratchet.audit.audit_graph.remove_copy", locked)
+    assert run.outcome == "waiting"
+    assert len(agents["fresh"].prompts) == 1 and agents["auditor"].prompts == []
+    assert not any("blind audit was skipped" in line for line in shown)
 
-    run = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
+    done = settle_audit(audit_project, APPROVE, agent_maker=lambda *_: agents)
 
-    assert run.outcome == "waiting" and Path(run.draft_path).is_file()
-    monkeypatch.undo()
-    remove_copy(copy)
-
-
-def test_discarding_with_a_locked_copy_still_ends(
-    audit_project: Project, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Proves a discard still ends the audit when a locked file stops remove_copy deleting the
-    copy."""
-    agents = cut_off_at_questions(audit_project)
-    copy = Path(next(iter(build_audit_graph(audit_project, AuditSettings()).jobs())).data["copy"])
-
-    def locked(folder: Path) -> None:
-        raise PermissionError(f"{folder} is locked")
-
-    monkeypatch.setattr("ratchet.audit.audit_graph.remove_copy", locked)
-
-    done = settle_audit(audit_project, DISCARD, agent_maker=lambda *_: agents)
-
-    assert done.outcome == "discarded"
-    monkeypatch.undo()
-    remove_copy(copy)
+    assert done.outcome == "published"
+    assert "Not blind" not in find_latest_problem_list(audit_project).text

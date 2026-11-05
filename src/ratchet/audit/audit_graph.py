@@ -3,17 +3,20 @@ published problem list, and the agents that the graph calls.
 
 A job goes through these steps:
     prepare: code checks that the audit may start, runs the code checker, takes the inventory and
-        makes the copy of the code that the agents work in.
+        records the commit the audit starts on.
     audit: the auditor writes the list. In a re-audit the blind audit and the rechecker run
         instead, and the rechecker checks every old problem against the code as it stands now.
+        When the project's git history holds .ratchet, the old lists can be read there, so the
+        auditor takes the blind audit's place and the audit is marked as not blind.
     review: list reviewers A and B each review the list, and may add problems. A re-audit skips
         this step.
     group: code joins the findings that are about the same problem, and the pair judge decides the
         pairs that its rules cannot settle.
-    check-citations: code checks every citation against the copy and fixes lines that moved.
+    check-citations: code checks every citation against the code at that commit and fixes lines
+        that moved.
     questions: a gate. The questions for the owner are written, and the job waits for the answers.
-    check: code checks that the copy is still there, the checker judges the groups, code applies
-        its verdicts, and the copy is deleted.
+    check: code checks that HEAD has not moved and the working tree is clean, the checker judges
+        the groups, and code applies its verdicts.
     draft: a gate. The ids are given out, the draft is written, and the job waits for approval.
     publish: the list is written with its ledger, the rules decisions are added to rules.md, and
         everything is committed in the records repository.
@@ -25,7 +28,6 @@ and job.data["old_list"] names the newest list. When the job ends, job.data["out
 
 from __future__ import annotations
 
-import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import fields, is_dataclass, replace
@@ -59,6 +61,7 @@ from ratchet.audit.agent_answers import (
     RecheckAnswer,
 )
 from ratchet.audit.agent_profiles import (
+    FORBIDDEN_OPTIONS,
     FRESH,
     Role,
     format_auditor_prompt,
@@ -69,7 +72,6 @@ from ratchet.audit.agent_profiles import (
     make_agents,
 )
 from ratchet.audit.citations import CitationResult, check_citations, render_report
-from ratchet.audit.code_copy import CopyError, make_copy, remove_copy
 from ratchet.audit.code_facts import InventoryItem, build_inventory
 from ratchet.audit.evidence_hints import build_evidence_hints, renamed_files
 from ratchet.audit.grouping import (
@@ -98,7 +100,7 @@ from ratchet.audit.list_markdown import (
     strip_owner_notes,
 )
 from ratchet.audit.settings import AuditSettings
-from ratchet.audit.turn_logs import output_commands, paths_outside, unopened_files
+from ratchet.audit.turn_logs import ToolCall, forbidden_calls, unopened_files
 from ratchet.audit.verdicts import AppliedVerdicts, DroppedEntry, FinalEntry, apply_verdicts
 from ratchet.git import Repo
 from ratchet.project import FOLDER, Project, read_markdown
@@ -132,7 +134,7 @@ LIST_TIME = "problems-%Y%m%d-%Hh%Mm"
 EVENT_TIME = "%Y-%m-%d %H:%M"
 
 # A function that makes the audit's agents, with the arguments of make_agents().
-AgentMaker = Callable[[Project, AuditSettings, Path, Path], dict[str, Agent]]
+AgentMaker = Callable[[Project, AuditSettings, Path], dict[str, Agent]]
 
 
 class AuditError(RuntimeError):
@@ -625,10 +627,26 @@ def _add_rules(text: str, rules: list[str], slug: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# The note for the owner when a re-audit could not be blind, given the oldest commit with .ratchet.
+NOT_BLIND_NOTE = (
+    "The blind audit was skipped. .ratchet was committed to git history in {commit}, so the old "
+    "problem lists can still be read there."
+)
+
+
 def _ignores_ratchet(repo: Repo) -> bool:
     """Answers whether a project's git ignores the .ratchet folder and does not track it."""
     ignored = repo.run("check-ignore", FOLDER, check=False).strip()
     return bool(ignored) and not repo.run("ls-files", "--", FOLDER).strip()
+
+
+def _oldest_ratchet_commit(repo: Repo) -> str:
+    """Returns the short hash of the oldest commit that holds a .ratchet path, or "" for none.
+
+    The search covers every branch, tag, stash and reflog entry of the project.
+    """
+    commits = repo.run("log", "--all", "--reflog", "--reverse", "--format=%h", "--", FOLDER)
+    return commits.split()[0] if commits.strip() else ""
 
 
 def build_audit_graph(
@@ -638,9 +656,8 @@ def build_audit_graph(
     """Returns the graph that carries one audit through its nine steps.
 
     The job's prompt is the owner's request given with -p, or "". The agents are made when the
-    first step that needs them runs, since they work in the copy that the prepare step makes. A
-    job that waits at a gate and is resumed in a new process makes them again from the copy's
-    path in job.data["copy"].
+    first step that needs them runs. They work in the project, so a job that waits at a gate and
+    is resumed in a new process makes them again from the same folders.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -663,7 +680,7 @@ def build_audit_graph(
     def agents_of(job: Job) -> dict[str, Agent]:
         """Returns the audit's agents, making them the first time they are asked for."""
         if not agents:
-            agents.update(agent_maker(project, settings, Path(job.data["copy"]), folder_of(job)))
+            agents.update(agent_maker(project, settings, folder_of(job)))
         return agents
 
     def check_cost(job: Job, *budgets: float, spent: float = 0.0) -> None:
@@ -685,20 +702,23 @@ def build_audit_graph(
     def check_turn(
         job: Job, name: str, log_path: Path | None, files: list[str] | None = None
     ) -> None:
-        """Halts the audit when an agent's turn passed --output to git, which writes a file. Notes
-        the paths outside the copy that the turn touched, and the files it never opened."""
+        """Halts the audit when an agent's turn ran a tool call that names .ratchet or .git,
+        leaves the project, or uses a forbidden git option. Notes the calls that were refused,
+        and the files of the inventory that the turn never opened."""
         if log_path is None or not log_path.is_file():
             return
-        writing = output_commands(log_path)
-        if writing:
-            raise AuditError(f"the {name} passed --output to git, which writes a file: "
-                             f"{'; '.join(writing[:3])}")
-        copy = Path(job.data["copy"])
-        outside = paths_outside(log_path, copy)
-        if outside:
-            note(job, f"the {name} named paths outside the copy of the code: "
-                      f"{', '.join(outside[:5])}")
-        unopened = unopened_files(log_path, copy, files or [])
+        calls = forbidden_calls(log_path, FORBIDDEN_OPTIONS, project.root)
+        ran = [_call_text(call) for call in calls if not call.denied]
+        if ran:
+            who = "blind audit" if name == FRESH else name
+            raise AuditError(f"the {who} ran a tool call that names {FOLDER} or .git, leaves the "
+                             f"project, or uses a forbidden git option, so it may have seen the old problem lists: "
+                             f"{'; '.join(ran[:3])}")
+        refused = [_call_text(call) for call in calls if call.denied]
+        if refused:
+            note(job, f"the permission rules refused {len(refused)} calls of the {name} that name "
+                      f"{FOLDER} or .git, leave the project, or use a forbidden git option, such as {'; '.join(refused[:3])}")
+        unopened = unopened_files(log_path, project.root, files or [])
         if unopened:
             note(job, f"the {name} never opened {len(unopened)} files of the inventory, such as "
                       f"{', '.join(unopened[:5])}")
@@ -730,7 +750,8 @@ def build_audit_graph(
         _write_json(folder / "code-findings.json", check_architecture(project, design))
         _write_json(folder / "inventory.json", build_inventory(project, design))
         job.data.update(head=repo.run("rev-parse", "HEAD").strip(), reaudit=reaudit, notes=[],
-                        old_list="", published="")
+                        old_list="", published="",
+                        ratchet_commit=_oldest_ratchet_commit(repo) if reaudit else "")
         if reaudit:
             created, path = lists[-1]
             published = publish_time(project, path.stem, created)
@@ -740,7 +761,6 @@ def build_audit_graph(
             (folder / "evidence-hints.md").write_text(
                 build_evidence_hints(project.root, old_entries, renames), encoding="utf-8")
             job.data.update(old_list=path.stem, published=published)
-        job.data["copy"] = str(make_copy(project.root, settings.hide, settings.history_with_ratchet))
         return "audit"
 
     def note_units(job: Job, name: str, answer: AuditorAnswer, inventory: list[InventoryItem]) -> None:
@@ -753,14 +773,16 @@ def build_audit_graph(
 
     def audit_again(job: Job) -> str:
         """Runs the blind audit and the rechecker together, and asks the rechecker once more for
-        the old ids it left out or gave no current place."""
+        the old ids it left out or gave no current place. When the history holds .ratchet, the
+        auditor runs in the blind audit's place."""
         folder = folder_of(job)
-        copy = Path(job.data["copy"])
+        copy = project.root
         old_name = job.data["old_list"]
         check_cost(job, settings.auditor.budget_usd, settings.rechecker.budget_usd)
         inventory = _load_inventory(folder)
 
         # the blind audit gets no list, ledger or earlier answer
+        ratchet_commit = job.data.get("ratchet_commit", "")
         fresh_prompt = format_auditor_prompt(job.prompt, _load_code_findings(folder), inventory)
         old_text = read_markdown(project.folder, f"{old_name}.md")
         old_ids = [entry.id for entry in split_entries(old_text) if entry.is_problem]
@@ -771,22 +793,18 @@ def build_audit_graph(
         hints = (folder / "evidence-hints.md").read_text(encoding="utf-8")
         recheck_prompt = format_recheck_prompt(old_text, histories, records, git_log, hints)
         chosen = agents_of(job)
+        # with .ratchet in the history, the auditor stands in for the blind audit
+        blind = chosen[Role.AUDITOR if ratchet_commit else FRESH]
         fresh_reply, recheck_reply = ask_together(
-            [(chosen[FRESH], fresh_prompt), (chosen[Role.RECHECKER], recheck_prompt)],
+            [(blind, fresh_prompt), (chosen[Role.RECHECKER], recheck_prompt)],
             folder / "prompts")
         for reply in (fresh_reply, recheck_reply):
             if isinstance(reply, NoAnswerError):
                 raise reply
 
-        # a blind audit that touched anything outside the copy is contaminated
-        log_path = fresh_reply.log_path
-        outside = paths_outside(log_path, copy) if log_path and log_path.is_file() else []
-        if outside:
-            raise AuditError("the blind audit named paths outside the copy of the code, so it may "
-                             f"have seen the old list: {', '.join(outside[:5])}")
+        check_turn(job, FRESH, fresh_reply.log_path, sorted({item.file for item in inventory}))
         _write_json(folder / f"{FRESH}.json", fresh_reply.data)
         note_units(job, FRESH, fresh_reply.data, inventory)
-        check_turn(job, FRESH, fresh_reply.log_path, sorted({item.file for item in inventory}))
         check_turn(job, "rechecker", recheck_reply.log_path)
 
         # ask again for the old ids that have no current place, and keep the better checks
@@ -891,7 +909,7 @@ def build_audit_graph(
     @graph.step("check-citations", next=("questions", "check"))
     def check_citations_step(job: Job) -> str:
         folder = folder_of(job)
-        copy = Path(job.data["copy"])
+        copy = project.root
         result = _load_groups(folder)
         results: list[CitationResult] = []
         groups = [_fix_group(copy, group, results) for group in result.groups]
@@ -916,109 +934,99 @@ def build_audit_graph(
     def check(job: Job) -> str:
         # a discard decided at the questions gate goes straight to publish, with no checker turn
         if job.data.get("decision") == "discard":
-            # a copy that remove_copy refuses or cannot delete, such as a locked file, is left for the sweep
-            with contextlib.suppress(CopyError, OSError):
-                remove_copy(Path(job.data["copy"]))
             return "publish"
-        # halt when the copy of the code is gone, since no citation can be checked against it
-        copy = Path(job.data["copy"])
-        if not copy.is_dir():
-            raise AuditError(
-                f"the copy of the code at {copy} is gone, so no citation can be checked against "
-                "it. It may have been deleted while the audit waited for answers. Start a new "
-                "audit with `ratchet audit`.")
+        # halt when the code is not what the audit started on, since the citations come from it
+        moved = _moved_since_start(project, job.data["head"])
+        if moved:
+            raise AuditError(f"{moved}, so no citation can be checked against the code the audit "
+                             "started on. Run `ratchet audit` again.")
+        copy = project.root
         folder = folder_of(job)
-        try:
-            gathered = _gather(folder)[0]
-            answers = {label: text.strip() for label, text in job.data.get("answers", {}).items()
-                       if text.strip()}
-            if "answers" in job.data:
-                _write_json(folder / "answers.json", answers)
-            result = _load_groups(folder)
-            asked = [group for group in result.groups if not _skips_checker(group)]
-            skipped = [group for group in result.groups if _skips_checker(group)]
+        gathered = _gather(folder)[0]
+        answers = {label: text.strip() for label, text in job.data.get("answers", {}).items()
+                   if text.strip()}
+        if "answers" in job.data:
+            _write_json(folder / "answers.json", answers)
+        result = _load_groups(folder)
+        asked = [group for group in result.groups if not _skips_checker(group)]
+        skipped = [group for group in result.groups if _skips_checker(group)]
 
-            # ask the checker about the groups it must judge and the questions that were answered
-            answered = [(label, question, answers[label]) for label, question in gathered
-                        if label in answers]
-            judged = CheckAnswer(checks=[], decisions=[])
-            if asked or answered:
-                check_cost(job, settings.checker.budget_usd)
-                reviews: dict[str, list[EntryReview]] = {}
-                for name in ("review-a", "review-b"):
-                    given = _load_answer(folder, name, ListReview)
-                    for verdict in given.reviews if given else []:
-                        reviews.setdefault(verdict.label, []).append(verdict)
-                prompt = format_check_prompt(
-                    asked, (folder / "citations.md").read_text(encoding="utf-8"), answered, reviews)
-                reply = ask(agents_of(job)[Role.CHECKER], prompt, folder / "prompts")
-                judged = reply.data
-                _write_json(folder / "check.json", judged)
-                check_turn(job, "checker", reply.log_path)
+        # ask the checker about the groups it must judge and the questions that were answered
+        answered = [(label, question, answers[label]) for label, question in gathered
+                    if label in answers]
+        judged = CheckAnswer(checks=[], decisions=[])
+        if asked or answered:
+            check_cost(job, settings.checker.budget_usd)
+            reviews: dict[str, list[EntryReview]] = {}
+            for name in ("review-a", "review-b"):
+                given = _load_answer(folder, name, ListReview)
+                for verdict in given.reviews if given else []:
+                    reviews.setdefault(verdict.label, []).append(verdict)
+            prompt = format_check_prompt(
+                asked, (folder / "citations.md").read_text(encoding="utf-8"), answered, reviews)
+            reply = ask(agents_of(job)[Role.CHECKER], prompt, folder / "prompts")
+            judged = reply.data
+            _write_json(folder / "check.json", judged)
+            check_turn(job, "checker", reply.log_path)
 
-            # code keeps each stated code finding as it is, then applies the verdicts
-            unjudged = [
-                GroupCheck(key=group.key, outcome=Outcome.KEEP, merge_into="",
-                           reason="found by code from a stated rule, so the checker was not asked",
-                           entries=[CheckedEntry(continues_old=False, finding=group.text)])
-                for group in skipped
-            ]
-            everything = CheckAnswer(checks=unjudged + judged.checks, decisions=judged.decisions)
-            recheck = _load_answer(folder, "recheck", RecheckAnswer)
-            old_decisions = [_as_verdict(question) for question in
-                             (recheck.answered_questions if recheck else [])]
-            applied = apply_verdicts(result, everything)
+        # code keeps each stated code finding as it is, then applies the verdicts
+        unjudged = [
+            GroupCheck(key=group.key, outcome=Outcome.KEEP, merge_into="",
+                       reason="found by code from a stated rule, so the checker was not asked",
+                       entries=[CheckedEntry(continues_old=False, finding=group.text)])
+            for group in skipped
+        ]
+        everything = CheckAnswer(checks=unjudged + judged.checks, decisions=judged.decisions)
+        recheck = _load_answer(folder, "recheck", RecheckAnswer)
+        old_decisions = [_as_verdict(question) for question in
+                         (recheck.answered_questions if recheck else [])]
+        applied = apply_verdicts(result, everything)
 
-            # check the citations of the final entries again
-            results: list[CitationResult] = []
+        # check the citations of the final entries again
+        results: list[CitationResult] = []
 
-            def fixed(entries: tuple[FinalEntry, ...]) -> list[FinalEntry]:
-                made = []
-                for entry in entries:
-                    removed: list[str] = []
-                    finding = _fix_finding(copy, "/".join(entry.sources), entry.finding, results, removed)
-                    extra = (f"citations that do not match the code were removed: {', '.join(removed)}",)
-                    made.append(replace(entry, finding=finding,
-                                        notes=entry.notes + (extra if removed else ())))
-                return made
+        def fixed(entries: tuple[FinalEntry, ...]) -> list[FinalEntry]:
+            made = []
+            for entry in entries:
+                removed: list[str] = []
+                finding = _fix_finding(copy, "/".join(entry.sources), entry.finding, results, removed)
+                extra = (f"citations that do not match the code were removed: {', '.join(removed)}",)
+                made.append(replace(entry, finding=finding,
+                                    notes=entry.notes + (extra if removed else ())))
+            return made
 
-            # check the citations of the findings that turn questions into problems
-            decisions = []
-            notes = list(applied.notes)
-            for decision in [*judged.decisions, *old_decisions]:
-                if decision.decision == QuestionDecision.PROBLEM:
-                    removed: list[str] = []
-                    fixed_finding = _fix_finding(
-                        copy, decision.label, decision.finding, results, removed)
-                    decision = decision.model_copy(update={"finding": fixed_finding})
-                    if removed:
-                        notes.append(
-                            f"citations that do not match the code were removed: {', '.join(removed)}")
-                decisions.append(decision)
+        # check the citations of the findings that turn questions into problems
+        decisions = []
+        notes = list(applied.notes)
+        for decision in [*judged.decisions, *old_decisions]:
+            if decision.decision == QuestionDecision.PROBLEM:
+                removed: list[str] = []
+                fixed_finding = _fix_finding(
+                    copy, decision.label, decision.finding, results, removed)
+                decision = decision.model_copy(update={"finding": fixed_finding})
+                if removed:
+                    notes.append(
+                        f"citations that do not match the code were removed: {', '.join(removed)}")
+            decisions.append(decision)
 
-            _write_json(folder / "final.json", {
-                "problems": fixed(applied.problems),
-                "questions": fixed(applied.questions),
-                "bugs": fixed(applied.bugs),
-                "dropped": applied.dropped,
-                "done": applied.done,
-                "notes": notes,
-                "decisions": decisions,
-            })
-            lines = ["# What the checker decided", ""]
-            for check_ in everything.checks:
-                target = f" into {check_.merge_into}" if check_.merge_into else ""
-                lines.append(f"- {check_.key}: {check_.outcome}{target}. {check_.reason}")
-            for text in applied.notes:
-                lines.append(f"- note: {text}")
-            for entry in [*applied.problems, *applied.questions, *applied.bugs]:
-                lines += [f"- note: {text}" for text in entry.notes]
-            (folder / "verdicts.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        finally:
-            # a copy that remove_copy refuses or cannot delete, such as a locked file, must not throw away
-            # the checker's work, and the sweep removes it later
-            with contextlib.suppress(CopyError, OSError):
-                remove_copy(copy)
+        _write_json(folder / "final.json", {
+            "problems": fixed(applied.problems),
+            "questions": fixed(applied.questions),
+            "bugs": fixed(applied.bugs),
+            "dropped": applied.dropped,
+            "done": applied.done,
+            "notes": notes,
+            "decisions": decisions,
+        })
+        lines = ["# What the checker decided", ""]
+        for check_ in everything.checks:
+            target = f" into {check_.merge_into}" if check_.merge_into else ""
+            lines.append(f"- {check_.key}: {check_.outcome}{target}. {check_.reason}")
+        for text in applied.notes:
+            lines.append(f"- note: {text}")
+        for entry in [*applied.problems, *applied.questions, *applied.bugs]:
+            lines += [f"- note: {text}" for text in entry.notes]
+        (folder / "verdicts.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return "draft"
 
     @graph.step("draft", next=("publish",), gate=True)
@@ -1030,6 +1038,8 @@ def build_audit_graph(
                    if text.strip()}
         decided = {decision.label: decision for decision in decisions}
         made = Draft(notes=list(job.data["notes"]) + list(applied.notes))
+        if job.data.get("ratchet_commit", ""):
+            made.not_blind = NOT_BLIND_NOTE.format(commit=job.data["ratchet_commit"])
         old_name = job.data["old_list"]
         recheck = _load_answer(folder, "recheck", RecheckAnswer)
         left = {check.id: check.what_is_left for check in recheck.checks} if recheck else {}
@@ -1146,8 +1156,10 @@ def build_audit_graph(
 
         text = (folder / "draft.md").read_text(encoding="utf-8")
         errors = check_draft(text, done_ids(project))
-        if Repo(project.root).run("rev-parse", "HEAD").strip() != job.data["head"]:
-            errors.append("HEAD has moved since the audit started, so the list is out of date")
+        moved = _moved_since_start(project, job.data["head"])
+        if moved:
+            errors.append(f"{moved} since the audit started, so the list is out of date. "
+                          "Run `ratchet audit` again")
         if errors:
             raise AuditError("the draft cannot be published: " + "; ".join(errors))
 
@@ -1201,6 +1213,34 @@ def build_audit_graph(
         return None
 
     return graph
+
+
+def _moved_since_start(project: Project, head: str) -> str:
+    """Tells whether the code differs from what the audit started on.
+
+    Args:
+        project: The project, as read from its .ratchet folder.
+        head: The commit the audit started on.
+
+    Returns:
+        "HEAD has moved" when HEAD is another commit, "the working tree has changes: a, b" when a
+        file outside .ratchet differs from HEAD, and "" when the code is as the audit found it.
+    """
+    repo = Repo(project.root)
+    if repo.run("rev-parse", "HEAD").strip() != head:
+        return "HEAD has moved"
+    changed = repo.changed_paths()
+    if changed:
+        return f"the working tree has changes: {', '.join(changed[:10])}"
+    return ""
+
+
+def _call_text(call: ToolCall) -> str:
+    """Returns a tool call as text for a message: a Bash command, or the call's name and input."""
+    command = call.arguments.get("command")
+    if call.name == "Bash" and isinstance(command, str):
+        return command
+    return f"{call.name} {call.arguments}"
 
 
 def done_ids(project: Project) -> set[str]:

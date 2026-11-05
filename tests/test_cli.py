@@ -119,25 +119,6 @@ def test_audit_before_init_prints_one_line(
     assert "ratchet init" in capsys.readouterr().err
 
 
-def test_audit_that_refuses_the_history_prints_one_line(
-    audit_project: Project, capsys: pytest.CaptureFixture[str]  # noqa: F811
-) -> None:
-    """Proves an audit whose history holds a hidden path, with history_with_ratchet set to
-    refuse, exits with 1 and one message."""
-    config = audit_project.root / ".ratchet" / "config.toml"
-    with config.open("a", encoding="utf-8", newline="\n") as file:
-        file.write('\n[audit]\nhide = ["src/app/core/model.py"]\nhistory_with_ratchet = "refuse"\n')
-
-    code = main(["audit", "--project", str(audit_project.root)])
-
-    err = capsys.readouterr().err.strip()
-    assert code == 1
-    assert len(err.splitlines()) == 1
-    assert err.startswith("ratchet: ")
-    assert "history_with_ratchet is set to refuse" in err
-    assert "Traceback" not in err
-
-
 def test_audit_with_a_malformed_rules_block_prints_one_line(
     audit_project: Project, capsys: pytest.CaptureFixture[str]  # noqa: F811
 ) -> None:

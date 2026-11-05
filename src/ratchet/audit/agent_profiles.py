@@ -39,6 +39,12 @@ PROMPTS = Path(__file__).parent / "prompts"
 # the name of the blind audit's agent, which has the auditor's profile
 FRESH = "fresh"
 
+# git options that reach outside the project: --no-index and --contents read any file, --output
+# writes one, and the rest point git at another repository, config or program
+FORBIDDEN_OPTIONS = (
+    "--no-index", "--contents", "--output", "-C", "--git-dir", "--work-tree", "-c", "--exec-path",
+)
+
 
 class Role(StrEnum):
     """Names the audit's agents, each of which has a prompt of its own."""
@@ -88,17 +94,18 @@ def write_profile(project: Project, role: Role, folder: Path) -> Path:
     return path
 
 
-def make_agents(project: Project, settings: AuditSettings, copy: Path, folder: Path) -> dict[str, Agent]:
-    """Returns the audit's agents, each set up from its settings and working in the copy.
+def make_agents(project: Project, settings: AuditSettings, folder: Path) -> dict[str, Agent]:
+    """Returns the audit's agents, each set up from its settings and working in the project.
 
-    No agent may edit, and none may read the project or its .ratchet folder. All but the pair judge
-    may read the copy's git history. The blind audit's agent has the auditor's profile and
-    settings, and is keyed "fresh".
+    No agent may edit, none may leave the project folder with a file tool, and none may read the
+    .ratchet folder, git's own files or a path that matches a pattern of the hide setting. All
+    but the pair judge may read the project's git
+    history, with the options in FORBIDDEN_OPTIONS refused. The blind audit's agent has the
+    auditor's profile and settings, and is keyed "fresh".
 
     Args:
         project: The project, as read from its .ratchet folder.
         settings: The audit command's settings.
-        copy: The audit's copy of the code, which every agent works in.
         folder: The folder for the agents' profiles and logs.
 
     Returns:
@@ -114,29 +121,24 @@ def make_agents(project: Project, settings: AuditSettings, copy: Path, folder: P
         Role.PAIR_JUDGE: (settings.pair_judge, PairAnswer),
         Role.CHECKER: (settings.checker, CheckAnswer),
     }
-    hidden = _hidden_paths(project)
+    hidden = _hidden_paths(settings.hide)
     agents = {}
     for role, (role_settings, answer) in answers.items():
         profile = write_profile(project, role, profiles)
-        agents[str(role)] = _make_agent(str(role), profile, role, role_settings, answer, copy, logs, hidden)
+        agents[str(role)] = _make_agent(str(role), profile, role, role_settings, answer, project.root, logs, hidden)
         if role == Role.AUDITOR:
-            agents[FRESH] = _make_agent(FRESH, profile, role, role_settings, answer, copy, logs, hidden)
+            agents[FRESH] = _make_agent(FRESH, profile, role, role_settings, answer, project.root, logs, hidden)
     return agents
 
 
-def _hidden_paths(project: Project) -> tuple[str, ...]:
-    """Returns the patterns that keep the agents, which work in the copy, away from the old problem
-    lists and the ledger.
+def _hidden_paths(hide: list[str]) -> tuple[str, ...]:
+    """Returns the patterns that keep the agents away from the old problem lists, the ledger and
+    git's own files, and from the paths in the [audit] hide setting.
 
-    The project's folder and its .ratchet folder are each listed bare and with everything under
-    them, so a Grep or Glob aimed at the folder itself is denied too.
+    Each folder is listed bare and with everything under it, so a Grep or Glob aimed at the folder
+    itself is denied too. All the patterns are relative to the project.
     """
-    return (
-        str(project.root),
-        str(project.root / "**"),
-        str(project.folder),
-        str(project.folder / "**"),
-    )
+    return (".ratchet", ".ratchet/**", ".git", ".git/**", *hide)
 
 
 def _make_agent(
@@ -145,7 +147,7 @@ def _make_agent(
     role: Role,
     role_settings: RoleSettings,
     answer: type,
-    copy: Path,
+    root: Path,
     logs: Path,
     hidden: tuple[str, ...],
 ) -> Agent:
@@ -157,18 +159,21 @@ def _make_agent(
         role: The agent's role.
         role_settings: The role's model, effort, budget and time limit.
         answer: The shape of the agent's answer.
-        copy: The audit's copy of the code.
+        root: The project's folder, which the agent works in.
         logs: The folder that holds a log folder for each agent.
         hidden: The path patterns that the agent may never read.
 
     Returns:
-        The agent, which can inspect files and, unless it is the pair judge, read git history.
+        The agent, whose file tools may not leave 'root', and which can inspect files and, unless it is the pair judge, read git history.
     """
-    permissions = {} if role == Role.PAIR_JUDGE else {"commands": Command.GIT_READ}
+    permissions = (
+        {} if role == Role.PAIR_JUDGE
+        else {"commands": Command.GIT_READ, "forbidden_options": FORBIDDEN_OPTIONS}
+    )
     return Agent(
         name,
         profile,
-        cwd=copy,
+        cwd=root,
         log_dir=logs / name,
         model=role_settings.model,
         effort=role_settings.effort,
@@ -177,6 +182,7 @@ def _make_agent(
         timeout_s=role_settings.timeout_s,
         tools=Tool.INSPECT,
         hidden=hidden,
+        confined_to=root,
         **permissions,
     )
 

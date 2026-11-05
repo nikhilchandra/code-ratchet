@@ -34,7 +34,6 @@ def test_the_section_is_read(tmp_path: Path) -> None:
     settings = settings_from(tmp_path, """
 [audit]
 hide = ["vendor/**"]
-history_with_ratchet = "refuse"
 max_pairs = 10
 max_cost_usd = 12.5
 
@@ -46,7 +45,6 @@ timeout_s = 300
 """)
 
     assert settings.hide == ["vendor/**"]
-    assert settings.history_with_ratchet == "refuse"
     assert (settings.max_pairs, settings.max_cost_usd) == (10, 12.5)
     assert settings.checker.effort == Effort.MEDIUM
     assert settings.checker.budget_usd == 2.0
@@ -57,7 +55,6 @@ def test_unset_settings_take_their_defaults(tmp_path: Path) -> None:
     settings = settings_from(tmp_path)
 
     assert settings.hide == []
-    assert settings.history_with_ratchet == "strip"
     assert (settings.max_pairs, settings.max_cost_usd) == (40, 40.0)
     roles = {
         "auditor": ("opus", 10.0, 3600),
@@ -74,7 +71,7 @@ def test_unset_settings_take_their_defaults(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("section", "named"),
     [
-        ('[audit]\nhistory_with_ratchet = "ignore"', "audit.history_with_ratchet"),
+        ('[audit]\nhistory_with_ratchet = "strip"', "audit.history_with_ratchet"),
         ("[audit]\nmax_pairs = 0", "audit.max_pairs"),
         ('[audit.auditor]\nbudget_usd = "lots"', "audit.auditor.budget_usd"),
         ('[audit.pair_judge]\nmodle = "sonnet"', "audit.pair_judge.modle"),
@@ -82,6 +79,7 @@ def test_unset_settings_take_their_defaults(tmp_path: Path) -> None:
     ],
 )
 def test_a_wrong_setting_is_named(tmp_path: Path, section: str, named: str) -> None:
-    """Proves a wrong value, a limit of zero or a misspelling names the setting that is wrong."""
+    """Proves a wrong value, a limit of zero, a misspelling or the history_with_ratchet setting,
+    which no longer exists, names the setting that is wrong."""
     with pytest.raises(ProjectError, match=named.replace(".", r"\.")):
         settings_from(tmp_path, section + "\n")

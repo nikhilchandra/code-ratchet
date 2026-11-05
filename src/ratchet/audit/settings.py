@@ -6,8 +6,6 @@ A setting left out takes the default given here.
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
 from ratchet.project import Project, RoleSettings
@@ -20,11 +18,8 @@ class AuditSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Path patterns, relative to the project, that are left out of the audit's copy of the code.
+    # Path patterns, relative to the project, that the agents' file tools may not read in the project.
     hide: list[str] = []
-    # What to do when the code's git history holds old .ratchet files: remove them from the
-    # copy, or refuse to audit.
-    history_with_ratchet: Literal["strip", "refuse"] = "strip"
     # The most pairs of findings that the pair judge is asked about.
     max_pairs: int = Field(default=40, gt=0)
     # The most one audit may spend in dollars, counting every agent's budget.

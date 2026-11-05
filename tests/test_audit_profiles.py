@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import ratchet.audit.agent_profiles as agent_profiles
 from ratchet.architecture import Citation as CodeCitation
 from ratchet.architecture import CodeFinding
 from ratchet.audit.agent_answers import (
@@ -247,40 +248,66 @@ def test_written_profiles_are_accepted_by_agents(tmp_path: Path) -> None:
     profiles written, without running them."""
     project = make_project(tmp_path)
     settings = load_settings(project)
-    copy = tmp_path / "copy"
-    copy.mkdir()
 
-    agents = make_agents(project, settings, copy, tmp_path / "audit")
+    agents = make_agents(project, settings, tmp_path / "audit")
 
     assert set(agents) == {str(role) for role in Role} | {FRESH}
     path = write_profile(project, Role.AUDITOR, tmp_path / "audit" / "profiles")
     assert path.read_text(encoding="utf-8") == build_profile(project, Role.AUDITOR)
 
 
-def cli_form(path: Path) -> str:
-    """Returns an absolute path as Claude Code's permission rules write it, which is "//"
-    followed by the path with forward slashes and a Windows drive as a lowercase letter."""
-    posix = path.as_posix()
-    if path.drive:
-        return "//" + path.drive[0].lower() + posix[len(path.drive):]
-    return "/" + posix
+# The git options that reach outside the project, which no audit agent's Bash command may use.
+OUTSIDE_OPTIONS = ("--no-index", "--contents", "--output", "-C", "--git-dir", "--work-tree", "-c",
+                   "--exec-path")
 
 
-def test_audit_agents_cannot_read_the_project(tmp_path: Path) -> None:
-    """Proves every audit agent, the blind audit's included, has the project and its .ratchet
-    folder as hidden, both bare and with everything under them, and is denied Read on them."""
+def test_audit_agents_work_in_the_project_with_ratchet_and_git_hidden(tmp_path: Path) -> None:
+    """Proves every audit agent, the blind audit's included, works in the project's folder, has
+    .ratchet and .git as hidden, both bare and with everything under them, and is denied Read on
+    them. Every agent but the pair judge, which runs no command, has the git options that reach
+    outside the project as its forbidden options."""
     project = make_project(tmp_path)
     settings = load_settings(project)
-    copy = tmp_path / "copy"
-    copy.mkdir()
 
-    agents = make_agents(project, settings, copy, tmp_path / "audit")
+    agents = make_agents(project, settings, tmp_path / "audit")
 
-    root, folder = project.root, project.folder
-    hidden = (str(root), str(root / "**"), str(folder), str(folder / "**"))
-    rules = {f"Read({cli_form(root)})", f"Read({cli_form(root)}/**)",
-             f"Read({cli_form(folder)})", f"Read({cli_form(folder)}/**)"}
+    assert agent_profiles.FORBIDDEN_OPTIONS == OUTSIDE_OPTIONS
     assert set(agents) == {str(role) for role in Role} | {FRESH}
     for name, agent in agents.items():
-        assert agent.hidden == hidden, name
-        assert rules <= set(agent._options().disallowed_tools), name
+        assert Path(agent.cwd) == project.root, name
+        assert agent.hidden == (".ratchet", ".ratchet/**", ".git", ".git/**"), name
+        rules = set(agent._options().disallowed_tools)
+        assert {"Read(.ratchet/**)", "Read(.git/**)"} <= rules, name
+        expected = () if name == str(Role.PAIR_JUDGE) else OUTSIDE_OPTIONS
+        assert tuple(agent.forbidden_options) == expected, name
+
+
+def test_hide_patterns_are_denied_in_the_project(tmp_path: Path) -> None:
+    """Proves every audit agent, the blind audit's included, has each [audit] hide pattern as
+    hidden, relative to the project it works in, and is denied Read on it."""
+    project = make_project(tmp_path)
+    settings = load_settings(project).model_copy(update={"hide": ["vendor/**"]})
+
+    agents = make_agents(project, settings, tmp_path / "audit")
+
+    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    for name, agent in agents.items():
+        assert "vendor/**" in agent.hidden, name
+        assert "Read(vendor/**)" in agent._options().disallowed_tools, name
+
+
+def test_audit_agents_are_confined_to_the_project(tmp_path: Path) -> None:
+    """Proves every audit agent, the blind audit's and the pair judge's included, has its file
+    tools confined to the project's folder, through a single PreToolUse matcher that matches
+    every tool."""
+    project = make_project(tmp_path)
+    settings = load_settings(project)
+
+    agents = make_agents(project, settings, tmp_path / "audit")
+
+    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    for name, agent in agents.items():
+        assert Path(agent.confined_to) == project.root, name
+        matchers = agent._options().hooks["PreToolUse"]
+        assert len(matchers) == 1, name
+        assert matchers[0].matcher is None, name
