@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from conftest import PROBLEM_LIST, PROBLEMS
 from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.refactor.agent_answers import ImplementerAnswer, Status
-from ratchet.refactor.rule_checks import check_rules, snapshot_ratchet_files
+from ratchet.refactor.rule_checks import check_rules, find_violations, snapshot_ratchet_files
 
 
 def answer(status: Status = Status.DONE) -> ImplementerAnswer:
@@ -89,3 +91,82 @@ def test_done_with_nothing_changed_is_named(scratch: tuple[Project, Repo]) -> No
 
     assert "says that it is done, but nothing changed" in check_rules(project, repo, answer(), inputs)
     assert check_rules(project, repo, answer(Status.BLOCKED), inputs) == ""
+
+
+RULES = """\
+```toml
+[parts]
+core = "app.core"
+cli = "app.cli"
+
+[may_use]
+core = []
+cli = ["core"]
+```
+"""
+
+
+def design_project(scratch: tuple[Project, Repo], core_text: str) -> tuple[Project, Repo]:
+    """Writes a two-part package whose core module has the given text into the scratch project, and
+    returns the project with a rules.md that has a target design."""
+    project, repo = scratch
+    for name, text in {
+        "src/app/__init__.py": "",
+        "src/app/core/__init__.py": "",
+        "src/app/core/model.py": core_text,
+        "src/app/cli/__init__.py": "",
+        "src/app/cli/main.py": "from app.core import model\n",
+    }.items():
+        path = project.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return replace(project, rules=RULES), repo
+
+
+def test_a_new_violation_and_a_new_cycle_are_named(scratch: tuple[Project, Repo]) -> None:
+    """Proves an added import from core into cli is reported as a violation and as a cycle."""
+    project, repo = design_project(scratch, "")
+    before = find_violations(project)
+    (project.root / "src/app/core/model.py").write_text("from app.cli import main\n", encoding="utf-8")
+
+    report = check_rules(project, repo, answer(Status.BLOCKED), {}, before)
+
+    assert not any(name.startswith(("may_use", "cycle")) for name in before)
+    assert "- the step adds a violation, may_use: src/app/core/model.py: from app.cli import main" in report
+    assert "- the step adds a violation, cycle: app.cli.main and app.core.model" in report
+
+
+def test_an_old_violation_that_moves_is_not_new(scratch: tuple[Project, Repo]) -> None:
+    """Proves a violation that was there before the step passes, even on a different line."""
+    project, repo = design_project(scratch, "from app.cli import main\n")
+    before = find_violations(project)
+    (project.root / "src/app/core/model.py").write_text(
+        "x = 1\nfrom app.cli import main\n", encoding="utf-8")
+
+    assert check_rules(project, repo, answer(Status.BLOCKED), {}, before) == ""
+    assert check_rules(project, repo, answer(Status.BLOCKED), {}) == ""
+
+
+def test_a_step_that_shrinks_a_cycle_adds_no_violation(scratch: tuple[Project, Repo]) -> None:
+    """Proves a step that takes one module out of a three-module cycle passes."""
+    project, repo = design_project(scratch, "")
+    for name, text in {"a": "from app.core import b\n", "b": "from app.core import c\n",
+                       "c": "from app.core import a\n"}.items():
+        (project.root / f"src/app/core/{name}.py").write_text(text, encoding="utf-8")
+    before = find_violations(project)
+    (project.root / "src/app/core/c.py").write_text("from app.core import b\n", encoding="utf-8")
+
+    assert any(name.startswith("cycle") for name in before)
+    assert check_rules(project, repo, answer(Status.BLOCKED), {}, before) == ""
+
+
+def test_editing_the_first_line_of_a_module_in_no_part_is_not_new(scratch: tuple[Project, Repo]) -> None:
+    """Proves a module that was already outside every part may have its first line edited."""
+    project, repo = design_project(scratch, "")
+    extra = project.root / "src/app/extra.py"
+    extra.write_text('"""Old."""\n', encoding="utf-8")
+    before = find_violations(project)
+    extra.write_text('"""New."""\n', encoding="utf-8")
+
+    assert "no_part: app.extra" in before
+    assert check_rules(project, repo, answer(Status.BLOCKED), {}, before) == ""

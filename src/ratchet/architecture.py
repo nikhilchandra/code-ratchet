@@ -12,8 +12,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ratchet.project import Project
-from ratchet.refactor.rule_checks import is_test_file
+from ratchet.project import Project, is_test_file
 from ratchet.target_design import TargetDesign, part_of
 
 # folders that never hold the project's own code

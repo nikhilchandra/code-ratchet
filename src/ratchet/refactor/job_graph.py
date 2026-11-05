@@ -44,7 +44,7 @@ from ratchet.refactor.review_reports import (
     format_checks_record,
     format_review_report,
 )
-from ratchet.refactor.rule_checks import check_rules, snapshot_ratchet_files
+from ratchet.refactor.rule_checks import check_rules, find_violations, snapshot_ratchet_files
 from ratchet.refactor.settings import COMMAND, RefactorSettings
 
 # How many of the latest jobs the planner sees.
@@ -337,6 +337,9 @@ def build_job_graph(
 
     @graph.step("implement", next=("check-rules", "undo"))
     def implement(job: Job) -> str:
+        # record the violations of the committed code before the job's first attempt
+        if job.data["attempt"] == 0:
+            job.data["violations_before"] = find_violations(project)
         job.data["attempt"] += 1
         diff = repo.diff() if job.data["report"] else ""
         work = repo.save_work()
@@ -362,7 +365,8 @@ def build_job_graph(
     @graph.step("check-rules", next=("test", "implement", "undo"))
     def check_rules_step(job: Job) -> str:
         answer = ImplementerAnswer.model_validate(job.data["answer"])
-        broken = check_rules(project, repo, answer, ratchet_files)
+        broken = check_rules(project, repo, answer, ratchet_files,
+                             job.data.get("violations_before"))
         if not broken:
             return "test"
         rules = [line[2:] for line in broken.splitlines() if line.startswith("- ")]

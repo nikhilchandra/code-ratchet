@@ -2,18 +2,22 @@
 tests run.
 
 A step breaks a rule when it changes a file that agents may not change, changes one of the
-.ratchet files that the agents work from, adds a skip or an expected failure to a test, or
-claims to be done without changing anything.
+.ratchet files that the agents work from, adds a skip or an expected failure to a test, adds an
+import that breaks the target design or an import cycle, or claims to be done without changing
+anything.
 """
 
 from __future__ import annotations
 
 import re
+from itertools import combinations
 from pathlib import Path
 
+from ratchet.architecture import check_architecture
 from ratchet.git import Repo
-from ratchet.project import Project
+from ratchet.project import Project, is_test_file
 from ratchet.refactor.agent_answers import ImplementerAnswer, Status
+from ratchet.target_design import TargetDesignError, read_target_design
 
 # An added line in a test file that skips a test or expects it to fail.
 SKIP_MARKER = re.compile(r"\b(skip|skipif|xfail)\b")
@@ -32,24 +36,42 @@ def snapshot_ratchet_files(project: Project) -> dict[Path, bytes]:
     return {path: path.read_bytes() for path in sorted(project.folder.iterdir()) if path.is_file()}
 
 
-def is_test_file(path: str) -> bool:
-    """Answers whether a changed file holds tests, by pytest's naming.
+def find_violations(project: Project) -> list[str]:
+    """Finds the violations of the target design and the import cycles in the project's code.
+
+    A violation is named by its kind and the line of source that shows it, so that moving the
+    line does not make it a new one. A module outside every part is named by its module, and a
+    cycle is named by each pair of modules in it, so that shrinking a cycle adds nothing.
 
     Args:
-        path: The file's path relative to the project.
+        project: The project, as read from its .ratchet folder.
 
     Returns:
-        True for a Python file under a tests folder or named test_*.py or *_test.py.
+        The sorted names of the violations that break a rule in rules.md, and of the cycles. A
+        rules.md without a readable target design leaves only the cycles.
     """
-    parts = path.replace("\\", "/").split("/")
-    name = parts[-1]
-    return name.endswith(".py") and (
-        "tests" in parts[:-1] or name.startswith("test_") or name.endswith("_test.py")
-    )
+    try:
+        design = read_target_design(project.rules)
+    except TargetDesignError:
+        design = None
+    names = set()
+    for finding in check_architecture(project, design):
+        if finding.kind == "cycle":
+            members = sorted({name for item in finding.evidence for name in item.shows.split(" imports ")})
+            names.update(f"cycle: {first} and {second}" for first, second in combinations(members, 2))
+        elif finding.kind == "no_part":
+            names.add(f"no_part: {finding.subject}")
+        elif finding.grade == "stated":
+            names.update(f"{finding.kind}: {item.file}: {item.quote}" for item in finding.evidence)
+    return sorted(names)
 
 
 def check_rules(
-    project: Project, repo: Repo, answer: ImplementerAnswer, inputs: dict[Path, bytes]
+    project: Project,
+    repo: Repo,
+    answer: ImplementerAnswer,
+    inputs: dict[Path, bytes],
+    violations_before: list[str] | None = None,
 ) -> str:
     """Returns why a step broke a rule that code can check, or an empty string.
 
@@ -60,6 +82,8 @@ def check_rules(
         repo: The project's repository, holding the step's uncommitted changes.
         answer: The implementer's answer for the step.
         inputs: The .ratchet files as snapshot_ratchet_files() returned them before the step.
+        violations_before: The violations as find_violations() returned them before the step,
+            or None to skip the check for new violations.
 
     Returns:
         A markdown report with one line per broken rule, or "" when no rule was broken.
@@ -81,6 +105,11 @@ def check_rules(
         for line in repo.diff(*tests).splitlines():
             if line.startswith("+") and not line.startswith("+++") and SKIP_MARKER.search(line):
                 problems.append(f"a test change adds a skip or an expected failure: {line[1:].strip()}")
+
+    if violations_before is not None:
+        old = set(violations_before)
+        problems.extend(f"the step adds a violation, {name}" for name in find_violations(project)
+                        if name not in old)
 
     if answer.status == Status.DONE and not changed:
         problems.append("the implementer says that it is done, but nothing changed")

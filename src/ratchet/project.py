@@ -145,6 +145,22 @@ def _format_errors(error: ValidationError, prefix: str = "") -> str:
     return "\n".join(lines)
 
 
+def is_test_file(path: str) -> bool:
+    """Answers whether a changed file holds tests, by pytest's naming.
+
+    Args:
+        path: The file's path relative to the project.
+
+    Returns:
+        True for a Python file under a tests folder or named test_*.py or *_test.py.
+    """
+    parts = path.replace("\\", "/").split("/")
+    name = parts[-1]
+    return name.endswith(".py") and (
+        "tests" in parts[:-1] or name.startswith("test_") or name.endswith("_test.py")
+    )
+
+
 def read_markdown(folder: Path, name: str) -> str:
     """Returns the text of one markdown file in the .ratchet folder, which must not be blank.
 
