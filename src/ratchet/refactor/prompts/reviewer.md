@@ -21,32 +21,32 @@ and say what would fix it.
 1. **Scope.** The diff does what the plan says, completely, and nothing else. It fails when it
    changes code that the plan does not name and the implementer gives no deviation for it, when
    it tidies or fixes something unrelated, or when part of the plan is missing.
-2. **Readable.** A junior developer can follow each changed method. Reading another module to see
-   what a call does is expected. What matters is that every call leads somewhere the reader can
-   find, through an import, a named attribute or a type, and that names say what a thing is. It
-   fails on indirection that hides who calls what, such as dispatch through `getattr` on a guessed
-   name, a bundle of lambdas passed in place of an object, or a callback passed only to avoid
-   importing a class. It also fails on code copied into a method so that the method reads on its
-   own, when the original could have been called instead, unless the project's rules require the
+2. **Readable (S19, S20).** A junior developer can follow each changed method. Reading another
+   module to see what a call does is expected. What matters is that every call leads somewhere the
+   reader can find, through an import, a named attribute or a type, and that names say what a thing
+   is. It fails on indirection that hides who calls what, such as dispatch through `getattr` on a
+   guessed name, a bundle of lambdas passed in place of an object, or a callback passed only to
+   avoid importing a class. It also fails on code copied into a method so that the method reads on
+   its own, when the original could have been called instead, unless the project's rules require the
    copy.
-3. **Editable.** A reader can find where each value comes from and change it in one place. It
-   fails when the step leaves two copies of one fact, or makes a change in one place depend on
+3. **Editable (S5, S7).** A reader can find where each value comes from and change it in one place.
+   It fails when the step leaves two copies of one fact, or makes a change in one place depend on
    something far away that nothing points to.
-4. **Necessary.** Every class, method and parameter that the step adds serves a requirement that
-   nothing simpler meets, as the plan claims. It fails on a method that only passes a call through,
-   a wrapper around one call, a class that exists to connect two other classes, or a parameter
-   that every caller passes the same way.
-5. **Placed.** Each method lives in the class that owns the data it reads and writes. It fails
+4. **Necessary (S3, S4, S9, S18).** Every class, method and parameter that the step adds serves a
+   requirement that nothing simpler meets, as the plan claims. It fails on a method that only passes
+   a call through, a wrapper around one call, a class that exists to connect two other classes, or a
+   parameter that every caller passes the same way.
+5. **Placed (S15).** Each method lives in the class that owns the data it reads and writes. It fails
    when a method reaches into another object's state to do work that object should do.
-6. **Modular.** The project's rules in the shared section hold. It fails on any change that breaks
-   one of them. A step may leave an old violation in place when the plan does not cover it, but it
-   may not add one.
+6. **Modular (S1, S2, S6 and the stated rules).** The project's rules in the shared section hold. It
+   fails on any change that breaks one of them. A step may leave an old violation in place when the
+   plan does not cover it, but it may not add one.
 7. **Behavior.** Nothing visible to the user changes, such as a default, a message, an output, the
    order of results or an option. The tests passing does not prove this, so read for it.
 8. **Tests.** Every changed test, whether or not the implementer listed it, stays within the test
    rules of the shared section. It fails on any change to a frozen file or to an assertion, and on
    any test that is deleted, skipped or marked as an expected failure.
-9. **Comments.** In the code that the step touches, every comment and docstring follows the
+9. **Comments (S21).** In the code that the step touches, every comment and docstring follows the
    comment rules of the shared section, and none is left untrue by the change. Do not fault
    comments in code that the step does not touch.
 

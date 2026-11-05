@@ -9,7 +9,13 @@ import pytest
 
 from ratchet.project import Project, load_project
 from ratchet.refactor.agent_answers import Plan
-from ratchet.refactor.agent_profiles import NO_COMMENT_RULES, Role, build_profile, write_profile
+from ratchet.refactor.agent_profiles import (
+    NO_COMMENT_RULES,
+    STANDARD,
+    Role,
+    build_profile,
+    write_profile,
+)
 from ratchet.refactor.settings import COMMAND
 from rooster import Agent
 
@@ -47,6 +53,7 @@ def test_a_profile_holds_the_projects_rules_and_settings(tmp_path: Path, role: R
     assert "`**/*.feature` or `.ratchet/**`" in profile
     assert "`uv run pytest -q`" in profile
     assert f"`{PROBLEMS_FILE}`" in profile
+    assert "S21." in profile
     assert "$" not in profile
 
 
@@ -77,3 +84,20 @@ def test_a_written_profile_is_accepted_by_an_agent(tmp_path: Path) -> None:
     assert path == tmp_path / "profiles" / "planner.md"
     assert path.read_text(encoding="utf-8") == build_profile(project, Role.PLANNER, PROBLEMS_FILE)
     Agent("planner", path, cwd=tmp_path, log_dir=tmp_path / "logs", schema=Plan)
+
+
+def test_the_standard_has_every_check_once() -> None:
+    """Proves the general standard numbers its checks S1 to S21, each defined once."""
+    standard = STANDARD.read_text(encoding="utf-8")
+
+    for number in range(1, 22):
+        assert standard.count(f"**S{number}.") == 1
+
+
+def test_the_reviewers_criteria_name_their_checks(tmp_path: Path) -> None:
+    """Proves the reviewer's criteria point at the standard's ids."""
+    profile = build_profile(make_project(tmp_path), Role.REVIEWER, PROBLEMS_FILE)
+
+    assert "**Necessary (S3, S4, S9, S18).**" in profile
+    assert "**Modular (S1, S2, S6 and the stated rules).**" in profile
+    assert "**Comments (S21).**" in profile

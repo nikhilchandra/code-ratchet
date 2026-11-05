@@ -33,10 +33,15 @@ class ScriptedAgent:
         turn = self.turns.pop(0)
         answer = turn(prompt) if callable(turn) else turn
         if answer is None:
-            return {"ok": False, "data": None, "failure": "timed out after 1 s", "cost_usd": 0.0}
+            return {"ok": False, "data": None, "failure": "timed out after 1 s", "cost_usd": 0.0,
+                    "log_path": None}
         self.total_cost_usd += 0.5
         return {"ok": True, "data": self.schema.model_validate(answer), "failure": None,
-                "cost_usd": 0.5}
+                "cost_usd": 0.5, "log_path": Path(f"{self.name}.log")}
+
+    async def arun(self, prompt: str) -> dict:
+        """Returns the same result that run() does, for callers that await."""
+        return self.run(prompt)
 
 
 def plan(**changes: object) -> dict:

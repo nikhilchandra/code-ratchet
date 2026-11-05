@@ -25,9 +25,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
 from rooster import Agent, AgentGraph, Command, Job, Tool
 
+from ratchet.agent_calls import NoAnswerError, ask
 from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.pytest_runner import Outcome, find_regressions, format_failure_report, run_pytest
@@ -63,7 +63,8 @@ def _report_nothing(job: Job, step: str, text: str, **extras: object) -> None:
 
 
 class RefactorError(RuntimeError):
-    """Signals an agent call that did not produce an answer, which halts the job."""
+    """Signals that a refactor run cannot go on, such as a refused plan, a dirty working tree, a
+    suite that fails before the run, or a halted job."""
 
 
 class JobOutcome(StrEnum):
@@ -124,28 +125,6 @@ def make_agents(
             **({"tools": Tool.INSPECT} | permissions),
         )
     return agents
-
-
-def _ask(agent: Agent, prompt: str, folder: Path) -> tuple[BaseModel, float]:
-    """Runs one agent turn and returns its answer and cost, saving the prompt beside the attempt.
-
-    Args:
-        agent: The agent to run.
-        prompt: The turn's prompt.
-        folder: The folder that the prompt is saved in, as <agent name>-prompt.md.
-
-    Returns:
-        The agent's answer, as an instance of its schema, and what the turn cost, in dollars.
-
-    Raises:
-        RefactorError: The turn did not complete, or its answer did not fit the schema.
-    """
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{agent.name}-prompt.md").write_text(prompt, encoding="utf-8")
-    result = agent.run(prompt)
-    if not result["ok"]:
-        raise RefactorError(f"the {agent.name} gave no answer: {result['failure']}")
-    return result["data"], result["cost_usd"]
 
 
 def _format_planner_prompt(job: Job, ledger: Ledger, problems_file: str) -> str:
@@ -306,7 +285,8 @@ def build_job_graph(
     @graph.step("plan", next=("implement", None))
     def plan(job: Job) -> str | None:
         prompt = _format_planner_prompt(job, ledger, problem_list.relative_path)
-        answer, cost = _ask(planner, prompt, job_folder(job))
+        reply = ask(planner, prompt, job_folder(job))
+        answer, cost = reply.data, reply.cost_usd
         job.data.update(plan=answer.model_dump(mode="json", by_alias=True), attempt=0,
                         rejections=0, test_failures=0, report="")
         (job_folder(job) / "plan.json").write_text(json.dumps(job.data["plan"], indent=2),
@@ -328,15 +308,16 @@ def build_job_graph(
         diff = repo.diff() if job.data["report"] else ""
         work = repo.save_work()
         try:
-            answer, cost = _ask(implementer, _format_implementer_prompt(job, settings, diff),
-                                attempt_folder(job))
-        except RefactorError as error:
+            reply = ask(implementer, _format_implementer_prompt(job, settings, diff),
+                        attempt_folder(job))
+        except NoAnswerError as error:
             # the cut-off turn's edits are dropped, so that a resumed job starts this attempt clean
             repo.restore_work(work)
             report(job, "implement", f"attempt {job.data['attempt']} gave no answer",
                    detail=str(error))
             job.data["attempt"] -= 1
             raise
+        answer, cost = reply.data, reply.cost_usd
         job.data["answer"] = answer.model_dump(mode="json")
         if answer.status == Status.BLOCKED:
             report(job, "implement", f"attempt {job.data['attempt']} blocked -> undo",
@@ -385,7 +366,8 @@ def build_job_graph(
         diff = repo.diff()
         (folder / "diff.patch").write_text(diff, encoding="utf-8")
         the_plan = Plan.model_validate(job.data["plan"])
-        verdict, cost = _ask(reviewer, _format_reviewer_prompt(job, diff), folder)
+        reply = ask(reviewer, _format_reviewer_prompt(job, diff), folder)
+        verdict, cost = reply.data, reply.cost_usd
         (folder / "checks.md").write_text(format_checks_record(the_plan, verdict), encoding="utf-8")
         said = verdict.summary
 

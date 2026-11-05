@@ -8,6 +8,7 @@ from pathlib import Path
 
 from rooster import AgentError, GraphError
 
+from ratchet.agent_calls import NoAnswerError
 from ratchet.git import GitError
 from ratchet.project import ProjectError, load_project
 from ratchet.refactor.job_graph import RefactorError
@@ -56,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project = load_project(args.project, commands=COMMANDS)
         run = run_refactor(project, max_jobs=args.max_jobs, focus=args.focus)
-    except (ProjectError, RefactorError, GitError, AgentError, GraphError) as error:
+    except (ProjectError, RefactorError, NoAnswerError, GitError, AgentError, GraphError) as error:
         print(f"ratchet: {error}", file=sys.stderr)
         return 1
     committed = sum(1 for record in run.jobs if record.commit)

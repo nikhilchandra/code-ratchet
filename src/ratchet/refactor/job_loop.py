@@ -76,8 +76,9 @@ def run_refactor(
     Raises:
         ProjectError: The .ratchet folder or its problem list is wrong.
         RefactorError: The working tree is not clean, the suite does not pass before the run,
-            or a job halted. A halted job's changes are undone first, so its problems stay
-            open.
+            or a job halted.
+        NoAnswerError: An agent gave no answer during a job. As with a halted job, the job's
+            changes are undone first, so its problems stay open.
     """
     settings = load_settings(project)
     problem_list = find_latest_problem_list(project)

@@ -2,8 +2,9 @@
 rules.
 
 An agent's profile is the shared prompt followed by its role's prompt. The shared prompt takes
-the project's rules.md and comments.md, and both prompts take the paths and the test command
-from the project's config.toml, so that no prompt names a particular project.
+the project's rules.md and comments.md and ratchet's general standard, and both prompts take the
+paths and the test command from the project's config.toml, so that no prompt names a particular
+project.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from string import Template
 from ratchet.project import Project
 
 PROMPTS = Path(__file__).parent / "prompts"
+STANDARD = Path(__file__).parent.parent / "prompts" / "standard.md"
 
 # What the comments section says when the project has no comments.md.
 NO_COMMENT_RULES = "The project sets no further rules for comments."
@@ -73,6 +75,7 @@ def build_profile(project: Project, role: Role, problems_file: str) -> str:
         comments = "Follow these rules in that code.\n\n" + project.comments.strip()
     values = {
         "rules": project.rules.strip(),
+        "standard": STANDARD.read_text(encoding="utf-8").strip(),
         "comments": comments,
         "editable": _format_patterns(project.config.editable),
         "frozen": _format_patterns(project.frozen),

@@ -14,17 +14,8 @@ ${rules}
 ## How every change is judged
 
 - **Behavior does not change.** This is a refactor. What the user sees and can do stays the same.
-- **The simplest thing that works.** Before adding a class, a method or a parameter, name the
-  requirement it serves and ask whether that requirement can be met by something that already
-  exists, or dropped. Prefer deleting code to adding it. A new class needs a reason that a
-  junior developer would accept.
-- **A junior developer can follow it.** Someone reading the code for the first time can tell
-  what each class is for, find where a value comes from, and change it by hand without breaking
-  something far away.
-- **Methods live where their data lives.** A method belongs to the class that owns what it reads
-  and writes.
-- **Shared code over copies.** Calling shared code is preferred to copying it, unless the
-  project's rules above say otherwise.
+- A change is judged against the general standard below. A step may not add a violation of it,
+  but it may leave an old violation in place.
 
 ## The files a step may change
 
@@ -54,3 +45,5 @@ Write comments and docstrings only in code that a step touches, and remove any c
 change makes untrue.
 
 ${comments}
+
+${standard}

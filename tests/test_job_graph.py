@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from ratchet.agent_calls import NoAnswerError
 from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.pytest_runner import run_pytest
@@ -242,7 +243,7 @@ def test_an_implementer_with_no_answer_halts_the_job_with_the_tree_as_before(
         edit(*GOOD)(prompt)
         return None
 
-    with pytest.raises(RefactorError, match="the implementer gave no answer: timed out"):
+    with pytest.raises(NoAnswerError, match="the implementer gave no answer: timed out"):
         run_job([plan()], [cut_off])
 
     assert repo.changed_paths() == []

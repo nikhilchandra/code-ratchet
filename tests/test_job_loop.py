@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from ratchet.agent_calls import NoAnswerError
 from ratchet.git import Repo
 from ratchet.project import Project
 from ratchet.refactor.agent_answers import ImplementerAnswer, Plan, Review
@@ -125,7 +126,7 @@ def test_a_job_that_halts_part_way_is_undone(scratch, run) -> None:
     problem open."""
     project, repo = scratch
 
-    with pytest.raises(RefactorError, match="the reviewer gave no answer"):
+    with pytest.raises(NoAnswerError, match="the reviewer gave no answer"):
         run([plan()], [edit(*GOOD)], [lambda prompt: None])
 
     assert repo.changed_paths() == []
