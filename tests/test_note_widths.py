@@ -1,5 +1,5 @@
-"""Checks that RESTORE_NOTE in src/ratchet/init_project.py and the docstrings of three audit
-functions fit the house line width, and that RESTORE_NOTE's text stays the same.
+"""Checks that RESTORE_NOTE in src/ratchet/init_project.py and the docstring of make_agents
+fits the house line width, and that RESTORE_NOTE's text stays the same.
 """
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ import pytest
 
 import ratchet.init_project
 from ratchet.audit.agent_profiles import make_agents
-from ratchet.audit.code_copy import make_copy
-from ratchet.audit.turn_logs import paths_named
 from ratchet.project import FOLDER
 
 # The source file of ratchet.init_project, which these tests read.
@@ -66,7 +64,7 @@ def test_restore_note_has_one_blank_line_before_its_comment():
     assert lines[comment - 2].startswith("IGNORE_FORMS =")
 
 
-@pytest.mark.parametrize("function", [make_copy, make_agents, paths_named])
+@pytest.mark.parametrize("function", [make_agents])
 def test_docstring_fits_100_columns(function):
     """Every line of the function's docstring, counting its indentation, is at most WIDTH
     columns.

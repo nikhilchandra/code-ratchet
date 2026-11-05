@@ -4,8 +4,7 @@ a file tool, or use a git option that reaches outside the project, and which inv
 agent never opened.
 
 The audit uses them as a backstop after a turn: the agents' permission rules and rooster's list of
-forbidden options stop such calls, and the log shows whether any call got through. The functions
-that guess from shell text whether a path leaves the project are kept for now and are not called.
+forbidden options stop such calls, and the log shows whether any call got through.
 """
 
 from __future__ import annotations
@@ -23,18 +22,12 @@ STDERR_MARK = "--- stderr ---"
 # The input fields of a tool call that hold one path.
 PATH_FIELDS = ("file_path", "path", "notebook_path")
 
-# A Windows path with a drive letter, found in the raw text because a shell would eat its backslashes.
-WINDOWS_PATH = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'<>|;&()]*")
-# A drive letter and a separator at the start of a token.
-DRIVE_START = re.compile(r"[A-Za-z]:[\\/]")
 # A Git Bash drive, such as /c or /c/Users.
 GIT_BASH_DRIVE = re.compile(r"/([A-Za-z])(?:/(.*))?$")
 # A home folder variable, such as $HOME or %USERPROFILE%, that is the whole word or is followed by a separator.
 HOME_VARIABLE = re.compile(r"^(?:\$HOME|\$\{HOME\}|\$USERPROFILE|\$\{USERPROFILE\}|(?i:%USERPROFILE%))(?=[\\/]|$)")
 # Any variable, such as $TMP, ${TMP} or %TMP%, that is directly followed by a separator.
 LEADING_VARIABLE = re.compile(r"^(?:\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\}|%[A-Za-z_]\w*%)(?=[\\/])")
-# A leading option name that is joined to its value, such as --file= or name=.
-OPTION_PREFIX = re.compile(r"^-{0,2}[\w-]+=")
 
 # A word that is git's --output option, written in full or cut short to at least --ou, with or without a value.
 OUTPUT_OPTION = re.compile(r"^--ou(?:t(?:p(?:u(?:t)?)?)?)?(?:=|$)")
@@ -59,9 +52,6 @@ ERROR_TAG = "<tool_use_error>"
 WILDCARDS = ("*", "?", "[", "{")
 # The folders inside the project that no file tool may reach.
 HIDDEN_FOLDERS = (RATCHET_FOLDER, ".git")
-
-# Absolute paths that every command may name.
-ALLOWED_PATHS = ("/dev/null",)
 
 
 @dataclass(frozen=True)
@@ -268,53 +258,6 @@ def _file_tool_paths(calls: list[ToolCall]) -> list[str]:
     return paths
 
 
-def paths_named(calls: list[ToolCall]) -> list[str]:
-    """Collects every path that a list of tool calls names.
-
-    Args:
-        calls: The tool calls of one turn.
-
-    Returns:
-        The path fields of every call, the pattern of a Glob call, the 'glob' field of a Grep
-        call, and every absolute, '~', '..' or variable path written in the command text of a Bash
-        call. A relative pattern or glob is joined to the call's 'path' field. The regex 'pattern'
-        of a Grep call is not a path and is left out. Relative paths are kept as written.
-    """
-    paths = _file_tool_paths(calls)
-    for call in calls:
-        command = call.arguments.get("command")
-        if call.name == "Bash" and isinstance(command, str):
-            paths.extend(absolute_paths_in(command))
-    return paths
-
-
-def absolute_paths_in(command: str) -> list[str]:
-    """Finds the paths that are written in a shell command and can lead out of the copy.
-
-    Args:
-        command: The command text.
-
-    Returns:
-        Each Windows path with a drive letter, then each word that looks like an absolute path,
-        a '~' path, a path with a '..' segment, a path through a home variable such as $HOME, and
-        a path through another variable followed by a separator such as $TMP/x, in the order they
-        appear. Search strings such as "/api/", URLs and the null device are not counted. A bare
-        variable such as '$f' and a format such as '%H%n' are not paths. The target of cd or pushd
-        always counts when it starts with a slash, including '/' itself. A word with one segment
-        after the slash counts when that place exists on disk.
-    """
-    found = WINDOWS_PATH.findall(command)
-    previous = ""
-    for token in _tokens(command):
-        token = OPTION_PREFIX.sub("", token)
-        if not DRIVE_START.match(token):
-            changes_folder = previous in ("cd", "pushd") and token.startswith("/") and token not in ALLOWED_PATHS
-            if changes_folder or _looks_like_path(token):
-                found.append(token)
-        previous = token
-    return found
-
-
 def output_commands(log_path: Path) -> list[str]:
     """Lists the Bash commands in a turn that pass git's --output option.
 
@@ -356,69 +299,7 @@ def _tokens(command: str) -> list[str]:
         return [word.strip("\"'") for word in command.split()]
 
 
-def _looks_like_path(token: str) -> bool:
-    """Tells whether a word of a command names a place on disk.
-
-    Args:
-        token: One word of a command.
-
-    Returns:
-        True for a '~' path, a path with a '..' segment, a path that starts with a home variable,
-        a path that starts with another variable and a separator, and an absolute path. A path
-        that starts with a slash needs two segments, or one segment with a dot or a single letter,
-        or it must exist on disk, so that a search string such as "/api/" is not taken for a path.
-    """
-    if token in ALLOWED_PATHS or "://" in token:
-        return False
-    if HOME_VARIABLE.match(token) or LEADING_VARIABLE.match(token):
-        return True
-    if token.startswith("~") or ".." in re.split(r"[\\/]", token):
-        return True
-    if not token.startswith("/"):
-        return False
-    segments = [segment for segment in token.split("/") if segment]
-    if len(segments) >= 2 or (len(segments) == 1 and ("." in segments[0] or len(segments[0]) == 1)):
-        return True
-    return _on_disk(token)
-
-
-def _on_disk(token: str) -> bool:
-    """Tells whether a word that starts with a slash names a place that exists on this machine.
-
-    A path in the Git Bash form such as '/c/Users' is converted to its Windows form first. Any rule
-    that must tell a real path from a search string can share this check.
-
-    Args:
-        token: One word of a command.
-
-    Returns:
-        True when the place exists. A word that cannot be a path, such as '/^def /{print', is False.
-    """
-    try:
-        return Path(_git_bash_to_windows(token)).exists()
-    except (OSError, ValueError):
-        return False
-
-
-def paths_outside(log_path: Path, copy: Path) -> list[str]:
-    """Lists the paths in a turn's tool calls that lie outside the copy of the code.
-
-    Args:
-        log_path: The log file that the agent wrote for the turn.
-        copy: The folder of the copy that the agent worked in.
-
-    Returns:
-        Each path outside the copy, once, in the order first seen. A relative path is taken
-        relative to the copy, so one that climbs out with '..' is outside.
-    """
-    outside: list[str] = []
-    for path in paths_named(read_tool_calls(log_path)):
-        if not _inside(path, copy) and path not in outside:
-            outside.append(path)
-    return outside
-
-
-def unopened_files(log_path: Path, copy: Path, files: list[str]) -> list[str]:
+def unopened_files(log_path: Path, root: Path, files: list[str]) -> list[str]:
     """Lists the files that an agent never opened during a turn.
 
     A file counts as opened when a tool call names it in a path field, or when a Bash command
@@ -426,19 +307,19 @@ def unopened_files(log_path: Path, copy: Path, files: list[str]) -> list[str]:
 
     Args:
         log_path: The log file that the agent wrote for the turn.
-        copy: The folder of the copy that the agent worked in.
-        files: Paths relative to the copy, such as the files of the inventory.
+        root: The project's folder, which relative paths are read from.
+        files: Paths relative to the project, such as the files of the inventory.
 
     Returns:
         The files that no tool call opened, in the order given.
     """
     calls = read_tool_calls(log_path)
-    opened = {_resolved(copy, path) for path in _file_tool_paths(calls)}
+    opened = {_resolved(root, path) for path in _file_tool_paths(calls)}
     commands = [str(call.arguments.get("command", "")) for call in calls if call.name == "Bash"]
     return [
         file
         for file in files
-        if _resolved(copy, file) not in opened
+        if _resolved(root, file) not in opened
         and not any(Path(file).as_posix() in command.replace("\\", "/") for command in commands)
     ]
 
@@ -512,31 +393,15 @@ def _home_expanded(path: str) -> str:
     return value + path[match.end():]
 
 
-def _resolved(copy: Path, path: str) -> Path:
-    """Resolves a path against the copy.
+def _resolved(root: Path, path: str) -> Path:
+    """Resolves a path against the project's folder.
 
     Args:
-        copy: The folder of the copy, which a relative path is taken from.
+        root: The project's folder, which a relative path is taken from.
         path: The path as written. A leading '~' or home variable such as $HOME is the home folder
             and /c/... is a Git Bash drive.
 
     Returns:
         The absolute path with links and '..' resolved.
     """
-    return (copy / os.path.expanduser(_git_bash_to_windows(_home_expanded(path)))).resolve()
-
-
-def _inside(path: str, copy: Path) -> bool:
-    """Tells whether a path lies in the copy.
-
-    Args:
-        path: The path as written.
-        copy: The folder of the copy.
-
-    Returns:
-        True when the path, resolved against the copy, is the copy or below it. A path that starts
-        with a variable other than a home variable is never inside, because its value is unknown.
-    """
-    if LEADING_VARIABLE.match(path) and not HOME_VARIABLE.match(path):
-        return False
-    return _resolved(copy, path).is_relative_to(copy.resolve())
+    return (root / os.path.expanduser(_git_bash_to_windows(_home_expanded(path)))).resolve()

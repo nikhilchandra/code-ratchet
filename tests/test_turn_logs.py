@@ -11,9 +11,7 @@ import pytest
 import ratchet.audit.turn_logs as turn_logs
 from ratchet.audit.turn_logs import (
     ToolCall,
-    absolute_paths_in,
     output_commands,
-    paths_outside,
     read_tool_calls,
     unopened_files,
 )
@@ -52,60 +50,13 @@ def test_read_tool_calls_skips_lines_that_are_not_json(tmp_path):
     assert read_tool_calls(log) == []
 
 
-def test_paths_inside_the_copy_are_clean(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    log = write_log(
-        tmp_path / "turn.log",
-        [
-            ("Read", {"file_path": str(copy / "a.py")}),
-            ("Read", {"file_path": "src/b.py"}),
-            ("Grep", {"pattern": "/not/a/path", "path": "."}),
-            ("Bash", {"command": f"cat {copy}/a.py > /dev/null"}),
-        ],
-    )
-
-    assert paths_outside(log, copy) == []
-
-
-def test_paths_outside_the_copy_are_listed_once(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    other = tmp_path / "project" / ".ratchet"
-    log = write_log(
-        tmp_path / "turn.log",
-        [
-            ("Read", {"file_path": str(other / "problems.md")}),
-            ("Read", {"file_path": str(other / "problems.md")}),
-            ("Read", {"file_path": "../project/x.py"}),
-            ("Glob", {"pattern": str(other / "*.md")}),
-            ("Bash", {"command": f"ls '{other}'"}),
-        ],
-    )
-
-    outside = paths_outside(log, copy)
-
-    assert outside[0] == str(other / "problems.md")
-    assert "../project/x.py" in outside
-    assert str(other / "*.md") in outside
-    assert str(other) in outside
-    assert outside.count(str(other / "problems.md")) == 1
-
-
-def test_absolute_paths_in_a_command():
-    assert absolute_paths_in("cat /home/me/a.py | grep x") == ["/home/me/a.py"]
-    assert absolute_paths_in(r"type C:\Users\me\a.py") == [r"C:\Users\me\a.py"]
-    assert absolute_paths_in("git log --format=%h/%s src/a.py 2>/dev/null") == []
-    assert absolute_paths_in('git grep -n "https://example.com" src') == []
-
-
 def test_unopened_files(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
     log = write_log(
         tmp_path / "turn.log",
         [
-            ("Read", {"file_path": str(copy / "src" / "a.py")}),
+            ("Read", {"file_path": str(root / "src" / "a.py")}),
             ("Read", {"file_path": "src/b.py"}),
             ("Bash", {"command": "git blame src/c.py"}),
         ],
@@ -113,218 +64,28 @@ def test_unopened_files(tmp_path):
 
     files = ["src/a.py", "src/b.py", "src/c.py", "src/d.py"]
 
-    assert unopened_files(log, copy, files) == ["src/d.py"]
+    assert unopened_files(log, root, files) == ["src/d.py"]
 
 
-def outside_of(tmp_path: Path, copy: Path, name: str, arguments: dict) -> list[str]:
-    """Writes a turn log with one tool call and lists the paths outside the copy that it names."""
-    log = write_log(tmp_path / "turn.log", [(name, arguments)])
-    return paths_outside(log, copy)
-
-
-def git_bash_form(path: Path) -> str:
-    """Writes a Windows path the way Git Bash names it, such as /c/Users/me for C:/Users/me."""
-    drive, rest = os.path.splitdrive(str(path))
-    return "/" + drive[0].lower() + rest.replace("\\", "/")
-
-
-def test_a_relative_path_that_climbs_out_and_a_home_path_are_found_in_a_command():
-    command = "git diff --no-index ../../../../code/x/.ratchet/problems-x.md /dev/null"
-
-    assert absolute_paths_in(command) == ["../../../../code/x/.ratchet/problems-x.md"]
-    assert absolute_paths_in("cat ~/code/x/.ratchet/p.md") == ["~/code/x/.ratchet/p.md"]
-
-
-def test_bash_reads_through_dotdot_and_home_are_outside(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
+def test_unopened_files_are_resolved_against_the_project_root(tmp_path, monkeypatch):
+    """Proves a Glob pattern joined to its path field, a Read under $HOME and a Read whose path
+    climbs out and back in each count as opening a file of the project at 'root'."""
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     log = write_log(
         tmp_path / "turn.log",
         [
-            ("Bash", {"command": "git diff --no-index ../../outside/p.md /dev/null"}),
-            ("Bash", {"command": "cat ~/code/x/p.md"}),
+            ("Glob", {"pattern": "a.py", "path": "src"}),
+            ("Read", {"file_path": "$HOME/root/src/b.py"}),
+            ("Read", {"file_path": "src/../src/c.py"}),
         ],
     )
 
-    outside = paths_outside(log, copy)
+    files = ["src/a.py", "src/b.py", "src/c.py", "src/d.py"]
 
-    assert "../../outside/p.md" in outside
-    assert "~/code/x/p.md" in outside
-
-
-def test_a_grep_path_of_home_is_outside(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-
-    assert outside_of(tmp_path, copy, "Grep", {"pattern": "problems", "path": "~"}) != []
-
-
-def test_glob_and_grep_patterns_that_climb_out_are_outside(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "../../*.md"}) != []
-    assert outside_of(tmp_path, copy, "Grep", {"pattern": "x", "glob": "../other/**"}) != []
-    assert outside_of(tmp_path, copy, "Grep", {"pattern": "x", "path": ".."}) != []
-
-
-def test_search_strings_are_not_paths(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-
-    assert absolute_paths_in('grep -rn "/api/" src') == []
-    # a one-segment search string that names nothing on disk is not a path
-    assert absolute_paths_in('grep -rn "/apix" src') == []
-    assert outside_of(tmp_path, copy, "Bash", {"command": 'grep -rn "/apix" src'}) == []
-    assert outside_of(tmp_path, copy, "Bash", {"command": 'grep -rn "/api/" src'}) == []
-    assert outside_of(tmp_path, copy, "Grep", {"pattern": "/api/"}) == []
-
-
-def test_cd_to_the_root_or_a_root_folder_is_a_path():
-    assert absolute_paths_in("cd / && cat c/Users/me/code/x/.ratchet/p.md") == ["/"]
-    # the target of cd counts whether or not /home exists on this machine
-    assert absolute_paths_in("cd /home && cat me/x/.ratchet/p.md") == ["/home"]
-    assert absolute_paths_in("pushd /home && cat a.md") == ["/home"]
-
-
-def test_a_one_segment_absolute_path_that_exists_is_a_path():
-    # the first folder below the root of the current folder, such as /Users on Windows
-    segment = "/" + Path.cwd().resolve().parts[1]
-
-    assert absolute_paths_in(f"git diff --no-index {segment} /dev/null") == [segment]
-
-
-def test_bash_cd_to_the_root_is_outside(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    cd_root = "cd / && cat c/Users/me/x/.ratchet/p.md"
-    cd_home = "cd /home && cat me/x/.ratchet/p.md"
-
-    assert outside_of(tmp_path, copy, "Bash", {"command": cd_root}) == ["/"]
-    assert outside_of(tmp_path, copy, "Bash", {"command": cd_home}) == ["/home"]
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Git Bash paths name Windows drives")
-def test_a_git_bash_path_inside_the_copy_is_clean(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    inside = git_bash_form(copy / "a.py")
-    other = git_bash_form(tmp_path / "project" / "p.md")
-
-    assert outside_of(tmp_path, copy, "Bash", {"command": f"cat {inside}"}) == []
-    assert outside_of(tmp_path, copy, "Bash", {"command": f"cat {other}"}) == [other]
-
-
-def test_a_dotdot_that_stays_inside_the_copy_is_clean(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-
-    assert outside_of(tmp_path, copy, "Bash", {"command": "cat src/../a.py"}) == []
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "src/../*.py"}) == []
-    # one '..' more climbs out of the copy, so the check must count the '..' segments
-    assert outside_of(tmp_path, copy, "Bash", {"command": "cat src/../../a.py"}) != []
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "src/../../*.py"}) != []
-
-
-def test_a_command_with_unbalanced_quotes_is_still_searched_for_paths():
-    assert absolute_paths_in('cat "/home/me/a.py" "oops') == ["/home/me/a.py"]
-
-
-def test_a_pattern_is_taken_relative_to_the_path_of_its_call(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "*.py", "path": "src"}) == []
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "../*.py", "path": "src"}) == []
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "../../*.py", "path": "src"}) != []
-    assert outside_of(tmp_path, copy, "Grep", {"pattern": "x", "path": "src", "glob": "../../*.py"}) != []
-
-
-# The ways a shell command can name the home folder through a variable.
-HOME_VARIABLES = ("$HOME", "${HOME}", "$USERPROFILE", "${USERPROFILE}", "%USERPROFILE%", "%userprofile%")
-
-
-def test_home_variable_paths_are_found_in_a_command():
-    command = "git diff --no-index $HOME/code/x/.ratchet/problems-x.md /dev/null"
-
-    assert absolute_paths_in(command) == ["$HOME/code/x/.ratchet/problems-x.md"]
-    for home in HOME_VARIABLES:
-        assert absolute_paths_in(f"cat {home}/code/x/.ratchet/p.md") == [f"{home}/code/x/.ratchet/p.md"]
-
-
-def test_bash_reads_through_home_variables_are_outside(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-
-    for home in HOME_VARIABLES:
-        path = f"{home}/code/x/.ratchet/p.md"
-        assert path in outside_of(tmp_path, copy, "Bash", {"command": f"cat {path}"}), home
-
-
-def test_home_variables_are_expanded_before_the_inside_check(tmp_path, monkeypatch):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-
-    # the home folder holds the copy, so a path through home into the copy stays inside
-    assert outside_of(tmp_path, copy, "Bash", {"command": "cat $HOME/copy/a.py"}) == []
-    assert outside_of(tmp_path, copy, "Bash", {"command": "cat %USERPROFILE%/copy/a.py"}) == []
-    assert outside_of(tmp_path, copy, "Bash", {"command": "cat ${HOME}/p.md"}) == ["${HOME}/p.md"]
-
-
-def test_other_leading_variables_are_outside(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    # shlex keeps the backslash inside single quotes
-    quoted = r"%APPDATA%\p.md"
-
-    for path in ("$TMP/p.md", "${APPDATA}/p.md", "%APPDATA%/p.md", "$HOMEDIR/x"):
-        assert absolute_paths_in(f"cat {path}") == [path]
-        assert outside_of(tmp_path, copy, "Bash", {"command": f"cat {path}"}) == [path]
-    assert absolute_paths_in(f"cat '{quoted}'") == [quoted]
-    assert outside_of(tmp_path, copy, "Bash", {"command": f"cat '{quoted}'"}) == [quoted]
-
-
-def test_shell_variables_and_format_strings_that_are_not_paths_are_clean(tmp_path):
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    commands = (
-        'for f in $(git ls-files); do wc -l "$f"; done',
-        "echo $PWD $?",
-        "git log --format=%H%n%s",
-        "echo $HOMEDIR",
-    )
-
-    for command in commands:
-        assert absolute_paths_in(command) == [], command
-        assert outside_of(tmp_path, copy, "Bash", {"command": command}) == [], command
-
-
-def test_a_glob_pattern_that_starts_with_a_variable_is_not_joined_to_the_base(tmp_path):
-    copy = tmp_path / "copy"
-    (copy / "src").mkdir(parents=True)
-    assert outside_of(tmp_path, copy, "Glob", {"pattern": "$TMP/*.md", "path": "src"}) == ["$TMP/*.md"]
-
-
-def test_an_unset_home_variable_falls_back_to_the_home_folder(tmp_path, monkeypatch):
-    monkeypatch.delenv("USERPROFILE", raising=False)
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    assert outside_of(tmp_path, copy, "Bash", {"command": "cat $USERPROFILE/p.md"}) != []
-
-
-def test_a_one_segment_search_string_that_does_not_exist_is_not_a_path():
-    assert absolute_paths_in('grep -rn "/apix" src') == []
-
-
-@pytest.mark.parametrize("error", [OSError, ValueError])
-def test_a_word_that_cannot_be_a_path_on_disk_is_not_a_path(monkeypatch, error):
-    def fail(token):
-        raise error("bad path")
-
-    monkeypatch.setattr("ratchet.audit.turn_logs._git_bash_to_windows", fail)
-    assert absolute_paths_in("awk /^def /{print}") == []
+    assert unopened_files(log, root, files) == ["src/d.py"]
 
 
 def test_git_commands_that_pass_output_are_found(tmp_path):

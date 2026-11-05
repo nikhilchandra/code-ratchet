@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,14 +21,14 @@ from ratchet.audit.audit_run import (
     APPROVE,
     DISCARD,
     AuditRun,
-    _clean_up,
-    _drop_copy,
+    _end_audit,
     _new_slug,
     settle_audit,
     start_audit,
 )
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
 from ratchet.audit.settings import AuditSettings
+from ratchet.graph_lock import AUDIT, read_lock, take_lock
 from ratchet.project import Config, Project
 from ratchet.refactor.problem_list import find_latest_problem_list, find_problem_lists
 from lock_files import FAKE_PID, lock_path, read_job_file
@@ -272,8 +273,8 @@ def test_fresh_audits_as_a_first_audit_when_a_list_exists(audit_project: Project
 
 
 def test_an_audit_after_one_that_halted_in_prepare_still_starts(audit_project: Project) -> None:
-    """Proves an audit that halted on a dirty tree, before it made a copy, does not stop the next
-    audit from reaching its draft."""
+    """Proves an audit that halted on a dirty tree does not stop the next audit from reaching its
+    draft."""
     stray = audit_project.root / "stray.txt"
     stray.write_text("stray\n", encoding="utf-8")
     _, maker = scripted(audit_project)
@@ -284,26 +285,24 @@ def test_an_audit_after_one_that_halted_in_prepare_still_starts(audit_project: P
     assert waiting_run(audit_project).outcome == "waiting"
 
 
-def test_dropping_a_copy_ignores_a_path_that_is_not_a_copy(tmp_path: Path) -> None:
-    """A stored path that is not a ratchet copy is left alone and raises nothing."""
-    folder = tmp_path / "project"
-    folder.mkdir()
+def test_an_audit_leaves_no_temp_folder_behind(audit_project: Project) -> None:
+    """Proves an audit that halts on a dirty tree, and an audit that waits and is then approved,
+    leave no folder whose name starts with 'ratchet-audit-' in the system's temp folder."""
+    prefix = "ratchet-audit-"
+    temp = Path(tempfile.gettempdir())
+    before = {path.name for path in temp.iterdir() if path.name.startswith(prefix)}
+    # halt one audit on a dirty tree, then run one that waits and approve it
+    stray = audit_project.root / "stray.txt"
+    stray.write_text("stray\n", encoding="utf-8")
+    _, maker = scripted(audit_project)
+    with pytest.raises(AuditError, match="working tree"):
+        start_audit(audit_project, agent_maker=maker, interactive=False)
+    stray.unlink()
+    waiting_run(audit_project)
+    settle_audit(audit_project, APPROVE)
 
-    _drop_copy(folder)
-
-    assert folder.is_dir()
-
-
-def test_dropping_a_copy_ignores_a_copy_that_cannot_be_deleted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A copy whose files are locked raises nothing, so the audit goes on."""
-    def locked(copy: Path) -> None:
-        raise OSError(f"{copy} is locked")
-
-    monkeypatch.setattr("ratchet.audit.audit_run.remove_copy", locked)
-
-    _drop_copy(tmp_path / "copy")
+    after = {path.name for path in temp.iterdir() if path.name.startswith(prefix)}
+    assert after - before == set()
 
 
 def test_audit_run_has_no_except_clause_that_only_passes() -> None:
@@ -316,11 +315,18 @@ def test_audit_run_has_no_except_clause_that_only_passes() -> None:
     assert [item.evidence for item in findings if item.kind == "silent_except"] == []
 
 
-def test_cleaning_up_a_job_that_was_never_saved_does_nothing(audit_project: Project) -> None:
-    """A slug with no saved job is skipped."""
+def test_ending_an_audit_whose_job_was_never_saved_releases_the_lock(
+    audit_project: Project,
+) -> None:
+    """Proves ending an audit that took the lock but never saved its job raises nothing and
+    leaves the project with no lock."""
     graph = build_audit_graph(audit_project, AuditSettings())
+    slug = "audit-never-started"
+    take_lock(audit_project, graph=AUDIT, job=slug, job_file=graph.state_dir / f"{slug}.json")
 
-    _clean_up(graph, "audit-never-started")
+    _end_audit(audit_project, graph, slug)
+
+    assert read_lock(audit_project) is None
 
 
 def test_a_new_slug_counts_past_every_name_taken(audit_project: Project) -> None:

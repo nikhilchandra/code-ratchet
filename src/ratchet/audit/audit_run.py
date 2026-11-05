@@ -5,15 +5,10 @@ terminal when there is one, and settle a waiting audit by approving or discardin
 At most one graph runs at a time, through the lock of ratchet.graph_lock. An audit that waits at a
 gate keeps the lock. An audit that is waiting for approval is settled by
 settle_audit(), which a later `ratchet audit --approve` or `--discard` calls.
-
-An audit that does not wait deletes its copy of the code, whether it halted, finished, or was cut
-off by Ctrl-C. Each new audit also deletes the copies that earlier audits of the project left
-behind.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,7 +26,6 @@ from ratchet.audit.audit_graph import (
     build_audit_graph,
     done_ids,
 )
-from ratchet.audit.code_copy import CopyError, remove_copy
 from ratchet.audit.list_markdown import (
     Draft,
     DraftDropped,
@@ -248,52 +242,6 @@ def _approve_draft(
     return _resume_job(project, graph, job, decision, show) if decision else job
 
 
-def _drop_copy(copy: Path) -> None:
-    """Deletes an audit's copy of the code, and ignores a copy that cannot be deleted.
-
-    Args:
-        copy: The folder that a job stored as its copy. A path that is not a ratchet copy, or a
-            file that is locked, leaves the folder alone and does not stop the audit.
-    """
-    with contextlib.suppress(CopyError, OSError):
-        remove_copy(copy)
-
-
-def _sweep_copies(graph: AgentGraph) -> None:
-    """Deletes the copies that earlier audits left behind, except the copy of a waiting audit.
-
-    An earlier audit may have halted, finished, or been cut off by Ctrl-C in the middle of a step,
-    which leaves its job saved as running. A running job counts as cut off, so two audits must not
-    run at once. A job that has no copy, such as one that halted before it made one, is skipped.
-    start_audit sweeps only after it has refused to run beside a waiting audit.
-
-    Args:
-        graph: The audit graph.
-    """
-    for job in graph.jobs():
-        copy = job.data.get("copy")
-        if copy and job.status != JobStatus.WAITING:
-            _drop_copy(Path(copy))
-
-
-def _clean_up(graph: AgentGraph, slug: str) -> None:
-    """Deletes the copy of one job unless the job waits for a decision.
-
-    A job still running when this is called was cut off in the middle of a step, such as by Ctrl-C,
-    so its copy is deleted too.
-
-    Args:
-        graph: The audit graph.
-        slug: The job's name. A job that was never saved is left alone.
-    """
-    if not (graph.state_dir / f"{slug}.json").is_file():
-        return
-    job = graph.load(slug)
-    copy = job.data.get("copy")
-    if copy and job.status != JobStatus.WAITING:
-        _drop_copy(Path(copy))
-
-
 def _new_slug(graph: AgentGraph, base: str) -> str:
     """Returns the name that graph.start() gives a job started with the name 'base'.
 
@@ -307,8 +255,8 @@ def _new_slug(graph: AgentGraph, base: str) -> str:
 
 
 def _end_audit(project: Project, graph: AgentGraph, slug: str) -> None:
-    """Closes an audit run: halts a job that was cut off, deletes its copy unless it waits, and
-    releases the graph lock unless the job waits.
+    """Closes an audit run: halts a job that was cut off, and releases the graph lock unless
+    the job waits.
 
     A job cut off in a step, such as by an error or Ctrl-C, is saved as running, or as waiting
     when it was resumed from a gate, in which case this run's lock still says running. Ctrl-C at
@@ -326,7 +274,6 @@ def _end_audit(project: Project, graph: AgentGraph, slug: str) -> None:
     if status == JobStatus.RUNNING or (status == JobStatus.WAITING and cut_off):
         halt_job_file(job_file)
         status = JobStatus.HALTED
-    _clean_up(graph, slug)
     if status != JobStatus.WAITING:
         release_lock(project)
 
@@ -357,9 +304,7 @@ def start_audit(
         show: Writes one line to the owner.
         edit: Opens a file for the owner to change.
 
-    The copies that earlier audits left behind are deleted first, including those of audits that
-    were cut off by Ctrl-C. The copy of this audit is deleted unless it waits. When a re-audit
-    could not be blind, because the project's git history holds .ratchet, the note is shown.
+    When a re-audit could not be blind, because the project's git history holds .ratchet, the note is shown.
 
     Returns:
         The run. Its outcome is "waiting" when the owner has yet to decide on the draft.
@@ -390,8 +335,6 @@ def start_audit(
         if not has_records(project.root):
             raise AuditError("this project has not been set up yet. Run `ratchet init` first.")
 
-        # delete the copies of earlier halted or interrupted audits
-        _sweep_copies(graph)
         job = graph.start(prompt, slug=slug)
         _hold_at_gate(project, job)
         if job.data.get("ratchet_commit", ""):
@@ -405,8 +348,7 @@ def start_audit(
             run.draft_path = str(graph.state_dir / job.slug / "draft.md")
         return run
     finally:
-        # halt a job cut off mid-step, delete its copy unless it waits, and release the lock
-        # unless it waits
+        # halt a job cut off mid-step, and release the lock unless it waits
         _end_audit(project, graph, slug)
 
 
@@ -450,6 +392,5 @@ def settle_audit(
             return run
         return _finish(_resume_job(project, graph, job, {"decision": decision}))
     finally:
-        # halt a job cut off mid-step, delete its copy unless it waits, and release the lock
-        # unless it waits
+        # halt a job cut off mid-step, and release the lock unless it waits
         _end_audit(project, graph, job.slug)

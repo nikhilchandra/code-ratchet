@@ -417,14 +417,14 @@ def _records_since(root: Path, list_name: str) -> list[str]:
 
 
 def _unusable_checks(
-    checks: list[OldEntryCheck], old_ids: list[str], copy: Path, inventory: list[InventoryItem]
+    checks: list[OldEntryCheck], old_ids: list[str], root: Path, inventory: list[InventoryItem]
 ) -> list[str]:
     """Finds the old ids that the rechecker left out or answered without a current place.
 
     Args:
         checks: The rechecker's checks.
         old_ids: Every problem id of the old list.
-        copy: The folder the citations' files are relative to.
+        root: The project's folder, which the citations' files are relative to.
         inventory: The modules and classes of the code.
 
     Returns:
@@ -443,7 +443,7 @@ def _unusable_checks(
         subject = check.finding.subject.strip()
         known = any(subject == name or subject.startswith(f"{name}.") for name in names)
         cited = any(result.fixed is not None
-                    for result in check_citations(copy, check.finding.evidence))
+                    for result in check_citations(root, check.finding.evidence))
         if not (known and cited):
             unusable.append(old_id)
     return unusable
@@ -501,12 +501,12 @@ def _old_question(entry: Entry) -> tuple[str, str]:
 
 
 def _fix_finding(
-    copy: Path, label: str, finding: Finding, results: list[CitationResult], removed: list[str]
+    root: Path, label: str, finding: Finding, results: list[CitationResult], removed: list[str]
 ) -> Finding:
     """Corrects the lines of a finding's citations and removes the ones that do not match.
 
     Args:
-        copy: The folder the citations' files are relative to.
+        root: The project's folder, which the citations' files are relative to.
         label: The label of the item that holds the finding, for the record of removed citations.
         finding: The finding to fix.
         results: The list that every citation's result is added to.
@@ -517,7 +517,7 @@ def _fix_finding(
     """
     def fix(citations: list[Citation]) -> list[Citation]:
         kept = []
-        for result in check_citations(copy, citations):
+        for result in check_citations(root, citations):
             results.append(result)
             if result.fixed is not None:
                 kept.append(result.fixed)
@@ -531,11 +531,11 @@ def _fix_finding(
     )
 
 
-def _fix_group(copy: Path, group: Group, results: list[CitationResult]) -> Group:
+def _fix_group(root: Path, group: Group, results: list[CitationResult]) -> Group:
     """Corrects the citations of every text in a group.
 
     Args:
-        copy: The folder the citations' files are relative to.
+        root: The project's folder, which the citations' files are relative to.
         group: The group.
         results: The list that every citation's result is added to.
 
@@ -544,7 +544,7 @@ def _fix_group(copy: Path, group: Group, results: list[CitationResult]) -> Group
     """
     removed: list[str] = []
     items = tuple(
-        replace(item, finding=_fix_finding(copy, item.label, item.finding, results, removed))
+        replace(item, finding=_fix_finding(root, item.label, item.finding, results, removed))
         for item in group.items
     )
     text = next(item.finding for item in items if item.label == group.text_label)
@@ -776,7 +776,7 @@ def build_audit_graph(
         the old ids it left out or gave no current place. When the history holds .ratchet, the
         auditor runs in the blind audit's place."""
         folder = folder_of(job)
-        copy = project.root
+        root = project.root
         old_name = job.data["old_list"]
         check_cost(job, settings.auditor.budget_usd, settings.rechecker.budget_usd)
         inventory = _load_inventory(folder)
@@ -809,7 +809,7 @@ def build_audit_graph(
 
         # ask again for the old ids that have no current place, and keep the better checks
         answer: RecheckAnswer = recheck_reply.data
-        unusable = _unusable_checks(answer.checks, old_ids, copy, inventory)
+        unusable = _unusable_checks(answer.checks, old_ids, root, inventory)
         if unusable:
             check_cost(job, settings.rechecker.budget_usd,
                        spent=fresh_reply.cost_usd + recheck_reply.cost_usd)
@@ -822,7 +822,7 @@ def build_audit_graph(
             kept = {check.id: check for check in answer.checks}
             kept.update({old_id: again[old_id] for old_id in unusable if old_id in again})
             answer = answer.model_copy(update={"checks": list(kept.values())})
-            unusable = _unusable_checks(answer.checks, old_ids, copy, inventory)
+            unusable = _unusable_checks(answer.checks, old_ids, root, inventory)
             if unusable:
                 raise AuditError("the rechecker gave no current citation or subject for "
                                  f"{', '.join(unusable)}, even when asked again")
@@ -909,11 +909,11 @@ def build_audit_graph(
     @graph.step("check-citations", next=("questions", "check"))
     def check_citations_step(job: Job) -> str:
         folder = folder_of(job)
-        copy = project.root
+        root = project.root
         result = _load_groups(folder)
         results: list[CitationResult] = []
-        groups = [_fix_group(copy, group, results) for group in result.groups]
-        done = [_fix_group(copy, group, results) for group in result.done]
+        groups = [_fix_group(root, group, results) for group in result.groups]
+        done = [_fix_group(root, group, results) for group in result.done]
         (folder / "citations.md").write_text(render_report(results), encoding="utf-8")
         _write_json(folder / "groups.json", {"groups": groups, "done": done})
         return "questions" if _gather(folder)[0] else "check"
@@ -940,7 +940,7 @@ def build_audit_graph(
         if moved:
             raise AuditError(f"{moved}, so no citation can be checked against the code the audit "
                              "started on. Run `ratchet audit` again.")
-        copy = project.root
+        root = project.root
         folder = folder_of(job)
         gathered = _gather(folder)[0]
         answers = {label: text.strip() for label, text in job.data.get("answers", {}).items()
@@ -989,7 +989,7 @@ def build_audit_graph(
             made = []
             for entry in entries:
                 removed: list[str] = []
-                finding = _fix_finding(copy, "/".join(entry.sources), entry.finding, results, removed)
+                finding = _fix_finding(root, "/".join(entry.sources), entry.finding, results, removed)
                 extra = (f"citations that do not match the code were removed: {', '.join(removed)}",)
                 made.append(replace(entry, finding=finding,
                                     notes=entry.notes + (extra if removed else ())))
@@ -1002,7 +1002,7 @@ def build_audit_graph(
             if decision.decision == QuestionDecision.PROBLEM:
                 removed: list[str] = []
                 fixed_finding = _fix_finding(
-                    copy, decision.label, decision.finding, results, removed)
+                    root, decision.label, decision.finding, results, removed)
                 decision = decision.model_copy(update={"finding": fixed_finding})
                 if removed:
                     notes.append(

@@ -11,7 +11,6 @@ from rooster import AgentError, GraphError
 from ratchet.agent_calls import NoAnswerError
 from ratchet.audit.audit_graph import AuditError
 from ratchet.audit.audit_run import APPROVE, DISCARD, settle_audit, start_audit
-from ratchet.audit.code_copy import CopyError
 from ratchet.audit.settings import COMMAND as AUDIT
 from ratchet.git import GitError
 from ratchet.graph_lock import LockError
@@ -197,7 +196,7 @@ def run_audit(args: argparse.Namespace) -> int:
         else:
             run = start_audit(project, args.prompt, fresh=args.fresh)
     except (
-        ProjectError, AuditError, CopyError, TargetDesignError, NoAnswerError, GitError,
+        ProjectError, AuditError, TargetDesignError, NoAnswerError, GitError,
         AgentError, GraphError, LockError,
     ) as error:
         print(f"ratchet: {error}", file=sys.stderr)
