@@ -73,3 +73,45 @@ def test_problems_errors_print_one_line(
     errors = capsys.readouterr().err.splitlines()
     assert len(errors) == 3
     assert all(line.startswith("ratchet: ") for line in errors)
+
+
+def test_audit_decisions_cannot_be_combined_with_a_request(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves --approve with -p or --fresh exits with 1, and --approve with --discard is refused
+    by the parser."""
+    write_project_with_one_list(tmp_path)
+    project = str(tmp_path)
+
+    assert main(["audit", "--approve", "-p", "x", "--project", project]) == 1
+    assert main(["audit", "--discard", "--fresh", "--project", project]) == 1
+    with pytest.raises(SystemExit) as stop:
+        main(["audit", "--approve", "--discard", "--project", project])
+
+    assert stop.value.code == 2
+    errors = capsys.readouterr().err
+    assert errors.count("cannot be combined with -p or --fresh") == 2
+
+
+def test_audit_approve_without_a_waiting_audit_prints_one_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves --approve with no waiting audit exits with 1 and one message."""
+    write_project_with_one_list(tmp_path)
+
+    code = main(["audit", "--approve", "--project", str(tmp_path)])
+
+    assert code == 1
+    assert capsys.readouterr().err.startswith("ratchet: no audit is waiting")
+
+
+def test_audit_before_init_prints_one_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves an audit in a project that has not run init exits with 1 and names init."""
+    write_project_with_one_list(tmp_path)
+
+    code = main(["audit", "--project", str(tmp_path)])
+
+    assert code == 1
+    assert "ratchet init" in capsys.readouterr().err

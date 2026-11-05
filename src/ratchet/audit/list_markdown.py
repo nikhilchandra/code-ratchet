@@ -18,6 +18,8 @@ NOTE_MARKER = "> Owner note:"
 # The heading of the section that holds the notes that belong to no entry.
 NOTES_HEADING = "## Owner notes"
 OPEN_HEADING = "## Open"
+# The heading of the section that holds the questions for the owner, without its marker.
+QUESTIONS_HEADING = "Questions for the owner"
 
 
 @dataclass
@@ -115,7 +117,7 @@ def render_draft(draft: Draft) -> str:
     lines += [OPEN_HEADING, ""]
     for problem in draft.problems:
         lines += _render_problem(problem)
-    lines += ["## Questions for the owner", ""]
+    lines += [f"## {QUESTIONS_HEADING}", ""]
     for question in draft.questions:
         lines += [f"### {question.id}. {question.title}", "", question.text.strip(), "",
                   "Answer:", ""]

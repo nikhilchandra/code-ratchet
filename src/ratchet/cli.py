@@ -9,6 +9,8 @@ from pathlib import Path
 from rooster import AgentError, GraphError
 
 from ratchet.agent_calls import NoAnswerError
+from ratchet.audit.audit_graph import AuditError
+from ratchet.audit.audit_run import APPROVE, DISCARD, settle_audit, start_audit
 from ratchet.audit.settings import COMMAND as AUDIT
 from ratchet.git import GitError
 from ratchet.init_project import InitError, init_project
@@ -43,6 +45,25 @@ def build_parser() -> argparse.ArgumentParser:
                       help="agree to stop tracking .ratchet without asking")
     init.add_argument("--project", type=Path, default=Path.cwd(),
                       help="the project's folder (default: here)")
+    audit = commands.add_parser(
+        AUDIT,
+        help="audit the code against the target design and the standard, and write a problem list",
+        description="Has a team of agents audit a copy of the code and draft a problem list. "
+                    "In a terminal you answer their questions and approve the draft. With no "
+                    "terminal, or when you choose later, the audit waits for --approve or "
+                    "--discard. A project that has a list gets a re-audit of it.",
+    )
+    audit.add_argument("-p", "--prompt", default="",
+                       help="what to look at in this audit, in your own words")
+    audit.add_argument("--fresh", action="store_true",
+                       help="audit as a first audit even when a problem list exists")
+    decision = audit.add_mutually_exclusive_group()
+    decision.add_argument("--approve", action="store_true",
+                          help="publish the draft of the audit that is waiting")
+    decision.add_argument("--discard", action="store_true",
+                          help="discard the draft of the audit that is waiting")
+    audit.add_argument("--project", type=Path, default=Path.cwd(),
+                       help="the project's folder, which holds .ratchet (default: here)")
     problems = commands.add_parser(
         "problems",
         help="show the problem lists, one problem, or a problem's history",
@@ -97,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "init":
         return run_init(args)
+    if args.command == AUDIT:
+        return run_audit(args)
     if args.command == "problems":
         return run_problems(args)
     if args.command == "reopen":
@@ -146,6 +169,38 @@ def run_init(args: argparse.Namespace) -> int:
         print(f"ratchet: {action}")
     if not actions:
         print("ratchet: nothing to do, this project is already set up")
+    return 0
+
+
+def run_audit(args: argparse.Namespace) -> int:
+    """Runs `ratchet audit` and prints how it ended.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        0 when the audit published, discarded or is waiting for the owner, and 1 when it stopped on
+        an error, which is printed.
+    """
+    try:
+        deciding = args.approve or args.discard
+        if deciding and (args.prompt or args.fresh):
+            raise ProjectError("--approve and --discard cannot be combined with -p or --fresh")
+        project = load_project(args.project, commands=COMMANDS)
+        if deciding:
+            run = settle_audit(project, APPROVE if args.approve else DISCARD)
+        else:
+            run = start_audit(project, args.prompt, fresh=args.fresh)
+    except (ProjectError, AuditError, NoAnswerError, GitError, AgentError, GraphError) as error:
+        print(f"ratchet: {error}", file=sys.stderr)
+        return 1
+    if run.outcome == "published":
+        print(f"ratchet: {run.slug} published {run.list_name}, ${run.cost_usd:.2f} at list price")
+    elif run.outcome == "discarded":
+        print(f"ratchet: {run.slug} was discarded, ${run.cost_usd:.2f} at list price")
+    else:
+        print(f"ratchet: {run.slug} is waiting for you, ${run.cost_usd:.2f} at list price. Read "
+              f"{run.draft_path}, then run `ratchet audit --approve` or `ratchet audit --discard`.")
     return 0
 
 

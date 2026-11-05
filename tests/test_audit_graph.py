@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -22,11 +23,13 @@ from ratchet.audit.agent_answers import (
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
 from ratchet.audit.code_copy import remove_copy
 from ratchet.audit.code_facts import build_inventory
+from ratchet.audit.evidence_hints import old_citations
 from ratchet.audit.settings import COMMAND, AuditSettings
 from ratchet.init_project import init_project
 from ratchet.project import Project, load_project
+from ratchet.problems_view import show_history
 from ratchet.records import commit_records, records_log
-from ratchet.refactor.ledger import load_ledger
+from ratchet.refactor.ledger import ProblemStatus, load_ledger, save_ledger
 from ratchet.refactor.problem_list import find_latest_problem_list, find_problem_lists, split_entries
 from ratchet.target_design import read_target_design
 from scripted_agents import ScriptedAgent, Turn
@@ -192,7 +195,7 @@ def start(audit_project: Project):
     """Returns a function that starts an audit with scripted turns and returns the job, the
     agents and the graph."""
     def run(turns: dict[str, list[Turn]] | None = None, settings: AuditSettings | None = None,
-            prompt: str = ""):
+            prompt: str = "", slug: str = SLUG):
         answers = {"auditor": AuditorAnswer, "fresh": AuditorAnswer, "list_reviewer_a": ListReview,
                    "list_reviewer_b": ListReview, "rechecker": RecheckAnswer,
                    "pair_judge": PairAnswer, "checker": CheckAnswer}
@@ -201,13 +204,13 @@ def start(audit_project: Project):
                   for name, schema in answers.items()}
         graph = build_audit_graph(audit_project, settings or AuditSettings(),
                                   lambda *_: agents)
-        return graph.start(prompt, slug=SLUG), agents, graph
+        return graph.start(prompt, slug=slug), agents, graph
     return run
 
 
-def audit_folder(project: Project) -> Path:
+def audit_folder(project: Project, slug: str = SLUG) -> Path:
     """Returns the folder of the audit that the tests start."""
-    return project.state_dir / "audits" / SLUG
+    return project.state_dir / "audits" / slug
 
 
 def test_a_full_walk_publishes_a_readable_list_and_commits(
@@ -547,7 +550,7 @@ def test_the_diagram_matches_the_table(audit_project: Project) -> None:
         ("group", "check-citations"),
         ("check-citations", "questions"), ("check-citations", "check"),
         ("questions", "check"),
-        ("check", "draft"),
+        ("check", "draft"), ("check", "publish"),
         ("draft", "publish"),
         ("publish", "finish"),
     }
@@ -572,3 +575,314 @@ def test_the_prompts_and_profiles_are_kept(audit_project: Project, start) -> Non
     prompts = sorted(path.name for path in (audit_folder(audit_project) / "prompts").iterdir())
     assert prompts == ["auditor-prompt.md", "checker-prompt.md", "list_reviewer_a-prompt.md",
                        "list_reviewer_b-prompt.md", "pair_judge-prompt.md"]
+
+
+# ---------------------------------------------------------------- the re-audit
+
+AGAIN = "audit-2"
+OLD_NAME = "problems-20260101-10h00m"
+
+
+def age_list(project: Project) -> str:
+    """Renames the newest list and its ledger to an older time, so that a second list can be
+    published in the same minute, and returns the new name."""
+    latest = find_latest_problem_list(project).name
+    (project.folder / f"{latest}.md").rename(project.folder / f"{OLD_NAME}.md")
+    shutil.move(project.state_dir / latest, project.state_dir / OLD_NAME)
+    path = project.state_dir / OLD_NAME / "ledger.json"
+    ledger = load_ledger(path, OLD_NAME)
+    ledger.problem_list = OLD_NAME
+    save_ledger(ledger, path)
+    return OLD_NAME
+
+
+@pytest.fixture
+def old_list(audit_project: Project, start) -> list:
+    """Publishes a first audit, ages its list, and returns the list's problem entries."""
+    start()[2].resume(SLUG, {"decision": "approve"})
+    entries = [entry for entry in find_latest_problem_list(audit_project).entries
+               if entry.is_problem]
+    age_list(audit_project)
+    return entries
+
+
+def entry_titled(entries: list, title: str):
+    """Returns the entry with a title."""
+    return next(entry for entry in entries if entry.title == title)
+
+
+def old_check(entry, verdict: str, left: str = "") -> dict:
+    """Returns the rechecker's check of an old entry, citing the entry's first place as it stands."""
+    places = old_citations(entry)
+    if places:
+        place = places[0]
+        current = finding(entry.fields["Subject"], entry.title, place.file, place.line, place.quote)
+        current["evidence"][0]["end_line"] = place.end_line
+    else:
+        # an entry with no evidence is cited at the first line of the cli module
+        current = finding(entry.fields["Subject"], entry.title, MAIN, 1, "from app.core import model")
+    return {"id": entry.id, "verdict": verdict, "what_is_left": left, "finding": current}
+
+
+def recheck_turn(entries: list, verdicts: dict[str, str] | None = None, left: str = "",
+                 **changes: object) -> dict:
+    """Returns the rechecker's answer, with a check for every entry. The verdict of an entry is
+    looked up by its title and is open when the title is not given."""
+    given = verdicts or {}
+    checks = [old_check(entry, given.get(entry.title, "open"), left) for entry in entries]
+    return {"checks": checks, "answered_questions": [], "from_reviewer_notes": []} | changes
+
+
+def fresh_turn(project: Project, problems: list[dict] | None = None) -> dict:
+    """Returns the blind audit's answer, with a verdict on every inventory item."""
+    return auditor_turn(project, problems=problems or [])
+
+
+def continuing_checker(split: dict[str, list[dict]] | None = None) -> Turn:
+    """Returns a checker turn that keeps every group and marks the entry of an old problem as
+    continuing it. A group whose old id is a key of 'split' is split into the given entries."""
+    def turn(prompt: str) -> dict:
+        checks = []
+        for row in rows_of(prompt):
+            text = {name: value for name, value in row["text"].items()
+                    if name not in ("verdicts", "old_verdict")}
+            if row["old_id"] in (split or {}):
+                outcome = "split"
+                entries = [{"continues_old": number == 0, "finding": entry}
+                           for number, entry in enumerate(split[row["old_id"]])]
+            else:
+                outcome = "keep"
+                entries = [{"continues_old": bool(row["old_id"]), "finding": text}]
+            checks.append({"key": row["key"], "outcome": outcome, "merge_into": "",
+                           "reason": "it holds", "entries": entries})
+        return {"checks": checks, "decisions": []}
+    return turn
+
+
+def reaudit_turns(project: Project, entries: list, **changes: object) -> dict[str, list[Turn]]:
+    """Returns the turns of a re-audit in which every agent answers and every old problem is open."""
+    return {
+        "fresh": [fresh_turn(project)],
+        "rechecker": [recheck_turn(entries)],
+        "pair_judge": [judge_turn],
+        "checker": [continuing_checker()],
+    } | changes
+
+
+def test_a_reaudit_runs_the_blind_audit_and_the_rechecker_and_skips_the_rest(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a project with a list gets a re-audit in which only the blind audit, the rechecker,
+    the pair judge and the checker are asked, and which waits at the draft."""
+    job, agents, graph = start(reaudit_turns(audit_project, old_list), slug=AGAIN)
+
+    folder = audit_folder(audit_project, AGAIN)
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    assert job.data["reaudit"] and job.data["old_list"] == OLD_NAME
+    for name in ("evidence-hints.md", "fresh.json", "recheck.json", "groups.json", "draft.md"):
+        assert (folder / name).is_file(), name
+    assert not (folder / "auditor.json").exists() and not (folder / "review-a.json").exists()
+    for name in ("auditor", "list_reviewer_a", "list_reviewer_b"):
+        assert agents[name].prompts == []
+    assert len(agents["fresh"].prompts) == 1 and len(agents["rechecker"].prompts) == 1
+
+
+def test_the_blind_audits_prompt_holds_none_of_the_old_titles(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves the blind audit is not told of the old list while the rechecker is."""
+    job, agents, graph = start(reaudit_turns(audit_project, old_list), slug=AGAIN)
+
+    # the code checker's findings are given to every agent, so only the agents' entries count
+    agents_entries = [entry for entry in old_list if not entry.fields["Sources"].startswith("C")]
+    assert len(agents_entries) == 2
+    for entry in agents_entries:
+        assert entry.title not in agents["fresh"].prompts[0]
+        assert entry.title in agents["rechecker"].prompts[0]
+    assert "Events:" in agents["rechecker"].prompts[0]
+    assert "# Evidence hints" in agents["rechecker"].prompts[0]
+
+
+def test_the_rechecker_is_asked_again_for_a_missing_id_and_a_missing_citation(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves an id left out and an id with a citation that does not match the code are asked for
+    again, in one retry that lists exactly those ids, and that the retry's checks are used."""
+    left_out, bogus = old_list[0], old_list[1]
+    first = recheck_turn(old_list)
+    first["checks"] = [check for check in first["checks"] if check["id"] != left_out.id]
+    wrong = next(check for check in first["checks"] if check["id"] == bogus.id)
+    wrong["finding"]["evidence"][0]["quote"] = "this text is not in the file"
+
+    turns = reaudit_turns(audit_project, old_list) | {
+        "rechecker": [first, recheck_turn(old_list, {left_out.title: "reopen"})]}
+    job, agents, graph = start(turns, slug=AGAIN)
+
+    retry = agents["rechecker"].prompts[1].split("# A retry", 1)[1]
+    assert len(agents["rechecker"].prompts) == 2
+    assert f"{left_out.id}, {bogus.id}" in retry.split(". Answer for")[0]
+    folder = audit_folder(audit_project, AGAIN)
+    assert (folder / "prompts" / "retry" / "rechecker-prompt.md").is_file()
+    assert job.status == JobStatus.WAITING
+    groups = json.loads((folder / "groups.json").read_text(encoding="utf-8"))["groups"]
+    assert {group["old_id"]: group["status"] for group in groups}[left_out.id] == "reopened"
+
+
+def test_a_rechecker_that_stays_wrong_halts_the_audit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves the audit halts when the retry still leaves an id without a current citation."""
+    first = recheck_turn(old_list)
+    first["checks"] = first["checks"][1:]
+    turns = reaudit_turns(audit_project, old_list) | {"rechecker": [first, first]}
+
+    with pytest.raises(AuditError, match=f"{old_list[0].id}.*even when asked again"):
+        start(turns, slug=AGAIN)
+    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
+        remove_copy(Path(job.data["copy"]))
+
+
+def test_a_reopened_problem_keeps_its_id_with_carried_and_reopened_events(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a problem the rechecker reopens keeps its id and is listed as reopened and carried
+    from the old list, and that its ledger holds a carried and a reopened event."""
+    target = entry_titled(old_list, FIRST["title"])
+    turns = reaudit_turns(audit_project, old_list) | {
+        "rechecker": [recheck_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
+    job, agents, graph = start(turns, slug=AGAIN)
+    graph.resume(AGAIN, {"decision": "approve"})
+
+    latest = find_latest_problem_list(audit_project)
+    entry = entry_titled(latest.entries, target.title)
+    assert entry.id == target.id
+    assert entry.fields["Status"] == "reopened"
+    assert entry.fields["Carried from"] == f"{OLD_NAME} {target.id}"
+    ledger = load_ledger(audit_project.state_dir / latest.name / "ledger.json", latest.name)
+    record = ledger.problems[target.id]
+    assert [(event.kind, event.by) for event in record.events] == [
+        ("carried", "re-audit"), ("reopened", "re-audit")]
+    assert record.events[1].note == "still rounds twice"
+    assert record.carried_from == f"{OLD_NAME} {target.id}"
+    assert records_log(audit_project.root)[0].endswith(f"audit: publish {latest.name}")
+
+
+def test_a_blocked_problem_comes_back_abandoned_with_its_sendbacks(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blocked problem is set aside in the new ledger, with the sendbacks it had."""
+    target = entry_titled(old_list, SECOND["title"])
+    path = audit_project.state_dir / OLD_NAME / "ledger.json"
+    ledger = load_ledger(path, OLD_NAME)
+    ledger.problems[target.id].sendbacks = 2
+    save_ledger(ledger, path)
+    turns = reaudit_turns(audit_project, old_list) | {
+        "rechecker": [recheck_turn(old_list, {target.title: "blocked"}, left="needs a decision")]}
+    job, agents, graph = start(turns, slug=AGAIN)
+    graph.resume(AGAIN, {"decision": "approve"})
+
+    latest = find_latest_problem_list(audit_project)
+    assert entry_titled(latest.entries, target.title).fields["Status"] == "blocked"
+    record = load_ledger(audit_project.state_dir / latest.name / "ledger.json",
+                         latest.name).problems[target.id]
+    assert record.status == ProblemStatus.ABANDONED and record.sendbacks == 2
+    assert [event.kind for event in record.events] == ["carried", "abandoned"]
+
+
+def test_a_fresh_finding_with_a_reopened_problem_is_split_and_the_old_id_stays(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a fresh finding that holds a reopened problem and another is split by the checker,
+    and that the old id stays on the part that continues the old problem."""
+    target = entry_titled(old_list, FIRST["title"])
+    broad = finding("app.cli.main.run", "run does two things wrong", MAIN, 5,
+                    "return round(model.total(1, 2), 2)")
+    broad["evidence"].append({"file": MODEL, "line": 7, "end_line": 7,
+                              "quote": "return round(a + b, 2)", "shows": "the line"})
+    extra = finding("app.cli.main", "run has no description", MAIN, 4, "def run():")
+    turns = reaudit_turns(audit_project, old_list) | {
+        "fresh": [fresh_turn(audit_project, [broad])],
+        "rechecker": [recheck_turn(old_list, {target.title: "reopen"})],
+        "checker": [continuing_checker({target.id: [FIRST, extra]})],
+    }
+    job, agents, graph = start(turns, slug=AGAIN)
+    graph.resume(AGAIN, {"decision": "approve"})
+
+    entries = find_latest_problem_list(audit_project).entries
+    continuing = entry_titled(entries, target.title)
+    created = entry_titled(entries, extra["title"])
+    assert continuing.id == target.id and continuing.fields["Status"] == "reopened"
+    assert re.search(r"\bF\d+\b", continuing.fields["Sources"])
+    assert created.id not in {entry.id for entry in old_list}
+    assert "Carried from" not in created.fields
+
+
+def test_the_history_reads_as_one_timeline_across_both_lists(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves `ratchet problems P7 --history` follows a carried problem back into the old list."""
+    target = entry_titled(old_list, FIRST["title"])
+    turns = reaudit_turns(audit_project, old_list) | {
+        "rechecker": [recheck_turn(old_list, {target.title: "reopen"}, left="still rounds twice")]}
+    start(turns, slug=AGAIN)[2].resume(AGAIN, {"decision": "approve"})
+    latest = find_latest_problem_list(audit_project).name
+
+    lines = show_history(audit_project, target.id).splitlines()
+
+    assert lines[0] == f"{target.id}  {target.title}"
+    assert [line.split("  ", 1)[1] for line in lines[1:]] == [
+        f"opened in {OLD_NAME} ({SLUG})",
+        f"carried into {latest} ({AGAIN})",
+        'reopened by a re-audit: "still rounds twice"',
+    ]
+
+
+def test_a_blind_audit_that_leaves_the_copy_halts_the_job(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a contaminated blind audit stops the job instead of being noted."""
+    outside = json.dumps(str(audit_project.root / ".ratchet" / "problems.md"))
+    message = '{"content": [{"name": "Read", "input": {"file_path": %s}}]}' % outside
+
+    def fresh(prompt: str) -> dict:
+        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return fresh_turn(audit_project)
+
+    with pytest.raises(AuditError, match="blind audit"):
+        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
+    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
+        remove_copy(Path(job.data["copy"]))
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
+def test_an_answered_old_question_is_decided_by_the_rechecker(
+    audit_project: Project, start
+) -> None:
+    """Proves the owner's answer under an old question reaches the rechecker, and a rule the
+    rechecker settles from it is added to rules.md."""
+    question = {"kind": "rules", "title": "Is rounding twice deliberate", "evidence": [],
+                "why_it_may_be_deliberate": "Money is rounded at each step.",
+                "what_would_settle": "A word from the owner."}
+    first = default_turns(audit_project) | {
+        "auditor": [auditor_turn(audit_project, questions=[question])]}
+    job, agents, graph = start(first)
+    graph.resume(SLUG)
+    graph.resume(SLUG, {"decision": "approve"})
+    entries = [entry for entry in find_latest_problem_list(audit_project).entries
+               if entry.is_problem]
+    age_list(audit_project)
+    old_path = audit_project.folder / f"{OLD_NAME}.md"
+    old_path.write_text(old_path.read_text(encoding="utf-8").replace(
+        "Answer:", "Answer: Round only in pricing.", 1), encoding="utf-8")
+    decision = {"id": "Q1", "decision": "rule", "reason": "settled", "finding": SECOND,
+                "rule_text": "Amounts are rounded to cents in one place only."}
+    turns = reaudit_turns(audit_project, entries) | {
+        "rechecker": [recheck_turn(entries, answered_questions=[decision])]}
+    job, agents, graph = start(turns, slug=AGAIN)
+
+    assert "Answer: Round only in pricing." in agents["rechecker"].prompts[0]
+    graph.resume(AGAIN, {"decision": "approve"})
+    rules = (audit_project.folder / "rules.md").read_text(encoding="utf-8")
+    assert f"- Amounts are rounded to cents in one place only. (decided in {AGAIN})\n" in rules
+    assert [entry.id for entry in find_latest_problem_list(audit_project).entries
+            if not entry.is_problem] == []

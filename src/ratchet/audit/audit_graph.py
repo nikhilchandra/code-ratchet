@@ -4,8 +4,10 @@ problem list, and the agents that the graph calls.
 A job goes through these steps:
     prepare: code checks that the audit may start, runs the code checker, takes the inventory and
         makes the copy of the code that the agents work in.
-    audit: the auditor writes the list.
-    review: list reviewers A and B each review the list, and may add problems.
+    audit: the auditor writes the list. In a re-audit the blind audit and the rechecker run
+        instead, and the rechecker checks every old problem against the code as it stands now.
+    review: list reviewers A and B each review the list, and may add problems. A re-audit skips
+        this step.
     group: code joins the findings that are about the same problem, and the pair judge decides the
         pairs that its rules cannot settle.
     check-citations: code checks every citation against the copy and fixes lines that moved.
@@ -15,8 +17,9 @@ A job goes through these steps:
     publish: the list is written with its ledger, the rules decisions are added to rules.md, and
         everything is committed in the records repository.
 
-When the job ends, job.data["outcome"] is "published" or "discarded". Every file the audit makes
-goes in .ratchet/state/audits/<job name>/.
+A job is a re-audit when the project already has a problem list. Then job.data["reaudit"] is true
+and job.data["old_list"] names the newest list. When the job ends, job.data["outcome"] is
+"published" or "discarded". Every file the audit makes goes in .ratchet/state/audits/<job name>/.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from ratchet import architecture
 from ratchet.agent_calls import NoAnswerError, ask, ask_together
 from ratchet.architecture import CodeFinding, check_architecture
 from ratchet.audit.agent_answers import (
+    AnsweredQuestion,
     AuditorAnswer,
     Bug,
     CheckAnswer,
@@ -44,23 +48,28 @@ from ratchet.audit.agent_answers import (
     Grade,
     GroupCheck,
     ListReview,
+    OldEntryCheck,
     OldVerdict,
     Outcome,
     Question,
     QuestionDecision,
     QuestionVerdict,
+    RecheckAnswer,
 )
 from ratchet.audit.agent_profiles import (
+    FRESH,
     Role,
     format_auditor_prompt,
     format_check_prompt,
     format_pair_prompt,
+    format_recheck_prompt,
     format_review_prompt,
     make_agents,
 )
 from ratchet.audit.citations import CitationResult, check_citations, render_report
 from ratchet.audit.code_copy import make_copy, remove_copy
 from ratchet.audit.code_facts import InventoryItem, build_inventory
+from ratchet.audit.evidence_hints import build_evidence_hints, renamed_files
 from ratchet.audit.grouping import (
     CODE,
     Group,
@@ -79,6 +88,7 @@ from ratchet.audit.list_markdown import (
     DraftDropped,
     DraftProblem,
     DraftQuestion,
+    QUESTIONS_HEADING,
     check_draft,
     render_draft,
     strip_owner_notes,
@@ -88,7 +98,9 @@ from ratchet.audit.turn_logs import paths_outside, unopened_files
 from ratchet.audit.verdicts import AppliedVerdicts, DroppedEntry, FinalEntry, apply_verdicts
 from ratchet.git import Repo
 from ratchet.project import FOLDER, Project, read_markdown
-from ratchet.records import commit_records, has_records
+from ratchet.problem_history import problem_history, publish_time
+from ratchet.problems_view import describe_event
+from ratchet.records import commit_records, has_records, records_log
 from ratchet.refactor.ledger import (
     Ledger,
     ProblemEvent,
@@ -97,7 +109,12 @@ from ratchet.refactor.ledger import (
     load_ledger,
     save_ledger,
 )
-from ratchet.refactor.problem_list import find_problem_lists, highest_problem_id, split_entries
+from ratchet.refactor.problem_list import (
+    Entry,
+    find_problem_lists,
+    highest_problem_id,
+    split_entries,
+)
 from ratchet.target_design import is_template, read_target_design
 
 # The graph's name, which also names the folder under .ratchet/state that holds the audits.
@@ -281,7 +298,8 @@ def _load_applied(folder: Path) -> tuple[AppliedVerdicts, list[QuestionVerdict]]
 
 
 def _gather(folder: Path) -> tuple[list[tuple[str, Question]], list[Bug]]:
-    """Gathers the questions and the bugs that the auditor and the list reviewers gave.
+    """Gathers the questions and the bugs that the auditor, the list reviewers and the blind audit
+    gave.
 
     Args:
         folder: The audit's folder.
@@ -294,6 +312,7 @@ def _gather(folder: Path) -> tuple[list[tuple[str, Question]], list[Bug]]:
         _load_answer(folder, "auditor", AuditorAnswer),
         _load_answer(folder, "review-a", ListReview),
         _load_answer(folder, "review-b", ListReview),
+        _load_answer(folder, FRESH, AuditorAnswer),
     ]
     questions: list[tuple[str, Question]] = []
     bugs: list[Bug] = []
@@ -334,6 +353,145 @@ def _question_text(question: Question) -> str:
     if question.evidence:
         lines += ["", *_places(question.evidence)]
     return "\n".join(lines).strip()
+
+
+def _history_text(project: Project, list_name: str, problem_id: str) -> str:
+    """Writes one old problem's history for the rechecker.
+
+    Args:
+        project: The project, as read from its .ratchet folder.
+        list_name: The name of the old list.
+        problem_id: The problem's id in that list.
+
+    Returns:
+        The problem's events across the lists, oldest first, then the reviewers' notes and reasons
+        from the jobs of the list's ledger that named the problem.
+    """
+    events = [f"- {event.when}  {describe_event(event)}"
+              for event in problem_history(project, list_name, problem_id)]
+    ledger = load_ledger(project.state_dir / list_name / "ledger.json", list_name)
+    notes = []
+    for job in ledger.jobs:
+        if problem_id in job.problems:
+            notes += [f"- {job.id}: {text}" for text in [job.reason, *job.notes] if text]
+    return "\n".join([
+        "Events:", *(events or ["- none"]), "", "Reviewers' notes:", *(notes or ["- none"]),
+    ])
+
+
+def _commit_before(repo: Repo, when: str) -> str:
+    """Finds the newest commit of the code that is not later than a time.
+
+    Args:
+        repo: The code's repository.
+        when: The time, as "2026-11-02 14:05".
+
+    Returns:
+        The commit's hash, or "" when there is none.
+    """
+    return repo.run("rev-list", "-1", f"--before={when}", "HEAD", check=False).strip()
+
+
+def _records_since(root: Path, list_name: str) -> list[str]:
+    """Lists the records commits made after a list was published.
+
+    Args:
+        root: The project's own folder.
+        list_name: The name of the list.
+
+    Returns:
+        The lines of records_log, newest first, that come before the commit that published the
+        list. All the lines when that commit is not among the newest.
+    """
+    lines = records_log(root)
+    for number, line in enumerate(lines):
+        if line.endswith(f"audit: publish {list_name}"):
+            return lines[:number]
+    return lines
+
+
+def _unusable_checks(
+    checks: list[OldEntryCheck], old_ids: list[str], copy: Path, inventory: list[InventoryItem]
+) -> list[str]:
+    """Finds the old ids that the rechecker left out or answered without a current place.
+
+    Args:
+        checks: The rechecker's checks.
+        old_ids: Every problem id of the old list.
+        copy: The folder the citations' files are relative to.
+        inventory: The modules and classes of the code.
+
+    Returns:
+        The ids with no check, with no citation that matches the code, or with a subject that is
+        not in the inventory. A subject inside an inventory item, such as a function of a module,
+        counts as in the inventory.
+    """
+    names = [item.name for item in inventory]
+    by_id = {check.id: check for check in checks}
+    unusable = []
+    for old_id in old_ids:
+        check = by_id.get(old_id)
+        if check is None:
+            unusable.append(old_id)
+            continue
+        subject = check.finding.subject.strip()
+        known = any(subject == name or subject.startswith(f"{name}.") for name in names)
+        cited = any(result.fixed is not None
+                    for result in check_citations(copy, check.finding.evidence))
+        if not (known and cited):
+            unusable.append(old_id)
+    return unusable
+
+
+def _earlier_sendbacks(project: Project, carried_from: str) -> int:
+    """Reads how many times a problem was sent back in the list it was carried from.
+
+    Args:
+        project: The project, as read from its .ratchet folder.
+        carried_from: The older list and problem, such as "problems-20261102-14h05m P7".
+
+    Returns:
+        The problem's sendbacks in the older ledger, or 0 when it has none.
+    """
+    parts = carried_from.split()
+    if len(parts) != 2:
+        return 0
+    ledger = load_ledger(project.state_dir / parts[0] / "ledger.json", parts[0])
+    record = ledger.problems.get(parts[1])
+    return record.sendbacks if record else 0
+
+
+def _as_verdict(question: AnsweredQuestion) -> QuestionVerdict:
+    """Writes the rechecker's decision on an old question as a checker's decision.
+
+    Args:
+        question: The rechecker's decision.
+
+    Returns:
+        The same decision, labeled "O" and the old question's id so that it cannot be mistaken
+        for a question of this audit.
+    """
+    return QuestionVerdict(
+        label=f"O {question.id}", decision=question.decision, reason=question.reason,
+        finding=question.finding, rule_text=question.rule_text,
+    )
+
+
+def _old_question(entry: Entry) -> tuple[str, str]:
+    """Splits an old question into its text and the owner's answer.
+
+    Args:
+        entry: The question's entry in the old list.
+
+    Returns:
+        The text under the heading, and the text after the "Answer:" line, which is "" when the
+        owner left it empty.
+    """
+    lines = entry.text.splitlines()[1:]
+    marker = next((number for number, line in enumerate(lines) if line.startswith("Answer:")),
+                  len(lines))
+    answer = "\n".join(lines[marker:]).removeprefix("Answer:").strip()
+    return "\n".join(lines[:marker]).strip(), answer
 
 
 def _fix_finding(
@@ -470,7 +628,8 @@ def _ignores_ratchet(repo: Repo) -> bool:
 
 
 def build_audit_graph(
-    project: Project, settings: AuditSettings, agent_maker: AgentMaker = make_agents
+    project: Project, settings: AuditSettings, agent_maker: AgentMaker = make_agents,
+    force_first: bool = False,
 ) -> AgentGraph:
     """Returns the graph that carries one audit through its nine steps.
 
@@ -483,6 +642,7 @@ def build_audit_graph(
         project: The project, as read from its .ratchet folder.
         settings: The audit command's settings.
         agent_maker: The function that makes the audit's agents.
+        force_first: True to audit as a first audit even when the project has a problem list.
 
     Returns:
         The graph, ready to start jobs. A job waits at the questions gate for
@@ -546,19 +706,105 @@ def build_audit_graph(
                              f"code: {', '.join(changed[:10])}")
         if not _ignores_ratchet(repo):
             raise AuditError(f"the project's git does not ignore {FOLDER}. Run `ratchet init`.")
-        check_cost(job, settings.auditor.budget_usd)
+
+        # a project with a problem list gets a re-audit of its newest list, unless forced
+        lists = find_problem_lists(project)
+        reaudit = bool(lists) and not force_first
+        check_cost(job, settings.auditor.budget_usd,
+                   settings.rechecker.budget_usd if reaudit else 0.0)
 
         design = read_target_design(project.rules)
         folder = folder_of(job)
         folder.mkdir(parents=True, exist_ok=True)
         _write_json(folder / "code-findings.json", check_architecture(project, design))
         _write_json(folder / "inventory.json", build_inventory(project, design))
-        job.data.update(head=repo.run("rev-parse", "HEAD").strip(), reaudit=False, notes=[])
+        job.data.update(head=repo.run("rev-parse", "HEAD").strip(), reaudit=reaudit, notes=[],
+                        old_list="", published="")
+        if reaudit:
+            created, path = lists[-1]
+            published = publish_time(project, path.stem, created)
+            since = _commit_before(repo, published)
+            renames = renamed_files(repo, since) if since else {}
+            old_entries = split_entries(read_markdown(project.folder, path.name))
+            (folder / "evidence-hints.md").write_text(
+                build_evidence_hints(project.root, old_entries, renames), encoding="utf-8")
+            job.data.update(old_list=path.stem, published=published)
         job.data["copy"] = str(make_copy(project.root, settings.hide, settings.history_with_ratchet))
         return "audit"
 
+    def note_units(job: Job, name: str, answer: AuditorAnswer, inventory: list[InventoryItem]) -> None:
+        """Notes the inventory items that an auditor's answer gave no verdict on."""
+        given = {unit.name for unit in answer.units}
+        missing = [item.name for item in inventory if item.name not in given]
+        if missing:
+            note(job, f"the {name} gave no verdict on {len(missing)} items of the inventory, "
+                      f"such as {', '.join(missing[:5])}")
+
+    def audit_again(job: Job) -> str:
+        """Runs the blind audit and the rechecker together, and asks the rechecker once more for
+        the old ids it left out or gave no current place."""
+        folder = folder_of(job)
+        copy = Path(job.data["copy"])
+        old_name = job.data["old_list"]
+        check_cost(job, settings.auditor.budget_usd, settings.rechecker.budget_usd)
+        inventory = _load_inventory(folder)
+
+        # the blind audit gets no list, ledger or earlier answer
+        fresh_prompt = format_auditor_prompt(job.prompt, _load_code_findings(folder), inventory)
+        old_text = read_markdown(project.folder, f"{old_name}.md")
+        old_ids = [entry.id for entry in split_entries(old_text) if entry.is_problem]
+        histories = {old_id: _history_text(project, old_name, old_id) for old_id in old_ids}
+        records = _records_since(project.root, old_name)
+        git_log = Repo(project.root).run(
+            "log", "--stat", f"--since={job.data['published']}", check=False)
+        hints = (folder / "evidence-hints.md").read_text(encoding="utf-8")
+        recheck_prompt = format_recheck_prompt(old_text, histories, records, git_log, hints)
+        chosen = agents_of(job)
+        fresh_reply, recheck_reply = ask_together(
+            [(chosen[FRESH], fresh_prompt), (chosen[Role.RECHECKER], recheck_prompt)],
+            folder / "prompts")
+        for reply in (fresh_reply, recheck_reply):
+            if isinstance(reply, NoAnswerError):
+                raise reply
+
+        # a blind audit that touched anything outside the copy is contaminated
+        log_path = fresh_reply.log_path
+        outside = paths_outside(log_path, copy) if log_path and log_path.is_file() else []
+        if outside:
+            raise AuditError("the blind audit named paths outside the copy of the code, so it may "
+                             f"have seen the old list: {', '.join(outside[:5])}")
+        _write_json(folder / f"{FRESH}.json", fresh_reply.data)
+        note_units(job, FRESH, fresh_reply.data, inventory)
+        check_turn(job, FRESH, fresh_reply.log_path, sorted({item.file for item in inventory}))
+        check_turn(job, "rechecker", recheck_reply.log_path)
+
+        # ask again for the old ids that have no current place, and keep the better checks
+        answer: RecheckAnswer = recheck_reply.data
+        unusable = _unusable_checks(answer.checks, old_ids, copy, inventory)
+        if unusable:
+            check_cost(job, settings.rechecker.budget_usd)
+            retry = ask(
+                chosen[Role.RECHECKER],
+                format_recheck_prompt(old_text, histories, records, git_log, hints, unusable),
+                folder / "prompts" / "retry")
+            check_turn(job, "rechecker", retry.log_path)
+            again = {check.id: check for check in retry.data.checks}
+            kept = {check.id: check for check in answer.checks}
+            kept.update({old_id: again[old_id] for old_id in unusable if old_id in again})
+            answer = answer.model_copy(update={"checks": list(kept.values())})
+            unusable = _unusable_checks(answer.checks, old_ids, copy, inventory)
+            if unusable:
+                raise AuditError("the rechecker gave no current citation or subject for "
+                                 f"{', '.join(unusable)}, even when asked again")
+        answer = answer.model_copy(
+            update={"checks": [check for check in answer.checks if check.id in old_ids]})
+        _write_json(folder / "recheck.json", answer)
+        return "group"
+
     @graph.step("audit", next=("review", "group"))
     def audit(job: Job) -> str:
+        if job.data["reaudit"]:
+            return audit_again(job)
         folder = folder_of(job)
         check_cost(job, settings.auditor.budget_usd)
         inventory = _load_inventory(folder)
@@ -566,11 +812,7 @@ def build_audit_graph(
         reply = ask(agents_of(job)[Role.AUDITOR], prompt, folder / "prompts")
         answer: AuditorAnswer = reply.data
         _write_json(folder / "auditor.json", answer)
-        given = {unit.name for unit in answer.units}
-        missing = [item.name for item in inventory if item.name not in given]
-        if missing:
-            note(job, f"the auditor gave no verdict on {len(missing)} items of the inventory, "
-                      f"such as {', '.join(missing[:5])}")
+        note_units(job, "auditor", answer, inventory)
         check_turn(job, "auditor", reply.log_path, sorted({item.file for item in inventory}))
         return "review"
 
@@ -600,13 +842,18 @@ def build_audit_graph(
         folder = folder_of(job)
         design = read_target_design(project.rules)
         reviews = [_load_answer(folder, name, ListReview) for name in ("review-a", "review-b")]
+        auditor = _load_answer(folder, "auditor", AuditorAnswer)
+        fresh = _load_answer(folder, FRESH, AuditorAnswer)
+        recheck = _load_answer(folder, "recheck", RecheckAnswer)
         items = make_items(
             project, design,
             code=_load_code_findings(folder),
-            listed=_load_answer(folder, "auditor", AuditorAnswer).problems,
+            listed=auditor.problems if auditor else [],
             added_a=reviews[0].added if reviews[0] else [],
             added_b=reviews[1].added if reviews[1] else [],
-            old=[], from_notes=[], fresh=[],
+            old=recheck.checks if recheck else [],
+            from_notes=recheck.from_reviewer_notes if recheck else [],
+            fresh=fresh.problems if fresh else [],
         )
         groups = group_items(items)
 
@@ -647,14 +894,18 @@ def build_audit_graph(
         rows = [{"id": label, "title": question.title, "text": _question_text(question)}
                 for label, question in _gather(folder)[0]]
         job.data["questions"] = rows
-        lines = ["# Questions for the owner", ""]
+        lines = [f"# {QUESTIONS_HEADING}", ""]
         for row in rows:
             lines += [f"### {row['id']}. {row['title']}", "", row["text"], "", "Answer:", ""]
         (folder / "questions.md").write_text("\n".join(lines), encoding="utf-8")
         return "check"
 
-    @graph.step("check", next=("draft",))
+    @graph.step("check", next=("draft", "publish"))
     def check(job: Job) -> str:
+        # a discard decided at the questions gate goes straight to publish, with no checker turn
+        if job.data.get("decision") == "discard":
+            remove_copy(Path(job.data["copy"]))
+            return "publish"
         folder = folder_of(job)
         copy = Path(job.data["copy"])
         try:
@@ -693,6 +944,9 @@ def build_audit_graph(
                 for group in skipped
             ]
             everything = CheckAnswer(checks=unjudged + judged.checks, decisions=judged.decisions)
+            recheck = _load_answer(folder, "recheck", RecheckAnswer)
+            old_decisions = [_as_verdict(question) for question in
+                             (recheck.answered_questions if recheck else [])]
             applied = apply_verdicts(result, everything)
 
             # check the citations of the final entries again
@@ -711,7 +965,7 @@ def build_audit_graph(
             # check the citations of the findings that turn questions into problems
             decisions = []
             notes = list(applied.notes)
-            for decision in judged.decisions:
+            for decision in [*judged.decisions, *old_decisions]:
                 if decision.decision == QuestionDecision.PROBLEM:
                     removed: list[str] = []
                     fixed_finding = _fix_finding(
@@ -753,6 +1007,9 @@ def build_audit_graph(
                    if text.strip()}
         decided = {decision.label: decision for decision in decisions}
         made = Draft(notes=list(job.data["notes"]) + list(applied.notes))
+        old_name = job.data["old_list"]
+        recheck = _load_answer(folder, "recheck", RecheckAnswer)
+        left = {check.id: check.what_is_left for check in recheck.checks} if recheck else {}
 
         # turn the owner's answered questions into what the checker decided for each
         new_problems: list[tuple[FinalEntry, str]] = []
@@ -776,6 +1033,30 @@ def build_audit_graph(
             elif decision.rule_text.strip():
                 rules.append(decision.rule_text)
 
+        # decide the old list's questions from the owner's answers, or ask them again
+        asked_again: list[tuple[str, str]] = []
+        old_questions = [
+            entry for entry in split_entries(read_markdown(project.folder, f"{old_name}.md"))
+            if entry.section == QUESTIONS_HEADING
+        ] if old_name else []
+        for entry in old_questions:
+            text, answer = _old_question(entry)
+            decision = decided.get(f"O {entry.id}") if answer else None
+            if answer:
+                text += f"\n\nThe owner answered: {answer}"
+            if decision is None or decision.decision == QuestionDecision.PARKED:
+                if decision is not None:
+                    text += f"\n\nThe audit left it open: {decision.reason.strip()}"
+                asked_again.append((entry.title, text))
+            elif decision.decision == QuestionDecision.PROBLEM:
+                made_entry = FinalEntry(decision.finding, "", NEW, (entry.id,), "", (), ())
+                new_problems.append((made_entry, entry.id))
+            elif decision.decision == QuestionDecision.DROPPED:
+                made.dropped.append(DraftDropped(
+                    f"D{len(made.dropped) + 1}", entry.title, decision.reason))
+            elif decision.rule_text.strip():
+                rules.append(decision.rule_text)
+
         # give out the ids, from one above the highest problem id in any list
         number = highest_problem_id(project)
         entries = [*applied.problems, *(entry for entry, _ in new_problems)]
@@ -796,6 +1077,7 @@ def build_audit_graph(
                 id=ids[id(entry)], title=finding.title, status=entry.status,
                 sources=list(entry.sources), grade=str(finding.grade), breaks=finding.breaks,
                 subject=finding.subject, what_is_wrong=finding.what_is_wrong,
+                carried_from=f"{old_name} {entry.old_id}" if entry.old_id else "",
                 after=_waits_on(entry, names), evidence=list(finding.evidence),
                 simpler_option=finding.simpler_option, done_when=list(finding.done_when),
                 tests=_tests_of(entry), notes=list(entry.notes),
@@ -805,6 +1087,9 @@ def build_audit_graph(
         for number, entry in enumerate(applied.questions, start=len(gathered) + 1):
             made.questions.append(
                 DraftQuestion(f"Q{number}", entry.finding.title, entry.finding.what_is_wrong))
+        for number, (title, text) in enumerate(
+                asked_again, start=len(gathered) + len(applied.questions) + 1):
+            made.questions.append(DraftQuestion(f"Q{number}", title, text))
         for dropped in applied.dropped:
             made.dropped.append(DraftDropped(
                 f"D{len(made.dropped) + 1}", dropped.finding.title, dropped.reason))
@@ -814,11 +1099,11 @@ def build_audit_graph(
             made.bugs.append(_spell(f"{entry.finding.title}: {entry.finding.what_is_wrong}"))
 
         text = render_draft(made)
-        errors = check_draft(text, _done_ids(project))
+        errors = check_draft(text, done_ids(project))
         if errors:
             raise AuditError("the draft cannot be published: " + "; ".join(errors))
         (folder / "draft.md").write_text(text, encoding="utf-8")
-        _write_json(folder / "draft.json", {"draft": made, "rules": rules})
+        _write_json(folder / "draft.json", {"draft": made, "rules": rules, "left": left})
         return "publish"
 
     @graph.step("publish", next=(None,))
@@ -833,7 +1118,7 @@ def build_audit_graph(
             raise AuditError(f"the draft gate needs a decision of approve or discard, not {decision!r}")
 
         text = (folder / "draft.md").read_text(encoding="utf-8")
-        errors = check_draft(text, _done_ids(project))
+        errors = check_draft(text, done_ids(project))
         if Repo(project.root).run("rev-parse", "HEAD").strip() != job.data["head"]:
             errors.append("HEAD has moved since the audit started, so the list is out of date")
         if errors:
@@ -848,21 +1133,36 @@ def build_audit_graph(
         published = strip_owner_notes(text)
         path.write_text(published, encoding="utf-8", newline="\n")
 
-        # seed the new list's ledger with an opened event for each problem
+        # seed the new list's ledger with an opened or carried event for each problem
+        saved = _read_json(folder / "draft.json")
+        by = "re-audit" if job.data["reaudit"] else "audit"
+        when = now.strftime(EVENT_TIME)
         ledger = Ledger(problem_list=name)
         for entry in split_entries(published):
-            if entry.is_problem:
-                carried = entry.fields.get("Carried from", "")
-                ledger.problems[entry.id] = ProblemRecord(
-                    status=ProblemStatus.OPEN, carried_from=carried,
-                    events=[ProblemEvent(when=now.strftime(EVENT_TIME),
-                                         kind="carried" if carried else "opened",
-                                         by="audit", note=job.slug)],
-                )
+            if not entry.is_problem:
+                continue
+            carried = entry.fields.get("Carried from", "")
+            status = entry.fields.get("Status", "")
+            record = ProblemRecord(
+                status=ProblemStatus.OPEN, carried_from=carried,
+                events=[ProblemEvent(when=when, kind="carried" if carried else "opened",
+                                     by=by, note=job.slug)],
+            )
+            left_note = saved.get("left", {}).get(entry.id, "")
+            if status == "reopened":
+                record.events.append(
+                    ProblemEvent(when=when, kind="reopened", by="re-audit", note=left_note))
+            elif status == "blocked":
+                # a blocked problem is set aside with the sendbacks it had before
+                record.status = ProblemStatus.ABANDONED
+                record.sendbacks = _earlier_sendbacks(project, carried)
+                record.events.append(
+                    ProblemEvent(when=when, kind="abandoned", by="re-audit", note=left_note))
+            ledger.problems[entry.id] = record
         save_ledger(ledger, project.state_dir / name / "ledger.json")
 
         # add the rules that the owner settled to rules.md
-        rules = _read_json(folder / "draft.json")["rules"]
+        rules = saved["rules"]
         if rules:
             (project.folder / "rules.md").write_text(
                 _add_rules(read_markdown(project.folder, "rules.md"), rules, job.slug),
@@ -876,7 +1176,7 @@ def build_audit_graph(
     return graph
 
 
-def _done_ids(project: Project) -> set[str]:
+def done_ids(project: Project) -> set[str]:
     """Collects the ids of the problems that any list's ledger marks done.
 
     Args:
