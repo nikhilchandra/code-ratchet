@@ -11,11 +11,13 @@ from rooster import AgentError, GraphError
 from ratchet.agent_calls import NoAnswerError
 from ratchet.git import GitError
 from ratchet.init_project import InitError, init_project
+from ratchet.problems_view import show_history, show_lists, show_problem
 from ratchet.project import ProjectError, load_project
 from ratchet.refactor.job_graph import RefactorError
 from ratchet.refactor.job_loop import run_refactor
 from ratchet.refactor.progress_lines import count_of
 from ratchet.refactor.settings import COMMAND as REFACTOR
+from ratchet.reopen import reopen_problem
 
 # Every command, which are also the sections that config.toml may have.
 COMMANDS = (REFACTOR,)
@@ -40,6 +42,32 @@ def build_parser() -> argparse.ArgumentParser:
                       help="agree to stop tracking .ratchet without asking")
     init.add_argument("--project", type=Path, default=Path.cwd(),
                       help="the project's folder (default: here)")
+    problems = commands.add_parser(
+        "problems",
+        help="show the problem lists, one problem, or a problem's history",
+        description="Shows the newest problem list with each problem's status and grade. Name a "
+                    "problem to see its full entry, and add --history to see what happened to "
+                    "it across the lists. It costs nothing and calls no agent.",
+    )
+    problems.add_argument("problem", nargs="?", default="",
+                          help="a problem to show in full, such as P7")
+    problems.add_argument("--all", action="store_true", dest="every_list",
+                          help="show every list, oldest first")
+    problems.add_argument("--history", action="store_true",
+                          help="show the events of the named problem, oldest first")
+    problems.add_argument("--project", type=Path, default=Path.cwd(),
+                          help="the project's folder (default: here)")
+    reopen = commands.add_parser(
+        "reopen",
+        help="mark a problem on the newest list as open again",
+        description="Sets a problem on the newest list back to open, records why in its history "
+                    "and commits that in the records repository. It costs nothing and calls no "
+                    "agent.",
+    )
+    reopen.add_argument("problem", help="the problem to reopen, such as P7")
+    reopen.add_argument("reason", help="why it is being reopened")
+    reopen.add_argument("--project", type=Path, default=Path.cwd(),
+                        help="the project's folder (default: here)")
     refactor = commands.add_parser(
         REFACTOR,
         help="improve the code's structure, one tested and reviewed commit at a time",
@@ -68,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "init":
         return run_init(args)
+    if args.command == "problems":
+        return run_problems(args)
+    if args.command == "reopen":
+        return run_reopen(args)
     try:
         project = load_project(args.project, commands=COMMANDS)
         run = run_refactor(project, max_jobs=args.max_jobs, focus=args.focus)
@@ -113,4 +145,51 @@ def run_init(args: argparse.Namespace) -> int:
         print(f"ratchet: {action}")
     if not actions:
         print("ratchet: nothing to do, this project is already set up")
+    return 0
+
+
+def run_reopen(args: argparse.Namespace) -> int:
+    """Runs `ratchet reopen` and prints what it did.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        0 when the problem was reopened, and 1 when it stopped on an error, which is printed.
+    """
+    try:
+        project = load_project(args.project, commands=COMMANDS)
+        name = reopen_problem(project, args.problem, args.reason)
+    except (ProjectError, GitError) as error:
+        print(f"ratchet: {error}", file=sys.stderr)
+        return 1
+    print(f"ratchet: reopened {args.problem} in {name}")
+    return 0
+
+
+def run_problems(args: argparse.Namespace) -> int:
+    """Runs `ratchet problems` and prints what it shows.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        0 when it showed something, and 1 when it stopped on an error, which is printed.
+    """
+    try:
+        if args.history and not args.problem:
+            raise ProjectError("--history needs a problem, such as `ratchet problems P7 --history`")
+        if args.every_list and args.problem:
+            raise ProjectError("--all cannot be combined with a problem")
+        project = load_project(args.project, commands=COMMANDS)
+        if args.problem and args.history:
+            text = show_history(project, args.problem)
+        elif args.problem:
+            text = show_problem(project, args.problem)
+        else:
+            text = show_lists(project, args.every_list)
+    except ProjectError as error:
+        print(f"ratchet: {error}", file=sys.stderr)
+        return 1
+    print(text)
     return 0

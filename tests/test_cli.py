@@ -35,3 +35,41 @@ def test_a_project_without_ratchet_fails_with_a_message(
 
     assert code == 1
     assert capsys.readouterr().err.startswith(f"ratchet: {tmp_path} has no .ratchet folder")
+
+
+def write_project_with_one_list(root: Path) -> None:
+    """Writes a .ratchet folder whose only list holds the problem P1."""
+    folder = root / ".ratchet"
+    folder.mkdir()
+    (folder / "config.toml").write_text('test_command = ["pytest"]\neditable = ["src/**"]\n',
+                                        encoding="utf-8")
+    (folder / "rules.md").write_text("rules\n", encoding="utf-8")
+    (folder / "problems-20261102-14h05m.md").write_text("## P1. first thing\n", encoding="utf-8")
+
+
+def test_problems_shows_the_newest_list(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves `ratchet problems` prints the list's problems and exits with 0."""
+    write_project_with_one_list(tmp_path)
+
+    code = main(["problems", "--project", str(tmp_path)])
+
+    assert code == 0
+    assert capsys.readouterr().out.splitlines()[0] == "P1  open  -  first thing"
+
+
+def test_problems_errors_print_one_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves a missing id, --history without an id and --all with an id each exit with 1."""
+    write_project_with_one_list(tmp_path)
+    project = str(tmp_path)
+
+    assert main(["problems", "P9", "--project", project]) == 1
+    assert main(["problems", "--history", "--project", project]) == 1
+    assert main(["problems", "P1", "--all", "--project", project]) == 1
+
+    errors = capsys.readouterr().err.splitlines()
+    assert len(errors) == 3
+    assert all(line.startswith("ratchet: ") for line in errors)

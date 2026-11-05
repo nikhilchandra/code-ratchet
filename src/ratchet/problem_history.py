@@ -18,7 +18,7 @@ from ratchet.refactor.problem_list import find_problem_lists, split_entries
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 
 
-def _publish_time(project: Project, name: str, created: datetime) -> str:
+def publish_time(project: Project, name: str, created: datetime) -> str:
     """Returns when a problem list was published.
 
     Args:
@@ -99,7 +99,7 @@ def problem_history(project: Project, list_name: str, problem_id: str) -> list[P
         name, wanted = current
         visited.add(name)
         created, path = lists[name]
-        published = _publish_time(project, name, created)
+        published = publish_time(project, name, created)
         ledger = load_ledger(project.state_dir / name / "ledger.json", name)
         record = ledger.problems.get(wanted)
         jobs = {job.id: job for job in ledger.jobs}
