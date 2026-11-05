@@ -9,6 +9,7 @@ from pathlib import Path
 from rooster import AgentError, GraphError
 
 from ratchet.agent_calls import NoAnswerError
+from ratchet.audit.settings import COMMAND as AUDIT
 from ratchet.git import GitError
 from ratchet.init_project import InitError, init_project
 from ratchet.problems_view import show_history, show_lists, show_problem
@@ -20,7 +21,7 @@ from ratchet.refactor.settings import COMMAND as REFACTOR
 from ratchet.reopen import reopen_problem
 
 # Every command, which are also the sections that config.toml may have.
-COMMANDS = (REFACTOR,)
+COMMANDS = (AUDIT, REFACTOR)
 
 
 def build_parser() -> argparse.ArgumentParser:

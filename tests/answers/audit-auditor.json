@@ -1,0 +1,149 @@
+{
+  "drift": "The report has grown its own money logic.",
+  "units": [
+    {
+      "name": "invoices.report",
+      "verdict": "problem",
+      "note": "Rounds on its own."
+    },
+    {
+      "name": "invoices.pricing",
+      "verdict": "fine",
+      "note": ""
+    },
+    {
+      "name": "invoices.invoice.Invoice",
+      "verdict": "question",
+      "note": "Tax placement is unclear."
+    }
+  ],
+  "problems": [
+    {
+      "subject": "invoices.report",
+      "title": "rounding is written twice",
+      "what_is_wrong": "Report and pricing each round an amount to cents.",
+      "grade": "standard",
+      "breaks": "S7",
+      "inferred_from": [],
+      "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+      "evidence": [
+        {
+          "file": "src/invoices/report.py",
+          "line": 42,
+          "end_line": 44,
+          "quote": "round(amount * 100) / 100",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "simpler_option": "Round in pricing.round_cents only and call it from report.",
+      "done_when": [
+        "round() appears only in pricing.py"
+      ],
+      "waits_on": [],
+      "tests": [
+        {
+          "file": "tests/test_report.py",
+          "how": "imports invoices.report and renders a row"
+        }
+      ]
+    },
+    {
+      "subject": "invoices.models",
+      "title": "rounding is written twice",
+      "what_is_wrong": "Report and pricing each round an amount to cents.",
+      "grade": "stated",
+      "breaks": "Modules do not import the cli.",
+      "inferred_from": [],
+      "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+      "evidence": [
+        {
+          "file": "src/invoices/report.py",
+          "line": 42,
+          "end_line": 44,
+          "quote": "round(amount * 100) / 100",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "simpler_option": "Round in pricing.round_cents only and call it from report.",
+      "done_when": [
+        "round() appears only in pricing.py"
+      ],
+      "waits_on": [],
+      "tests": [
+        {
+          "file": "tests/test_report.py",
+          "how": "imports invoices.report and renders a row"
+        }
+      ]
+    },
+    {
+      "subject": "invoices.views",
+      "title": "rounding is written twice",
+      "what_is_wrong": "Report and pricing each round an amount to cents.",
+      "grade": "inferred",
+      "breaks": "Views keep no money logic.",
+      "inferred_from": [
+        {
+          "file": "src/invoices/views.py",
+          "line": 10,
+          "end_line": 12,
+          "quote": "return fmt(total)",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+      "evidence": [
+        {
+          "file": "src/invoices/report.py",
+          "line": 42,
+          "end_line": 44,
+          "quote": "round(amount * 100) / 100",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "simpler_option": "Round in pricing.round_cents only and call it from report.",
+      "done_when": [
+        "round() appears only in pricing.py"
+      ],
+      "waits_on": [],
+      "tests": [
+        {
+          "file": "tests/test_report.py",
+          "how": "imports invoices.report and renders a row"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "kind": "rules",
+      "title": "Is tax allowed in the report?",
+      "evidence": [
+        {
+          "file": "src/invoices/report.py",
+          "line": 60,
+          "end_line": 62,
+          "quote": "tax = amount * 0.2",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "why_it_may_be_deliberate": "The report may own display tax.",
+      "what_would_settle": "A rule on where tax is computed."
+    }
+  ],
+  "bugs": [
+    {
+      "title": "Subtotal drops the last line",
+      "evidence": [
+        {
+          "file": "src/invoices/invoice.py",
+          "line": 20,
+          "end_line": 22,
+          "quote": "for line in lines[:-1]:",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "what_happens": "The final line is never added."
+    }
+  ]
+}

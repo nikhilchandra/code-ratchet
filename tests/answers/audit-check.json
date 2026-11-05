@@ -1,0 +1,181 @@
+{
+  "checks": [
+    {
+      "key": "G1",
+      "outcome": "keep",
+      "merge_into": "",
+      "reason": "Decided.",
+      "entries": [
+        {
+          "continues_old": true,
+          "finding": {
+            "subject": "invoices.report",
+            "title": "rounding is written twice",
+            "what_is_wrong": "Report and pricing each round an amount to cents.",
+            "grade": "standard",
+            "breaks": "S7",
+            "inferred_from": [],
+            "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+            "evidence": [
+              {
+                "file": "src/invoices/report.py",
+                "line": 42,
+                "end_line": 44,
+                "quote": "round(amount * 100) / 100",
+                "shows": "shows the repeated rounding"
+              }
+            ],
+            "simpler_option": "Round in pricing.round_cents only and call it from report.",
+            "done_when": [
+              "round() appears only in pricing.py"
+            ],
+            "waits_on": [],
+            "tests": [
+              {
+                "file": "tests/test_report.py",
+                "how": "imports invoices.report and renders a row"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "key": "G2",
+      "outcome": "merge_into",
+      "merge_into": "G1",
+      "reason": "Decided.",
+      "entries": []
+    },
+    {
+      "key": "G3",
+      "outcome": "split",
+      "merge_into": "",
+      "reason": "Decided.",
+      "entries": [
+        {
+          "continues_old": true,
+          "finding": {
+            "subject": "invoices.report",
+            "title": "rounding is written twice",
+            "what_is_wrong": "Report and pricing each round an amount to cents.",
+            "grade": "standard",
+            "breaks": "S7",
+            "inferred_from": [],
+            "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+            "evidence": [
+              {
+                "file": "src/invoices/report.py",
+                "line": 42,
+                "end_line": 44,
+                "quote": "round(amount * 100) / 100",
+                "shows": "shows the repeated rounding"
+              }
+            ],
+            "simpler_option": "Round in pricing.round_cents only and call it from report.",
+            "done_when": [
+              "round() appears only in pricing.py"
+            ],
+            "waits_on": [],
+            "tests": [
+              {
+                "file": "tests/test_report.py",
+                "how": "imports invoices.report and renders a row"
+              }
+            ]
+          }
+        },
+        {
+          "continues_old": false,
+          "finding": {
+            "subject": "invoices.cli",
+            "title": "rounding is written twice",
+            "what_is_wrong": "Report and pricing each round an amount to cents.",
+            "grade": "standard",
+            "breaks": "S7",
+            "inferred_from": [],
+            "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+            "evidence": [
+              {
+                "file": "src/invoices/report.py",
+                "line": 42,
+                "end_line": 44,
+                "quote": "round(amount * 100) / 100",
+                "shows": "shows the repeated rounding"
+              }
+            ],
+            "simpler_option": "Round in pricing.round_cents only and call it from report.",
+            "done_when": [
+              "round() appears only in pricing.py"
+            ],
+            "waits_on": [],
+            "tests": [
+              {
+                "file": "tests/test_report.py",
+                "how": "imports invoices.report and renders a row"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "key": "G4",
+      "outcome": "drop",
+      "merge_into": "",
+      "reason": "The copies differ on negative amounts.",
+      "entries": []
+    },
+    {
+      "key": "G5",
+      "outcome": "question",
+      "merge_into": "",
+      "reason": "Decided.",
+      "entries": []
+    },
+    {
+      "key": "G6",
+      "outcome": "bug",
+      "merge_into": "",
+      "reason": "Decided.",
+      "entries": []
+    }
+  ],
+  "decisions": [
+    {
+      "label": "Q1",
+      "decision": "parked",
+      "reason": "The owner did not know.",
+      "finding": {
+        "subject": "invoices.report",
+        "title": "rounding is written twice",
+        "what_is_wrong": "Report and pricing each round an amount to cents.",
+        "grade": "standard",
+        "breaks": "S7",
+        "inferred_from": [],
+        "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+        "evidence": [
+          {
+            "file": "src/invoices/report.py",
+            "line": 42,
+            "end_line": 44,
+            "quote": "round(amount * 100) / 100",
+            "shows": "shows the repeated rounding"
+          }
+        ],
+        "simpler_option": "Round in pricing.round_cents only and call it from report.",
+        "done_when": [
+          "round() appears only in pricing.py"
+        ],
+        "waits_on": [],
+        "tests": [
+          {
+            "file": "tests/test_report.py",
+            "how": "imports invoices.report and renders a row"
+          }
+        ]
+      },
+      "rule_text": ""
+    }
+  ]
+}

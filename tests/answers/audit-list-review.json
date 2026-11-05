@@ -1,0 +1,139 @@
+{
+  "reviews": [
+    {
+      "label": "L1",
+      "verdict": "agree",
+      "reason": "",
+      "finding": {
+        "subject": "invoices.report",
+        "title": "rounding is written twice",
+        "what_is_wrong": "Report and pricing each round an amount to cents.",
+        "grade": "standard",
+        "breaks": "S7",
+        "inferred_from": [],
+        "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+        "evidence": [
+          {
+            "file": "src/invoices/report.py",
+            "line": 42,
+            "end_line": 44,
+            "quote": "round(amount * 100) / 100",
+            "shows": "shows the repeated rounding"
+          }
+        ],
+        "simpler_option": "Round in pricing.round_cents only and call it from report.",
+        "done_when": [
+          "round() appears only in pricing.py"
+        ],
+        "waits_on": [],
+        "tests": [
+          {
+            "file": "tests/test_report.py",
+            "how": "imports invoices.report and renders a row"
+          }
+        ]
+      }
+    },
+    {
+      "label": "L2",
+      "verdict": "correct",
+      "reason": "The citation is a line off.",
+      "finding": {
+        "subject": "invoices.report",
+        "title": "rounding is written in report",
+        "what_is_wrong": "Report and pricing each round an amount to cents.",
+        "grade": "standard",
+        "breaks": "S7",
+        "inferred_from": [],
+        "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+        "evidence": [
+          {
+            "file": "src/invoices/report.py",
+            "line": 42,
+            "end_line": 44,
+            "quote": "round(amount * 100) / 100",
+            "shows": "shows the repeated rounding"
+          }
+        ],
+        "simpler_option": "Round in pricing.round_cents only and call it from report.",
+        "done_when": [
+          "round() appears only in pricing.py"
+        ],
+        "waits_on": [],
+        "tests": [
+          {
+            "file": "tests/test_report.py",
+            "how": "imports invoices.report and renders a row"
+          }
+        ]
+      }
+    },
+    {
+      "label": "L3",
+      "verdict": "dispute",
+      "reason": "The two functions differ on negative amounts.",
+      "finding": {
+        "subject": "invoices.report",
+        "title": "rounding is written twice",
+        "what_is_wrong": "Report and pricing each round an amount to cents.",
+        "grade": "standard",
+        "breaks": "S7",
+        "inferred_from": [],
+        "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+        "evidence": [
+          {
+            "file": "src/invoices/report.py",
+            "line": 42,
+            "end_line": 44,
+            "quote": "round(amount * 100) / 100",
+            "shows": "shows the repeated rounding"
+          }
+        ],
+        "simpler_option": "Round in pricing.round_cents only and call it from report.",
+        "done_when": [
+          "round() appears only in pricing.py"
+        ],
+        "waits_on": [],
+        "tests": [
+          {
+            "file": "tests/test_report.py",
+            "how": "imports invoices.report and renders a row"
+          }
+        ]
+      }
+    }
+  ],
+  "added": [
+    {
+      "subject": "invoices.cli",
+      "title": "rounding is written twice",
+      "what_is_wrong": "Report and pricing each round an amount to cents.",
+      "grade": "standard",
+      "breaks": "S7",
+      "inferred_from": [],
+      "history": "report.py was added after pricing.py in commit 4f2a9c1.",
+      "evidence": [
+        {
+          "file": "src/invoices/report.py",
+          "line": 42,
+          "end_line": 44,
+          "quote": "round(amount * 100) / 100",
+          "shows": "shows the repeated rounding"
+        }
+      ],
+      "simpler_option": "Round in pricing.round_cents only and call it from report.",
+      "done_when": [
+        "round() appears only in pricing.py"
+      ],
+      "waits_on": [],
+      "tests": [
+        {
+          "file": "tests/test_report.py",
+          "how": "imports invoices.report and renders a row"
+        }
+      ]
+    }
+  ],
+  "questions": [],
+  "bugs": []
+}

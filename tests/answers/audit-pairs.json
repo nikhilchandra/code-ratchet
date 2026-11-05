@@ -1,0 +1,14 @@
+{
+  "pairs": [
+    {
+      "pair": 1,
+      "same": true,
+      "reason": "Both describe the rounding in report."
+    },
+    {
+      "pair": 2,
+      "same": false,
+      "reason": "One is about tax and one about rounding."
+    }
+  ]
+}
