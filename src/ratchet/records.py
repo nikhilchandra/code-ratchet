@@ -45,9 +45,12 @@ def has_records(root: Path) -> bool:
         root: The project's own folder, which holds .ratchet.
 
     Returns:
-        True when .ratchet holds a .git entry.
+        True when .ratchet holds a .git entry that git takes as the folder's own repository. A
+        damaged .git, which git would pass over for the project's repository, gives False.
     """
-    return (root / FOLDER / ".git").exists()
+    if not (root / FOLDER / ".git").exists():
+        return False
+    return records_repo(root).run("rev-parse", "--git-dir", check=False).strip() == ".git"
 
 
 def init_records(root: Path) -> bool:

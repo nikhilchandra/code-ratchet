@@ -1,4 +1,5 @@
-"""Holds the audit command's own settings, read from the [audit] section of config.toml.
+"""The module contains the audit command's own settings, read from the [audit] section of
+config.toml.
 
 A setting left out takes the default given here.
 """

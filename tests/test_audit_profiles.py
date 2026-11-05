@@ -255,3 +255,32 @@ def test_written_profiles_are_accepted_by_agents(tmp_path: Path) -> None:
     assert set(agents) == {str(role) for role in Role} | {FRESH}
     path = write_profile(project, Role.AUDITOR, tmp_path / "audit" / "profiles")
     assert path.read_text(encoding="utf-8") == build_profile(project, Role.AUDITOR)
+
+
+def cli_form(path: Path) -> str:
+    """Returns an absolute path as Claude Code's permission rules write it, which is "//"
+    followed by the path with forward slashes and a Windows drive as a lowercase letter."""
+    posix = path.as_posix()
+    if path.drive:
+        return "//" + path.drive[0].lower() + posix[len(path.drive):]
+    return "/" + posix
+
+
+def test_audit_agents_cannot_read_the_project(tmp_path: Path) -> None:
+    """Proves every audit agent, the blind audit's included, has the project and its .ratchet
+    folder as hidden, both bare and with everything under them, and is denied Read on them."""
+    project = make_project(tmp_path)
+    settings = load_settings(project)
+    copy = tmp_path / "copy"
+    copy.mkdir()
+
+    agents = make_agents(project, settings, copy, tmp_path / "audit")
+
+    root, folder = project.root, project.folder
+    hidden = (str(root), str(root / "**"), str(folder), str(folder / "**"))
+    rules = {f"Read({cli_form(root)})", f"Read({cli_form(root)}/**)",
+             f"Read({cli_form(folder)})", f"Read({cli_form(folder)}/**)"}
+    assert set(agents) == {str(role) for role in Role} | {FRESH}
+    for name, agent in agents.items():
+        assert agent.hidden == hidden, name
+        assert rules <= set(agent._options().disallowed_tools), name

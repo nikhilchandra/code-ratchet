@@ -1,9 +1,10 @@
 """The module contains the functions that make the copy of a project's code that the audit's
 agents work in, and delete it again.
 
-The copy is a clone with its own git history, so an agent can run git log, show and blame. It has
-no other branch, no tag and no remote, and its history holds no .ratchet files, so an agent cannot
-reach an earlier audit's list through git.
+The copy is a clone with its own git history, so an agent can run git log, show and blame. It holds
+only the history of the project's current branch, with no other branch, no tag and no remote, and
+no object outside that history is left in it. Its history holds no .ratchet files, so an agent
+cannot reach an earlier audit's list through git.
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ from pathlib import Path
 from ratchet.git import GitError, Repo, find_program
 from ratchet.project import FOLDER
 
+# The start of the name of every copy's folder, which remove_copy checks before it deletes.
+COPY_PREFIX = "ratchet-audit-"
+
 # The branch that holds the code's history while the strip rewrites it.
 WORK_BRANCH = "ratchet-audit-work"
 
@@ -31,7 +35,8 @@ class CopyError(RuntimeError):
 def make_copy(root: Path, hide: list[str], history_with_ratchet: str) -> Path:
     """Makes a clone of a project's committed code with no other branch, tag or remote.
 
-    The history of the clone is cleaned of the .ratchet folder and of every path in 'hide'. The
+    The clone holds only the history of the project's current branch, and no object outside that
+    history is left in it. The history of the clone is cleaned of the .ratchet folder and of every path in 'hide'. The
     clone is checked out at the project's HEAD, detached.
 
     Args:
@@ -49,17 +54,15 @@ def make_copy(root: Path, hide: list[str], history_with_ratchet: str) -> Path:
             failed.
         GitError: A git command failed.
     """
-    folder = Path(tempfile.mkdtemp(prefix="ratchet-audit-"))
+    folder = Path(tempfile.mkdtemp(prefix=COPY_PREFIX))
     try:
         source = Repo(root)
-        source.run("clone", "-q", "--no-local", str(root), str(folder))
+        source.run("clone", "-q", "--no-local", "--single-branch", "--no-tags", str(root), str(folder))
         copy = Repo(folder)
-        # detach at the project's head, then delete every branch, tag and remote
+        # detach at the project's head, then delete every branch and remote
         copy.run("checkout", "-q", "--detach", source.run("rev-parse", "HEAD").strip())
         for branch in copy.run("for-each-ref", "--format=%(refname)", "refs/heads").split():
             copy.run("update-ref", "-d", branch)
-        for tag in copy.run("tag", "--list").split():
-            copy.run("tag", "-d", tag)
         for remote in copy.run("remote").split():
             copy.run("remote", "rm", remote)
         hidden = [FOLDER, *hide]
@@ -70,6 +73,9 @@ def make_copy(root: Path, hide: list[str], history_with_ratchet: str) -> Path:
                     "and history_with_ratchet is set to refuse"
                 )
             strip_history(folder, hidden)
+        # expire the reflog and prune every object that the remaining refs cannot reach
+        copy.run("reflog", "expire", "--expire=now", "--all")
+        copy.run("gc", "-q", "--prune=now")
         return folder
     except BaseException:
         remove_copy(folder)
@@ -77,7 +83,9 @@ def make_copy(root: Path, hide: list[str], history_with_ratchet: str) -> Path:
 
 
 def strip_history(folder: Path, hidden: list[str]) -> None:
-    """Removes paths from every commit of a copy, and then every trace of the old commits.
+    """Removes paths from every commit of a copy, and drops the refs that point at the old commits.
+
+    The old commit objects stay in the copy until make_copy prunes them.
 
     Args:
         folder: The copy's folder, with a detached HEAD and no branch.
@@ -105,8 +113,6 @@ def strip_history(folder: Path, hidden: list[str]) -> None:
         copy.run("update-ref", "-d", f"refs/heads/{WORK_BRANCH}")
         for reference in copy.run("for-each-ref", "--format=%(refname)", "refs/original").split():
             copy.run("update-ref", "-d", reference)
-        copy.run("reflog", "expire", "--expire=now", "--all")
-        copy.run("gc", "-q", "--prune=now")
         if copy.run("log", "--all", "--format=%h", "--", *hidden).strip():
             raise CopyError(f"the copy's history still holds {', '.join(hidden)} after the strip")
     except GitError as error:
@@ -118,10 +124,18 @@ def remove_copy(folder: Path) -> None:
 
     Args:
         folder: The copy's folder. A folder that is already gone is left alone.
+
+    Raises:
+        CopyError: The folder is not a ratchet copy, meaning its name does not start with
+            COPY_PREFIX or it is not directly inside the system's temp folder. Nothing is deleted.
     """
     def make_writable(function: Callable[[str], object], path: str, _: object) -> None:
         os.chmod(path, stat.S_IWRITE)
         function(path)
 
+    if not folder.name.startswith(COPY_PREFIX) or (
+        folder.resolve().parent != Path(tempfile.gettempdir()).resolve()
+    ):
+        raise CopyError(f"{folder} is not a ratchet copy, so it is not deleted")
     if folder.exists():
         shutil.rmtree(folder, onerror=make_writable)

@@ -12,7 +12,10 @@ from ratchet.init_project import init_project
 from ratchet.problems_view import show_history
 from ratchet.project import ProjectError, load_project
 from ratchet.records import records_log
-from ratchet.refactor.ledger import Ledger, ProblemRecord, ProblemStatus, load_ledger, save_ledger
+from ratchet.refactor.job_outcome import JobOutcome
+from ratchet.refactor.ledger import (
+    JobRecord, Ledger, ProblemRecord, ProblemStatus, load_ledger, save_ledger,
+)
 from ratchet.refactor.settings import COMMAND
 from ratchet.reopen import reopen_problem
 
@@ -88,6 +91,22 @@ def test_the_history_shows_the_reopen(root: Path) -> None:
     reopen_problem(project, "P7", "still repeated")
     last = show_history(project, "P7").splitlines()[-1]
     assert last.endswith('reopened by the owner: "still repeated"')
+
+
+def test_the_history_of_an_old_ledger_keeps_its_jobs_after_a_reopen(root: Path) -> None:
+    """Proves a ledger from before problem events still shows its job once P7 is reopened."""
+    project = load_project(root, commands=[COMMAND])
+    save_ledger(Ledger(problem_list=NAME, problems={}, jobs=[JobRecord(
+        id="J01", slug="J01", title="t", problems=["P7"], completes=["P7"],
+        outcome=JobOutcome.COMMITTED, commit="6918463", attempts=1, cost_usd=0.0,
+        ended="2026-11-02 16:20")]), project.state_dir / NAME / "ledger.json")
+    reopen_problem(project, "P7", "still repeated")
+    lines = show_history(project, "P7").splitlines()
+    wording = "J01 committed 6918463, marked done"
+    done = [i for i, line in enumerate(lines) if line.endswith(wording)]
+    assert len(done) == 1
+    assert lines[-1].endswith('reopened by the owner: "still repeated"')
+    assert done[0] < len(lines) - 1
 
 
 @pytest.mark.parametrize(("problem_id", "reason", "message"), [

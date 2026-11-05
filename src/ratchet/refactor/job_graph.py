@@ -325,9 +325,10 @@ def build_job_graph(
             report(job, "plan", f"refused: {refusal}")
             raise RefactorError(f"the plan was refused: {refusal}")
 
-        # record job_started for each of the plan's problems and save the ledger
+        # record job_started for each of the plan's problems under the job's new id and save the ledger
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        job_id = f"J{len(ledger.jobs) + 1:02d}"
+        job_id = f"J{ledger.next_job_number():02d}"
+        job.data["job_id"] = job_id
         for problem_id in answer.problems:
             problem = ledger.problems.setdefault(problem_id, ProblemRecord())
             problem.events.append(ProblemEvent(when=now, kind="job_started", by=job_id,

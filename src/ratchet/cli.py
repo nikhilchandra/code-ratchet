@@ -11,6 +11,7 @@ from rooster import AgentError, GraphError
 from ratchet.agent_calls import NoAnswerError
 from ratchet.audit.audit_graph import AuditError
 from ratchet.audit.audit_run import APPROVE, DISCARD, settle_audit, start_audit
+from ratchet.audit.code_copy import CopyError
 from ratchet.audit.settings import COMMAND as AUDIT
 from ratchet.git import GitError
 from ratchet.init_project import InitError, init_project
@@ -21,6 +22,7 @@ from ratchet.refactor.job_loop import run_refactor
 from ratchet.refactor.progress_lines import count_of
 from ratchet.refactor.settings import COMMAND as REFACTOR
 from ratchet.reopen import reopen_problem
+from ratchet.target_design import TargetDesignError
 
 # Every command, which are also the sections that config.toml may have.
 COMMANDS = (AUDIT, REFACTOR)
@@ -191,7 +193,10 @@ def run_audit(args: argparse.Namespace) -> int:
             run = settle_audit(project, APPROVE if args.approve else DISCARD)
         else:
             run = start_audit(project, args.prompt, fresh=args.fresh)
-    except (ProjectError, AuditError, NoAnswerError, GitError, AgentError, GraphError) as error:
+    except (
+        ProjectError, AuditError, CopyError, TargetDesignError, NoAnswerError, GitError,
+        AgentError, GraphError,
+    ) as error:
         print(f"ratchet: {error}", file=sys.stderr)
         return 1
     if run.outcome == "published":

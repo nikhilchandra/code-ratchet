@@ -63,7 +63,8 @@ class AppliedVerdicts:
         questions: The entries that go in the questions for the owner.
         bugs: The entries that go in the bugs noticed.
         dropped: The groups that were dropped.
-        done: The groups whose old entry is done or gone, which the checker did not see.
+        done: The groups that hold only the old entry of a problem that is done or gone, which the
+            checker did not see.
         notes: Notes for the owner that belong to no entry.
     """
 

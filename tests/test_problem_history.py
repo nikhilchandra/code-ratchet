@@ -97,6 +97,60 @@ def test_an_old_ledger_without_events_gets_events_from_its_jobs(tmp_path: Path) 
     assert history[1].job == "J01"
 
 
+def old_ledger() -> Ledger:
+    """Returns a ledger from before problem events, with one job J01 that completed P7."""
+    ledger = Ledger(problem_list=FIRST)
+    data = {"plan": plan(problems=["P7"], completes=["P7"]), "outcome": JobOutcome.COMMITTED,
+            "commit": "6918463"}
+    record_job(ledger, data, "job-1", 1.0, Caps())
+    ledger.jobs[0].ended = "2026-11-02 16:20"
+    ledger.problems.clear()
+    return ledger
+
+
+def test_an_old_ledger_keeps_its_jobs_after_a_new_event(tmp_path: Path) -> None:
+    """Proves an owner's reopen on an old ledger keeps the opened event and the job's event."""
+    project = make_project(tmp_path, FIRST)
+    ledger = old_ledger()
+    ledger.problems["P7"] = ProblemRecord(events=[event("2026-11-03 09:00", "reopened", "owner")])
+    save(project, FIRST, ledger)
+    history = problem_history(project, FIRST, "P7")
+    assert [(e.when, e.kind) for e in history] == [
+        ("2026-11-02 14:05", "opened"), ("2026-11-02 16:20", "done"),
+        ("2026-11-03 09:00", "reopened")]
+    assert history[1].job == "J01"
+    assert all(e.list == FIRST for e in history)
+
+
+def test_an_old_ledger_keeps_its_jobs_after_a_new_job_starts(tmp_path: Path) -> None:
+    """Proves a job_started for a job with no record yet does not hide the older job."""
+    project = make_project(tmp_path, FIRST)
+    ledger = old_ledger()
+    ledger.problems["P7"] = ProblemRecord(events=[
+        event("2026-11-03 09:00", "job_started", "J02", "J02")])
+    save(project, FIRST, ledger)
+    history = problem_history(project, FIRST, "P7")
+    assert [(e.when, e.kind, e.job) for e in history] == [
+        ("2026-11-02 14:05", "opened", ""), ("2026-11-02 16:20", "done", "J01"),
+        ("2026-11-03 09:00", "job_started", "J02")]
+
+
+def test_a_job_with_events_is_not_made_twice(tmp_path: Path) -> None:
+    """Proves a job with its own events gives them once, beside an older job that has none."""
+    project = make_project(tmp_path, FIRST)
+    ledger = old_ledger()
+    data = {"plan": plan(problems=["P7"], completes=[]), "outcome": JobOutcome.COMMITTED,
+            "commit": "a41c0de"}
+    record_job(ledger, data, "job-2", 1.0, Caps())
+    ledger.jobs[1].ended = "2026-11-03 09:00"
+    ledger.problems["P7"].events[0].when = "2026-11-03 09:00"
+    save(project, FIRST, ledger)
+    history = problem_history(project, FIRST, "P7")
+    assert [(e.when, e.kind, e.job) for e in history] == [
+        ("2026-11-02 14:05", "opened", ""), ("2026-11-02 16:20", "done", "J01"),
+        ("2026-11-03 09:00", "committed", "J02")]
+
+
 def test_the_publish_time_is_the_records_commit_that_added_the_list(tmp_path: Path) -> None:
     """Proves the opened event takes the time of the records commit when there is one."""
     project = make_project(tmp_path, FIRST)

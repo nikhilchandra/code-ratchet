@@ -1,7 +1,13 @@
-"""The module contains the checker that reads a project's Python files without an agent and finds the
-faults that follow from the module graph and the syntax tree, which means imports that break the
-target design, files that belong to no part, import cycles, imports hidden inside functions, touches
-of the outside world, global statements, mutable default arguments and careless exception handlers.
+"""The module contains the checker that finds faults in a project's Python files without an agent.
+
+The checker reads each module's imports and syntax tree. With a target design from rules.md, it
+finds imports the design does not allow, files that belong to no part, and places where a module
+in a part that may not touch the outside world does so. With or without a design, it finds import
+cycles, imports inside functions, global statements, mutable default arguments, bare except
+clauses and except clauses that only pass.
+
+The module also holds find_modules, read_imports and parse_module, which the audit's code facts
+and grouping use too.
 """
 
 from __future__ import annotations
@@ -213,7 +219,7 @@ def check_architecture(project: Project, design: TargetDesign | None) -> list[Co
     Args:
         project: The project, as read from its .ratchet folder.
         design: The target design, or None when rules.md has no TOML block. Without a design,
-            only import cycles and hidden imports are found.
+            only the import cycles, the hidden imports and the syntax findings are found.
 
     Returns:
         The findings, one for each pair of parts, each module, or each cycle.

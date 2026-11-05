@@ -7,7 +7,7 @@ judge's, on the few pairs that its rules cannot settle.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ratchet import architecture
 from ratchet.architecture import CodeFinding, Module, find_modules
@@ -149,7 +149,8 @@ class GroupingResult:
 
     Attributes:
         groups: The groups that go on to the checker.
-        done: The groups whose old entry is done or gone, which go to the done list.
+        done: The groups that hold only an old entry that is done or gone, which go to the done
+            list.
     """
 
     groups: tuple[Group, ...]
@@ -312,7 +313,9 @@ def finish_groups(
         reaudit: True for a re-audit, where a group with no old entry is new.
 
     Returns:
-        The groups for the checker and the groups for the done list.
+        The groups for the checker and the groups for the done list. The other items of a group
+        whose old entry is done or gone come back as a new group for the checker, with a note that
+        names the old id, unless a fresh item reopens the group.
 
     Raises:
         ValueError: If a label is used twice, or if the groups do not hold every item exactly once.
@@ -323,16 +326,45 @@ def finish_groups(
         raise ValueError("the groups must hold every labeled item exactly once")
     built = []
     reach: dict[frozenset[str], tuple[str, ...]] = {}
-    for number, members in enumerate(groups, start=1):
+    for number, (members, split_from) in enumerate(_split_done(groups), start=1):
         names = frozenset(name for item in members for name in item.modules)
         if names not in reach:
             reach[names] = tuple(tests_reaching(project, set(names)))
-        built.append(_make_group(f"G{number}", members, reaudit, design, reach[names]))
+        group = _make_group(f"G{number}", members, reaudit, design, reach[names])
+        if split_from:
+            group = replace(group, notes=(*group.notes, split_from))
+        built.append(group)
     live = [group for group in built if group.status != DONE]
     related = _related(live)
     live = [_with_related(group, related.get(group.key, ())) for group in live]
     done = [group for group in built if group.status == DONE]
     return GroupingResult(tuple(live), tuple(done))
+
+
+def _split_done(groups: list[list[Item]]) -> list[tuple[list[Item], str]]:
+    """Takes the other items out of each group whose old entry is done or gone.
+
+    Args:
+        groups: The groups, after the pair judge's joins.
+
+    Returns:
+        The groups in order, each with a note for the owner, which is empty except on a group that
+        was split off. A done or gone group with no fresh item is replaced by the old item alone,
+        followed by the rest of its items as a group of their own. A group that holds a fresh item
+        stays whole, since it is reopened.
+    """
+    split: list[tuple[list[Item], str]] = []
+    for members in groups:
+        old = next((item for item in members if item.source == OLD), None)
+        finished = old is not None and _OLD_STATUS[old.old_verdict] == DONE
+        if finished and len(members) > 1 and all(item.source != FRESH for item in members):
+            split.append(([old], ""))
+            rest = [item for item in members if item is not old]
+            split.append((rest, f"{old.old_id} was found {old.old_verdict.value}, so the findings "
+                                "grouped with it were split off"))
+        else:
+            split.append((members, ""))
+    return split
 
 
 def _from_code(found: CodeFinding) -> Finding:

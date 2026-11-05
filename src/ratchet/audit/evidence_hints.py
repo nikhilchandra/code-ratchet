@@ -14,7 +14,7 @@ from ratchet.refactor.problem_list import Entry
 
 # An evidence line of a list, such as "- app/views.py:12-14: the copy".
 EVIDENCE_LINE = re.compile(r"^- (\S+?):(\d+)-(\d+): (.*)$")
-# the indent of each line of a quote
+# The indent of each line of a quote.
 QUOTE_INDENT = "      "
 
 

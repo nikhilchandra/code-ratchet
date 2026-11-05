@@ -110,9 +110,10 @@ def test_tracking_needs_consent_when_there_is_no_terminal(scratch: tuple[Project
     project, repo = scratch
     head = repo.last_commit()
 
-    with pytest.raises(InitError, match="--yes"):
+    with pytest.raises(InitError, match="--yes") as caught:
         init_project(project.root, assume_yes=False, confirm=None)
 
+    assert "git -C .ratchet restore ." in str(caught.value)
     assert repo.last_commit() == head
     assert not (project.root / ".ratchet" / ".git").exists()
 
@@ -129,6 +130,67 @@ def test_the_owner_can_agree_or_refuse_at_the_terminal(scratch: tuple[Project, R
     init_project(project.root, assume_yes=False, confirm=lambda q: True)
 
     assert len(questions) == 1 and ".ratchet" in questions[0]
+    assert repo.run("ls-files", "--", ".ratchet").strip() == ""
+
+
+def test_the_warning_says_how_to_restore_the_records(scratch: tuple[Project, Repo]) -> None:
+    """Proves the consent question says another checkout or clone can lose the files, and how to
+    bring them back."""
+    project, _ = scratch
+    questions: list[str] = []
+
+    init_project(project.root, assume_yes=False, confirm=lambda q: questions.append(q) or True)
+
+    assert len(questions) == 1
+    assert "checking out an older commit" in questions[0]
+    assert "another clone" in questions[0]
+    assert "git -C .ratchet restore ." in questions[0]
+    assert "copy the .ratchet folder over" in questions[0]
+
+
+def test_a_yes_run_reports_how_to_restore_the_records(scratch: tuple[Project, Repo]) -> None:
+    """Proves a run with --yes, which asks nothing, still says how to restore the files."""
+    project, _ = scratch
+
+    actions = init_project(project.root, assume_yes=True, confirm=None)
+
+    [line] = [action for action in actions if action.startswith("stopped tracking .ratchet")]
+    assert "git -C .ratchet restore ." in line
+    assert "another clone" in line
+
+
+def test_a_tracked_project_that_already_ignores_ratchet_gets_one_ignore_line(
+    scratch: tuple[Project, Repo]
+) -> None:
+    """Proves a project that tracks .ratchet and already ignores it ends with one ignore line."""
+    project, repo = scratch
+    ignore = project.root / ".gitignore"
+    ignore.write_text(ignore.read_text(encoding="utf-8") + ".ratchet/\n", encoding="utf-8",
+                      newline="\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=project.root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "ignore .ratchet"], cwd=project.root, check=True,
+                   capture_output=True)
+
+    init_project(project.root, assume_yes=True, confirm=None)
+
+    assert ignore.read_text(encoding="utf-8").splitlines().count(".ratchet/") == 1
+    assert repo.run("ls-files", "--", ".ratchet").strip() == ""
+    assert repo.run("log", "-1", "--format=%s").strip() == "chore: stop tracking .ratchet in this repository"
+    assert repo.run("status", "--porcelain").strip() == ""
+
+
+def test_the_init_command_moves_a_tracked_project_and_prints_the_restore_note(
+    scratch: tuple[Project, Repo], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Proves `ratchet init --yes` untracks .ratchet and prints how to restore the files. Stdin is
+    not a terminal under pytest, so --yes is what lets it go ahead."""
+    project, repo = scratch
+
+    assert main(["init", "--project", str(project.root), "--yes"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    [line] = [line for line in lines if line.startswith("ratchet: stopped tracking .ratchet")]
+    assert "git -C .ratchet restore ." in line
     assert repo.run("ls-files", "--", ".ratchet").strip() == ""
 
 

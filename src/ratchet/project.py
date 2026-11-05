@@ -9,9 +9,13 @@ The folder always holds two files:
 It may also hold comments.md, the project's rules for comments and docstrings. Without it,
 agents follow no comment style beyond keeping comments true.
 
-Each command reads its own markdown files from the folder, such as the problem lists for refactor,
-and checks its own section of config.toml. ratchet keeps its own records in .ratchet/state,
-which the project should not commit.
+Each command reads its own markdown files from the folder, such as the problem lists, and checks
+its own section of config.toml.
+
+ratchet keeps what its commands make in .ratchet/state, such as each problem list's ledger and
+the folders of its jobs and audits. The project's own git does not track .ratchet. After
+'ratchet init', the folder is a git repository of its own, the records repository. It tracks the
+lists, config.toml, rules.md, comments.md and each ledger, as ratchet.records.IGNORE_LINES says.
 """
 
 from __future__ import annotations

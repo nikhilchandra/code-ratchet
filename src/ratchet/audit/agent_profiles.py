@@ -91,7 +91,7 @@ def write_profile(project: Project, role: Role, folder: Path) -> Path:
 def make_agents(project: Project, settings: AuditSettings, copy: Path, folder: Path) -> dict[str, Agent]:
     """Returns the audit's agents, each set up from its settings and working in the copy.
 
-    No agent may edit. All but the pair judge may read the copy's git history. The blind audit's
+    No agent may edit, and none may read the project or its .ratchet folder. All but the pair judge may read the copy's git history. The blind audit's
     agent has the auditor's profile and settings, and is keyed "fresh".
 
     Args:
@@ -113,17 +113,40 @@ def make_agents(project: Project, settings: AuditSettings, copy: Path, folder: P
         Role.PAIR_JUDGE: (settings.pair_judge, PairAnswer),
         Role.CHECKER: (settings.checker, CheckAnswer),
     }
+    hidden = _hidden_paths(project)
     agents = {}
     for role, (role_settings, answer) in answers.items():
         profile = write_profile(project, role, profiles)
-        agents[str(role)] = _make_agent(str(role), profile, role, role_settings, answer, copy, logs)
+        agents[str(role)] = _make_agent(str(role), profile, role, role_settings, answer, copy, logs, hidden)
         if role == Role.AUDITOR:
-            agents[FRESH] = _make_agent(FRESH, profile, role, role_settings, answer, copy, logs)
+            agents[FRESH] = _make_agent(FRESH, profile, role, role_settings, answer, copy, logs, hidden)
     return agents
 
 
+def _hidden_paths(project: Project) -> tuple[str, ...]:
+    """Returns the patterns that keep the agents, which work in the copy, away from the old problem
+    lists and the ledger.
+
+    The project's folder and its .ratchet folder are each listed bare and with everything under
+    them, so a Grep or Glob aimed at the folder itself is denied too.
+    """
+    return (
+        str(project.root),
+        str(project.root / "**"),
+        str(project.folder),
+        str(project.folder / "**"),
+    )
+
+
 def _make_agent(
-    name: str, profile: Path, role: Role, role_settings: RoleSettings, answer: type, copy: Path, logs: Path
+    name: str,
+    profile: Path,
+    role: Role,
+    role_settings: RoleSettings,
+    answer: type,
+    copy: Path,
+    logs: Path,
+    hidden: tuple[str, ...],
 ) -> Agent:
     """Returns one audit agent, with the permissions its role has.
 
@@ -135,6 +158,7 @@ def _make_agent(
         answer: The shape of the agent's answer.
         copy: The audit's copy of the code.
         logs: The folder that holds a log folder for each agent.
+        hidden: The path patterns that the agent may never read.
 
     Returns:
         The agent, which can inspect files and, unless it is the pair judge, read git history.
@@ -151,6 +175,7 @@ def _make_agent(
         max_work_usd=role_settings.budget_usd,
         timeout_s=role_settings.timeout_s,
         tools=Tool.INSPECT,
+        hidden=hidden,
         **permissions,
     )
 

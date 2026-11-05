@@ -81,6 +81,23 @@ class DraftDropped:
 
 
 @dataclass
+class DraftDone:
+    """Holds one old problem that the audit found done or gone.
+
+    Attributes:
+        id: The problem's id, such as "P7".
+        title: The problem's title.
+        verdict: "done" or "gone".
+        reason: What the rechecker said was left, or "" for nothing.
+    """
+
+    id: str
+    title: str
+    verdict: str
+    reason: str
+
+
+@dataclass
 class Draft:
     """Holds everything that goes into a draft problem list.
 
@@ -88,6 +105,7 @@ class Draft:
         problems: The open problems.
         questions: The questions for the owner.
         dropped: The dropped entries.
+        done: The old problems that are done or gone.
         bugs: One line for each bug noticed.
         notes: Notes for the owner that belong to no entry.
     """
@@ -95,6 +113,7 @@ class Draft:
     problems: list[DraftProblem] = field(default_factory=list)
     questions: list[DraftQuestion] = field(default_factory=list)
     dropped: list[DraftDropped] = field(default_factory=list)
+    done: list[DraftDone] = field(default_factory=list)
     bugs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -107,7 +126,8 @@ def render_draft(draft: Draft) -> str:
 
     Returns:
         The list's text. Every problem has a heading under "Open", and the questions, the dropped
-        entries and the bugs follow in their own sections.
+        entries, the done problems and the bugs follow in their own sections. A done problem is a
+        bullet, so no reader takes it for a problem.
     """
     lines = ["# Problems", ""]
     if draft.notes:
@@ -124,6 +144,13 @@ def render_draft(draft: Draft) -> str:
     lines += ["## Dropped", ""]
     for dropped in draft.dropped:
         lines += [f"### {dropped.id}. {dropped.title}", "", dropped.reason.strip(), ""]
+    lines += ["## Done", ""]
+    for done in draft.done:
+        line = f"- {done.id}. {done.title} ({done.verdict})"
+        if done.reason.strip():
+            line += f": {done.reason}"
+        lines.append(" ".join(line.split()))
+    lines.append("")
     lines += ["## Bugs noticed", ""]
     lines += [f"- {bug}" for bug in draft.bugs]
     lines.append("")
@@ -160,12 +187,14 @@ def check_draft(text: str, done_ids: Collection[str]) -> list[str]:
 
     Args:
         text: The draft's markdown.
-        done_ids: The ids of the problems that are already done, which a draft may not reuse.
+        done_ids: The ids of the problems that are already done. A draft may reuse one only on an
+            entry whose 'Carried from' ends with that same id.
 
     Returns:
         One message for each fault found, or an empty list when the draft is sound. A fault is a
-        repeated P id, a P id that is already done, a missing or invalid Status, an After that
-        names a P id the draft lacks, or a P heading outside the Open section.
+        repeated P id, a done P id on an entry that does not carry that problem forward, a
+        missing or invalid Status, an After that names a P id the draft lacks, or a P heading
+        outside the Open section.
     """
     entries = [entry for entry in split_entries(text) if entry.is_problem]
     present = {entry.id for entry in entries}
@@ -175,7 +204,9 @@ def check_draft(text: str, done_ids: Collection[str]) -> list[str]:
         if entry.id in seen:
             errors.append(f"{entry.id} appears more than once")
         seen.add(entry.id)
-        if entry.id in done_ids:
+        # a carried entry is the same problem coming back, so it may keep its done id
+        carried_id = entry.fields.get("Carried from", "").split()[-1:]
+        if entry.id in done_ids and carried_id != [entry.id]:
             errors.append(f"{entry.id} reuses the id of a problem that is done")
         status = entry.fields.get("Status", "")
         if status not in VALID_STATUSES:

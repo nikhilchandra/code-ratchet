@@ -339,3 +339,44 @@ def test_coverage_is_checked(tmp_path: Path) -> None:
     for broken in (groups[:1], groups + groups[:1]):
         with pytest.raises(ValueError, match="exactly once"):
             finish_groups(project, make_design(), items, broken, reaudit=False)
+
+
+def test_a_done_or_gone_entry_keeps_only_its_own_item_and_the_rest_go_on_as_new(
+    tmp_path: Path,
+) -> None:
+    """Proves a done or gone old entry goes to the done list alone, and the code and note findings
+    grouped with it come back as a new group for the checker, with a note naming the old id."""
+    project = project_with_files(tmp_path)
+
+    def code_finding(subject: str, line: int, end: int) -> CodeFinding:
+        place = CodeCitation(MODEL_FILE, line, end, "x", "the line")
+        return CodeFinding(
+            kind="may_use", subject=subject, title=f"code {line}", what_is_wrong="w",
+            grade="stated", breaks="rule", evidence=(place,), simpler_option="s", done_when=("d",),
+        )
+
+    items = build(
+        project,
+        code=[code_finding("app.core.model.c1", 2, 4), code_finding("app.core.model.c2", 31, 32)],
+        from_notes=[finding("app.core.model.r1", "from notes", cite(MODEL_FILE, 3, 6))],
+        old=[
+            old_check("P1", OldVerdict.DONE, finding("app.core.model.p1", "p1", cite(MODEL_FILE, 1, 5))),
+            old_check("P2", OldVerdict.GONE, finding("app.core.model.p2", "p2", cite(MODEL_FILE, 30, 33))),
+        ],
+    )
+    assert labels(group_items(items)) == [["C1", "R1", "O P1"], ["C2", "O P2"]]
+
+    result = finish_groups(project, make_design(), items, group_items(items), reaudit=True)
+
+    assert [[item.label for item in group.items] for group in result.done] == [["O P1"], ["O P2"]]
+    assert [group.old_id for group in result.done] == ["P1", "P2"]
+    assert {group.status for group in result.done} == {DONE}
+    split = {tuple(item.label for item in group.items): group for group in result.groups}
+    assert set(split) == {("C1", "R1"), ("C2",)}
+    first, second = split[("C1", "R1")], split[("C2",)]
+    assert (first.status, first.old_id, first.text_label) == (NEW, "", "R1")
+    assert (second.status, second.old_id, second.text_label) == (NEW, "", "C2")
+    assert any("P1" in note for note in first.notes)
+    assert any("P2" in note for note in second.notes)
+    keys = [group.key for group in (*result.groups, *result.done)]
+    assert sorted(keys, key=lambda key: int(key[1:])) == [f"G{n}" for n in range(1, len(keys) + 1)]

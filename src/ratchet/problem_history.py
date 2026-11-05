@@ -42,19 +42,23 @@ def publish_time(project: Project, name: str, created: datetime) -> str:
     return created.strftime(TIME_FORMAT)
 
 
-def _events_from_jobs(ledger: Ledger, problem_id: str) -> list[ProblemEvent]:
-    """Makes events for a problem from the jobs that named it, for a ledger with no events.
+def _events_from_jobs(ledger: Ledger, problem_id: str, recorded: set[str]) -> list[ProblemEvent]:
+    """Makes events for the jobs that named a problem before problem events existed.
+
+    Every job recorded since problem events were added writes an event with its own id for
+    each problem it names. A job that names the problem and has no such event is an older job.
 
     Args:
         ledger: The ledger of the problem's list.
         problem_id: The problem's id.
+        recorded: The ids of the jobs that the problem's recorded events already name.
 
     Returns:
-        One event for each job that named the problem, at the job's 'ended' time.
+        One event for each older job that named the problem, at the job's 'ended' time.
     """
     events = []
     for job in ledger.jobs:
-        if problem_id not in job.problems:
+        if problem_id not in job.problems or job.id in recorded:
             continue
         if job.outcome == JobOutcome.COMMITTED:
             kind = "done" if problem_id in job.completes else "committed"
@@ -70,8 +74,10 @@ def _events_from_jobs(ledger: Ledger, problem_id: str) -> list[ProblemEvent]:
 def problem_history(project: Project, list_name: str, problem_id: str) -> list[ProblemEvent]:
     """Returns one problem's events, following 'carried_from' back through the older lists.
 
-    A ledger with no events for the problem gets events made from its jobs, and an 'opened'
-    event at the time its list was published. An event with no time takes the 'ended' time of
+    A job that names the problem but that no recorded event names is from before problem
+    events existed. Such jobs get events made from them, ahead of the recorded events. A
+    ledger with no events for the problem, or with such jobs, also gets an 'opened' event at
+    the time its list was published. An event with no time takes the 'ended' time of
     its job, or else the time its list was published.
 
     Args:
@@ -104,10 +110,13 @@ def problem_history(project: Project, list_name: str, problem_id: str) -> list[P
         record = ledger.problems.get(wanted)
         jobs = {job.id: job for job in ledger.jobs}
 
-        if record is not None and record.events:
-            source = record.events
-        else:
-            source = _events_from_jobs(ledger, wanted)
+        recorded_events = record.events if record else []
+        named = {event.job for event in recorded_events if event.job}
+        early = _events_from_jobs(ledger, wanted, named)
+        source = [*early, *recorded_events]
+
+        # jobs from before the first event have no events of their own, so open the history
+        if early or not recorded_events:
             text = read_markdown(project.folder, path.name)
             held = any(entry.id == wanted for entry in split_entries(text))
             if held:

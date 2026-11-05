@@ -9,6 +9,7 @@ from ratchet.refactor.job_graph import JobOutcome
 from ratchet.refactor.ledger import (
     Ledger,
     ProblemEvent,
+    ProblemRecord,
     ProblemStatus,
     load_ledger,
     record_job,
@@ -158,3 +159,18 @@ def test_a_sent_back_job_records_sent_back_and_abandoned_at_the_cap() -> None:
     record_job(ledger, finished(JobOutcome.REPLAN), "job-002", 1.0, Caps())
     assert kinds(ledger, "P1") == ["sent_back", "sent_back", "abandoned"]
     assert ledger.problems["P1"].events[-1].job == "J02"
+
+
+def test_the_next_job_number_counts_jobs_that_left_only_a_job_started_event() -> None:
+    """Proves the next job number follows both the recorded jobs and the job_started events, and
+    leaves out a carried event that names another list's job."""
+    assert Ledger(problem_list=LIST).next_job_number() == 1
+    ledger = Ledger(problem_list=LIST)
+    record_job(ledger, finished(JobOutcome.COMMITTED), "job-001", 1.0, Caps())
+    ledger.problems["P2"] = ProblemRecord(events=[
+        ProblemEvent(when="2026-10-26 09:00", kind="carried", by="J09", job="J09",
+                     list="problems-20261020-09h00m"),
+        ProblemEvent(when="2026-10-26 09:05", kind="job_started", by="J02", job="J02"),
+    ])
+
+    assert ledger.next_job_number() == 3

@@ -18,6 +18,10 @@ TEMPLATES = Path(__file__).parent / "templates"
 IGNORE_FORMS = (FOLDER, f"{FOLDER}/", f"/{FOLDER}", f"/{FOLDER}/")
 
 
+# What the owner is told about the files of a .ratchet folder that the project's git stops tracking.
+RESTORE_NOTE = f"The files stay on disk in this clone, but checking out an older commit can replace or delete them, and pulling this commit into another clone deletes them there. In this clone, git -C {FOLDER} restore . brings them back from the records repository. Another clone has no records repository, so copy the {FOLDER} folder over from this one."
+
+
 class InitError(RuntimeError):
     """Signals a project that init cannot set up, or a move that the owner has not agreed to."""
 
@@ -57,7 +61,7 @@ def init_project(
     if tracked and not assume_yes:
         question = (
             f"This project's git tracks {FOLDER}. ratchet init will stop tracking it, add it to "
-            ".gitignore and commit that. The files stay on disk."
+            f".gitignore and commit that. {RESTORE_NOTE}"
         )
         if confirm is None:
             raise InitError(f"{question} Run ratchet init --yes to agree.")
@@ -72,10 +76,11 @@ def init_project(
 
     if tracked:
         project.run("rm", "-r", "--cached", "-q", "--", FOLDER)
-        _add_ignore_line(root)
+        if not _is_ignored(root):
+            _add_ignore_line(root)
         project.run("add", ".gitignore")
         project.run("commit", "-q", "-m", f"chore: stop tracking {FOLDER} in this repository")
-        actions.append(f"stopped tracking {FOLDER} in the project's git")
+        actions.append(f"stopped tracking {FOLDER} in the project's git. {RESTORE_NOTE}")
     elif not _is_ignored(root):
         _add_ignore_line(root)
         project.run("add", ".gitignore")

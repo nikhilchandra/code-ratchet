@@ -4,6 +4,9 @@ terminal when there is one, and settle a waiting audit by approving or discardin
 
 At most one audit waits at a time. An audit that is waiting for approval is settled by
 settle_audit(), which a later `ratchet audit --approve` or `--discard` calls.
+
+An audit that halts deletes its copy of the code. Each new audit also deletes the copies that
+earlier halted audits of the project left behind.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from rooster import AgentGraph, Job, JobStatus
 from ratchet.audit.agent_answers import Citation
 from ratchet.audit.agent_profiles import make_agents
 from ratchet.audit.audit_graph import AgentMaker, AuditError, build_audit_graph, done_ids
+from ratchet.audit.code_copy import CopyError, remove_copy
 from ratchet.audit.list_markdown import (
     Draft,
     DraftDropped,
@@ -181,6 +185,66 @@ def _approve_draft(
     return graph.resume(job.slug, decision) if decision else job
 
 
+def _drop_copy(copy: Path) -> None:
+    """Deletes an audit's copy of the code, and ignores a copy that cannot be deleted.
+
+    Args:
+        copy: The folder that a job stored as its copy. A path that is not a ratchet copy, or a
+            file that is locked, leaves the folder alone and does not stop the audit.
+    """
+    try:
+        remove_copy(copy)
+    except (CopyError, OSError):
+        pass
+
+
+def _sweep_copies(graph: AgentGraph) -> None:
+    """Deletes the copies that earlier halted or finished audits left behind.
+
+    A waiting audit keeps its copy, and so does a job that has no copy, such as one that halted
+    before it made one.
+
+    Args:
+        graph: The audit graph.
+    """
+    for job in graph.jobs():
+        copy = job.data.get("copy")
+        if copy and job.status in (JobStatus.HALTED, JobStatus.DONE):
+            _drop_copy(Path(copy))
+
+
+def _clean_up(graph: AgentGraph, slug: str) -> None:
+    """Deletes the copy of one job when the job halted or finished.
+
+    Args:
+        graph: The audit graph.
+        slug: The job's name. A job that was never saved is left alone.
+    """
+    if not (graph.state_dir / f"{slug}.json").is_file():
+        return
+    job = graph.load(slug)
+    copy = job.data.get("copy")
+    if copy and job.status in (JobStatus.HALTED, JobStatus.DONE):
+        _drop_copy(Path(copy))
+
+
+def _new_slug(graph: AgentGraph, base: str) -> str:
+    """Returns the name that graph.start() gives a job started with the name 'base'.
+
+    The name is known before the job starts, so the clean-up finds the job even when start raises.
+
+    Args:
+        graph: The audit graph.
+        base: The name asked for. A counter is added when a job of that name exists.
+    """
+    if not (graph.state_dir / f"{base}.json").exists():
+        return base
+    n = 2
+    while (graph.state_dir / f"{base}-{n}.json").exists():
+        n += 1
+    return f"{base}-{n}"
+
+
 def start_audit(
     project: Project,
     prompt: str = "",
@@ -207,6 +271,9 @@ def start_audit(
         show: Writes one line to the owner.
         edit: Opens a file for the owner to change.
 
+    The copies that earlier halted audits left behind are deleted first, and the copy of this
+    audit is deleted if it halts.
+
     Returns:
         The run. Its outcome is "waiting" when the owner has yet to decide on the draft.
 
@@ -214,6 +281,9 @@ def start_audit(
         AuditError: The audit may not start or it halted. An audit may not start while another
             waits, while rules.md is the template, or before `ratchet init`.
         ProjectError: The [audit] section of config.toml is wrong.
+        CopyError: The code's history holds .ratchet or a hidden path and history_with_ratchet is
+            "refuse", or the strip failed.
+        TargetDesignError: The toml block of rules.md is malformed.
         GitError: A git command failed.
         NoAnswerError: An agent gave no answer in a step that needs it.
     """
@@ -231,15 +301,22 @@ def start_audit(
     if not has_records(project.root):
         raise AuditError("this project has not been set up yet. Run `ratchet init` first.")
 
-    job = graph.start(prompt, slug=datetime.now().strftime("audit-%Y%m%d-%Hh%Mm"))
-    if job.status == JobStatus.WAITING and job.next_step == AFTER_QUESTIONS:
-        job = _answer_questions(graph, job, interactive, ask, show)
-    if job.status == JobStatus.WAITING and job.next_step == AFTER_DRAFT:
-        job = _approve_draft(project, graph, job, interactive, ask, show, edit)
-    run = _finish(job)
-    if run.outcome == "waiting":
-        run.draft_path = str(graph.state_dir / job.slug / "draft.md")
-    return run
+    # delete the copies of earlier halted audits, then name this audit's job
+    _sweep_copies(graph)
+    slug = _new_slug(graph, datetime.now().strftime("audit-%Y%m%d-%Hh%Mm"))
+    try:
+        job = graph.start(prompt, slug=slug)
+        if job.status == JobStatus.WAITING and job.next_step == AFTER_QUESTIONS:
+            job = _answer_questions(graph, job, interactive, ask, show)
+        if job.status == JobStatus.WAITING and job.next_step == AFTER_DRAFT:
+            job = _approve_draft(project, graph, job, interactive, ask, show, edit)
+        run = _finish(job)
+        if run.outcome == "waiting":
+            run.draft_path = str(graph.state_dir / job.slug / "draft.md")
+        return run
+    finally:
+        # delete the copy when the job halted or finished
+        _clean_up(graph, slug)
 
 
 def settle_audit(
@@ -270,9 +347,13 @@ def settle_audit(
     if decision == APPROVE and _head(project) != job.data["head"]:
         raise AuditError("HEAD has moved since the audit started, so the list is out of date. "
                          "Discard this audit and start another.")
-    if job.next_step == AFTER_QUESTIONS and decision == APPROVE:
-        # an audit cut off at the questions gate goes on with no answers and stops at the draft
-        run = _finish(graph.resume(job.slug))
-        run.draft_path = str(graph.state_dir / job.slug / "draft.md")
-        return run
-    return _finish(graph.resume(job.slug, {"decision": decision}))
+    try:
+        if job.next_step == AFTER_QUESTIONS and decision == APPROVE:
+            # an audit cut off at the questions gate goes on with no answers and stops at the draft
+            run = _finish(graph.resume(job.slug))
+            run.draft_path = str(graph.state_dir / job.slug / "draft.md")
+            return run
+        return _finish(graph.resume(job.slug, {"decision": decision}))
+    finally:
+        # delete the copy when the job halted or finished
+        _clean_up(graph, job.slug)

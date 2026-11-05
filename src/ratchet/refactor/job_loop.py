@@ -159,7 +159,7 @@ def run_refactor(
 
     run = RefactorRun()
     for number in range(max_jobs):
-        slug = f"job-{len(ledger.jobs) + 1:03d}"
+        slug = f"job-{ledger.next_job_number():03d}"
         try:
             job = graph.start(focus if number == 0 else "", slug=slug)
             if job.status == JobStatus.HALTED:

@@ -9,3 +9,22 @@ frozen = []
 
 # Settings for ratchet refactor. Every one has a default, so this section may stay empty.
 # [refactor]
+
+# Settings for ratchet audit. Every one has a default, so this section may stay empty.
+# [audit]
+# Path patterns, relative to the project, that are left out of the audit's copy of the code.
+# hide = []
+# What to do when the code's git history holds old .ratchet files: "strip" removes them from the
+# copy, and "refuse" stops the audit.
+# history_with_ratchet = "strip"
+# The most pairs of findings that the pair judge is asked about.
+# max_pairs = 40
+# The most one audit may spend in dollars, counting every agent's budget.
+# max_cost_usd = 40.0
+# How each role runs. A role may also set effort, which defaults to "high" (low, medium, high,
+# xhigh, max).
+# auditor = { model = "opus", budget_usd = 10.0, timeout_s = 3600 }
+# list_reviewer = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
+# rechecker = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }
+# pair_judge = { model = "sonnet", budget_usd = 1.0, timeout_s = 600 }
+# checker = { model = "opus", budget_usd = 6.0, timeout_s = 2400 }

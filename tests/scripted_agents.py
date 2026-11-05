@@ -16,12 +16,15 @@ Turn = dict | Callable[[str], dict]
 
 
 class ScriptedAgent:
-    """Stands in for an Agent, answering each turn from a script and keeping every prompt."""
+    """Stands in for an Agent, answering each turn from a script and keeping every prompt. Each
+    answered turn costs 'cost_usd' dollars, and a failed turn costs nothing."""
 
-    def __init__(self, name: str, schema: type[BaseModel], turns: list[Turn]) -> None:
+    def __init__(self, name: str, schema: type[BaseModel], turns: list[Turn], *,
+                 cost_usd: float = 0.5) -> None:
         self.name = name
         self.schema = schema
         self.turns = list(turns)
+        self.cost_usd = cost_usd
         self.prompts: list[str] = []
         self.session_id = None
         self.total_cost_usd = 0.0
@@ -35,9 +38,9 @@ class ScriptedAgent:
         if answer is None:
             return {"ok": False, "data": None, "failure": "timed out after 1 s", "cost_usd": 0.0,
                     "log_path": None}
-        self.total_cost_usd += 0.5
+        self.total_cost_usd += self.cost_usd
         return {"ok": True, "data": self.schema.model_validate(answer), "failure": None,
-                "cost_usd": 0.5, "log_path": Path(f"{self.name}.log")}
+                "cost_usd": self.cost_usd, "log_path": Path(f"{self.name}.log")}
 
     async def arun(self, prompt: str) -> dict:
         """Returns the same result that run() does, for callers that await."""

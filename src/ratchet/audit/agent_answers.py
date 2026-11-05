@@ -1,4 +1,4 @@
-"""Holds the shapes of the audit agents' answers, which each agent's reply must fit.
+"""The module contains the shapes of the audit agents' answers, which each agent's reply must fit.
 
 Every field is required, so an agent always answers every field, with an empty string or an
 empty list where it has nothing to say.

@@ -1,13 +1,15 @@
-"""Keeps the ledger of one problem list: every job that worked on it, and each problem's status.
+"""The module contains the ledger of one problem list, which records every job that worked on
+the list, and each problem's status and events.
 
 Each problem list has its own ledger, in .ratchet/state/<list name>/ledger.json. A new list
 therefore starts with an empty ledger, and a run on the same list carries on where the last one
-stopped. The planner is sent a short view of the ledger: the status of every problem that a job
-has touched, and the last few jobs.
+stopped. Job ids follow the highest id the ledger has seen, so a halted job's id is not reused.
+ratchet.refactor.job_graph builds the planner's prompt from the ledger.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -56,7 +58,7 @@ class ProblemRecord(BaseModel):
 class JobRecord(BaseModel):
     """Holds what one finished job did and how it ended."""
 
-    # A number in the order the jobs ran, such as "J07", and the job's own name in the graph.
+    # A number in the order the jobs started, such as "J07", which a halted job does not give up.
     id: str
     slug: str
     title: str
@@ -111,6 +113,19 @@ class Ledger(BaseModel):
             return f"every problem it names is already closed: {', '.join(closed)}"
         return ""
 
+    def next_job_number(self) -> int:
+        """Returns the number that the next job's id takes, such as 8 for "J08".
+
+        The number is one more than the highest number among the recorded jobs and the
+        job_started events. A job that halts leaves only job_started events and no record, so
+        those events are counted too, and no id is used twice.
+        """
+        ids = [job.id for job in self.jobs]
+        for problem in self.problems.values():
+            ids.extend(event.job for event in problem.events if event.kind == "job_started")
+        numbers = [int(job_id[1:]) for job_id in ids if re.fullmatch(r"J\d+", job_id)]
+        return max(numbers, default=0) + 1
+
 
 def load_ledger(path: Path, problem_list: str) -> Ledger:
     """Returns the ledger saved at 'path', or an empty one when there is none yet.
@@ -154,7 +169,8 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
 
     Args:
         ledger: The ledger to add to.
-        job_data: The finished job's data, which holds its plan and its outcome.
+        job_data: The finished job's data, which holds its plan and its outcome. It also holds
+            the job's id when the plan step gave it one, and otherwise the next free id is used.
         slug: The job's name in the graph.
         cost_usd: What the job spent, in dollars.
         caps: The refactor command's caps.
@@ -165,7 +181,7 @@ def record_job(ledger: Ledger, job_data: dict, slug: str, cost_usd: float, caps:
     plan = Plan.model_validate(job_data["plan"])
     outcome = JobOutcome(job_data["outcome"])
     record = JobRecord(
-        id=f"J{len(ledger.jobs) + 1:02d}",
+        id=job_data.get("job_id") or f"J{ledger.next_job_number():02d}",
         slug=slug,
         title=plan.step_title,
         problems=plan.problems,

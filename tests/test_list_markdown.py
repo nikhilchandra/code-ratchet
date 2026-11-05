@@ -116,6 +116,16 @@ def test_a_done_id_is_named() -> None:
     assert check_draft(text, done_ids={"P7"}) == ["P7 reuses the id of a problem that is done"]
 
 
+def test_a_carried_problem_may_keep_a_done_id() -> None:
+    """Proves a done P id is allowed on an entry carried from that same id, and is still reported
+    on an entry carried from a different id."""
+    kept = render_draft(Draft(problems=[problem(7, carried_from="problems-20261102-14h05m P7")]))
+    moved = render_draft(Draft(problems=[problem(7, carried_from="problems-20261102-14h05m P3")]))
+
+    assert check_draft(kept, done_ids={"P7"}) == []
+    assert check_draft(moved, done_ids={"P7"}) == ["P7 reuses the id of a problem that is done"]
+
+
 def test_a_bad_status_is_named() -> None:
     """Proves an invalid Status is reported, and so is a missing one."""
     text = render_draft(Draft(problems=[problem(7, status="done")]))
@@ -138,3 +148,30 @@ def test_a_problem_outside_open_is_named() -> None:
     text = render_draft(Draft(problems=[problem(7)])) + "\n## Later\n\n### P9. x\n\nStatus: open\n"
 
     assert check_draft(text, done_ids=[]) == ["P9 is under 'Later' and must be under Open"]
+
+
+def test_the_done_list_is_rendered_as_bullets_the_readers_ignore(tmp_path: Path) -> None:
+    """Proves the done problems are listed under Done, one bullet each, and that the draft check,
+    the note removal and the list readers leave them alone."""
+    from ratchet.audit.list_markdown import DraftDone
+
+    draft = Draft(problems=[problem(7)],
+                  done=[DraftDone("P4", "title 4", "done", "nothing\n is left"),
+                        DraftDone("P5", "title 5", "gone", "")])
+
+    text = render_draft(draft)
+
+    done = text.split("## Done\n", 1)[1].split("\n## ", 1)[0]
+    bullets = [line for line in done.splitlines() if line.strip()]
+    assert bullets == ["- P4. title 4 (done): nothing is left", "- P5. title 5 (gone)"]
+    assert check_draft(text, done_ids={"P4", "P5"}) == []
+    assert "## Done" in strip_owner_notes(text)
+    assert "- P4. title 4 (done): nothing is left" in strip_owner_notes(text)
+    assert [entry.id for entry in split_entries(text)] == ["P7"]
+    folder = tmp_path / ".ratchet"
+    folder.mkdir()
+    (folder / "config.toml").write_text('test_command = ["pytest"]\neditable = ["src/**"]\n',
+                                        encoding="utf-8")
+    (folder / "rules.md").write_text("rules\n", encoding="utf-8")
+    (folder / "problems-20261102-14h05m.md").write_text(text, encoding="utf-8")
+    assert find_latest_problem_list(load_project(tmp_path, commands=[])).ids == ["P7"]

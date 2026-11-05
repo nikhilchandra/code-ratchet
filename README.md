@@ -74,8 +74,12 @@ or `rules.md`, and when a refactor run ends.
 
 `ratchet init` also moves an existing project over. It refuses when the working tree has
 changes. When the project's git tracks `.ratchet`, it asks first, or needs `--yes` with no
-terminal, and then untracks the folder, adds the ignore line and makes one commit. A second run
-changes nothing. `audit` and `reopen` refuse until init has run, and `refactor` only warns.
+terminal, and then untracks the folder, adds the ignore line and makes one commit. The ignore
+line is added only when `.gitignore` lacks one. The files stay on disk in this clone, but
+checking out an older commit can replace or delete them, and pulling that commit into another
+clone deletes them there. In this clone, `git -C .ratchet restore .` brings them back from the
+records repository. Another clone has none, so copy the `.ratchet` folder over from this one. A
+second run changes nothing. `audit` and `reopen` refuse until init has run, and `refactor` only warns.
 
 ## Writing rules.md
 

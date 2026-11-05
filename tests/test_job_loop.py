@@ -165,6 +165,21 @@ def test_a_halted_job_leaves_job_started_in_the_ledger_file(scratch, run) -> Non
     assert [event.kind for event in events] == ["job_started"]
 
 
+def test_a_halted_jobs_id_is_not_reused(scratch, run) -> None:
+    """Proves the job after a halted one takes the next id and the next slug, so the history
+    never shows two jobs with one id."""
+    project, _ = scratch
+    with pytest.raises(NoAnswerError, match="the reviewer gave no answer"):
+        run([plan()], [edit(*GOOD)], [lambda prompt: None])
+
+    result, _, lines = run([plan()], [edit(*GOOD)], [review("accept")])
+
+    assert result.jobs[0].id == "J02"
+    events = ledger_of(project).problems["P1"].events
+    assert [event.job for event in events if event.kind == "job_started"] == ["J01", "J02"]
+    assert any("job-002" in line for line in lines)
+
+
 def test_a_run_commits_its_ledger_to_the_records_repository(scratch, run) -> None:
     """Proves a run's ledger goes into one records commit when .ratchet is its own repository."""
     project, _ = scratch

@@ -104,6 +104,37 @@ def test_refuse_setting_raises_and_leaves_no_copy(
     assert list(made.iterdir()) == []
 
 
+def test_list_on_another_branch_is_not_copied(tmp_path: Path) -> None:
+    """Proves a list committed only on another branch is not in the copy, not even as a loose
+    object, and that the refuse setting does not raise for it.
+    """
+    project = tmp_path / "project"
+    make_repo(project)
+    commit_file(project, "app.py", "x = 1\n", "start")
+    git(project, "switch", "-q", "-c", "side")
+    commit_file(project, ".ratchet/problems-1.md", f"# {CANARY}\n", "add records")
+    git(project, "switch", "-q", "main")
+    commit_file(project, "app.py", "x = 2\n", "change")
+    source = Repo(project)
+    blob = source.run("rev-parse", "side:.ratchet/problems-1.md").strip()
+    folder = make_copy(project, [], "refuse")
+    try:
+        copy = Repo(folder)
+        found = subprocess.run(
+            ["git", "cat-file", "-e", blob], cwd=folder, capture_output=True
+        )
+        assert found.returncode != 0
+        contents = subprocess.run(
+            ["git", "cat-file", "--batch-all-objects", "--batch"],
+            cwd=folder, capture_output=True, check=True,
+        ).stdout
+        assert CANARY.encode() not in contents
+        assert ".ratchet" not in copy.run("rev-list", "--all", "--objects")
+        assert copy.run("rev-parse", "HEAD") == source.run("rev-parse", "main")
+    finally:
+        remove_copy(folder)
+
+
 def test_clean_history_is_copied_as_it_is(tmp_path: Path) -> None:
     """Proves a history with no .ratchet files is not rewritten, even under the refuse setting."""
     project = tmp_path / "project"
@@ -114,3 +145,28 @@ def test_clean_history_is_copied_as_it_is(tmp_path: Path) -> None:
         assert Repo(folder).run("rev-parse", "HEAD") == Repo(project).run("rev-parse", "HEAD")
     finally:
         remove_copy(folder)
+
+
+def test_remove_copy_refuses_a_folder_that_is_not_a_ratchet_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves remove_copy deletes nothing given an empty path, a folder without the ratchet-audit-
+    prefix, or a ratchet-audit- folder outside the temp folder."""
+    here = tmp_path / "cwd"
+    here.mkdir()
+    (here / "keep.txt").write_text("keep\n", encoding="utf-8")
+    monkeypatch.chdir(here)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("x = 1\n", encoding="utf-8")
+    misplaced = tmp_path / "ratchet-audit-x"
+    misplaced.mkdir()
+    (misplaced / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    for folder in (project, misplaced):
+        with pytest.raises(CopyError, match="not a ratchet copy"):
+            remove_copy(folder)
+        assert (folder / "app.py").is_file()
+    with pytest.raises(CopyError, match="not a ratchet copy"):
+        remove_copy(Path(""))
+    assert (here / "keep.txt").is_file()

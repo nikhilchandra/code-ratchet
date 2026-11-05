@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ratchet.git import Repo
 from ratchet.records import commit_records, has_records, init_records, records_log, records_repo
 
 
@@ -107,3 +108,32 @@ def test_log_is_empty_without_a_repository_or_a_commit(tmp_path: Path) -> None:
     assert records_log(tmp_path) == []
     init_records(tmp_path)
     assert records_log(tmp_path) == []
+
+
+def test_a_damaged_records_folder_is_not_taken_for_a_repository(tmp_path: Path) -> None:
+    """Proves a .ratchet/.git that git passes over for the project's own repository is not taken
+    for a records repository, whether it is an empty folder or a file that points nowhere."""
+    Repo(tmp_path).run("init", "-q")
+    entry = tmp_path / ".ratchet" / ".git"
+    entry.mkdir(parents=True)
+    assert not has_records(tmp_path)
+
+    entry.rmdir()
+    entry.write_text("gitdir: nowhere\n", encoding="utf-8")
+    assert not has_records(tmp_path)
+
+
+def test_init_repairs_an_empty_records_git_folder(tmp_path: Path) -> None:
+    """Proves init makes a repository of a .ratchet whose .git is an empty folder, so a records
+    commit lands in .ratchet and not in the project's repository."""
+    project = Repo(tmp_path)
+    project.run("init", "-q")
+    (tmp_path / ".ratchet" / ".git").mkdir(parents=True)
+
+    assert init_records(tmp_path) is True
+    assert has_records(tmp_path)
+    write(tmp_path / ".ratchet" / "rules.md")
+    assert commit_records(tmp_path, "add rules") is not None
+
+    assert tracked(tmp_path) == {".gitignore", "rules.md"}
+    assert project.run("rev-list", "--all", check=False).strip() == ""

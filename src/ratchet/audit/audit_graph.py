@@ -1,5 +1,5 @@
-"""Builds the graph that carries one audit, from the checks before it starts to the published
-problem list, and the agents that the graph calls.
+"""The module contains the graph that carries one audit, from the checks before it starts to the
+published problem list, and the agents that the graph calls.
 
 A job goes through these steps:
     prepare: code checks that the audit may start, runs the code checker, takes the inventory and
@@ -12,7 +12,8 @@ A job goes through these steps:
         pairs that its rules cannot settle.
     check-citations: code checks every citation against the copy and fixes lines that moved.
     questions: a gate. The questions for the owner are written, and the job waits for the answers.
-    check: the checker judges the groups, code applies its verdicts, and the copy is deleted.
+    check: code checks that the copy is still there, the checker judges the groups, code applies
+        its verdicts, and the copy is deleted.
     draft: a gate. The ids are given out, the draft is written, and the job waits for approval.
     publish: the list is written with its ledger, the rules decisions are added to rules.md, and
         everything is committed in the records repository.
@@ -24,6 +25,7 @@ and job.data["old_list"] names the newest list. When the job ends, job.data["out
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import fields, is_dataclass, replace
@@ -67,7 +69,7 @@ from ratchet.audit.agent_profiles import (
     make_agents,
 )
 from ratchet.audit.citations import CitationResult, check_citations, render_report
-from ratchet.audit.code_copy import make_copy, remove_copy
+from ratchet.audit.code_copy import CopyError, make_copy, remove_copy
 from ratchet.audit.code_facts import InventoryItem, build_inventory
 from ratchet.audit.evidence_hints import build_evidence_hints, renamed_files
 from ratchet.audit.grouping import (
@@ -75,6 +77,7 @@ from ratchet.audit.grouping import (
     Group,
     GroupingResult,
     NEW,
+    OLD,
     OPEN,
     Item,
     finish_groups,
@@ -85,6 +88,7 @@ from ratchet.audit.grouping import (
 )
 from ratchet.audit.list_markdown import (
     Draft,
+    DraftDone,
     DraftDropped,
     DraftProblem,
     DraftQuestion,
@@ -662,13 +666,16 @@ def build_audit_graph(
             agents.update(agent_maker(project, settings, Path(job.data["copy"]), folder_of(job)))
         return agents
 
-    def check_cost(job: Job, *budgets: float) -> None:
-        """Halts the job when the next agent calls could take it over the audit's cost cap."""
+    def check_cost(job: Job, *budgets: float, spent: float = 0.0) -> None:
+        """Halts the job when the next agent calls could take it over the audit's cost cap. The
+        'spent' argument is money the current step has already spent and the job has not yet
+        counted."""
         needed = sum(budgets)
-        if job.cost_usd + needed > settings.max_cost_usd:
+        total = job.cost_usd + spent
+        if total + needed > settings.max_cost_usd:
             raise AuditError(
                 f"the next step may spend up to ${needed:.2f}, and the audit has spent "
-                f"${job.cost_usd:.2f} of its ${settings.max_cost_usd:.2f} cap"
+                f"${total:.2f} of its ${settings.max_cost_usd:.2f} cap"
             )
 
     def note(job: Job, text: str) -> None:
@@ -782,7 +789,8 @@ def build_audit_graph(
         answer: RecheckAnswer = recheck_reply.data
         unusable = _unusable_checks(answer.checks, old_ids, copy, inventory)
         if unusable:
-            check_cost(job, settings.rechecker.budget_usd)
+            check_cost(job, settings.rechecker.budget_usd,
+                       spent=fresh_reply.cost_usd + recheck_reply.cost_usd)
             retry = ask(
                 chosen[Role.RECHECKER],
                 format_recheck_prompt(old_text, histories, records, git_log, hints, unusable),
@@ -904,10 +912,18 @@ def build_audit_graph(
     def check(job: Job) -> str:
         # a discard decided at the questions gate goes straight to publish, with no checker turn
         if job.data.get("decision") == "discard":
-            remove_copy(Path(job.data["copy"]))
+            # a copy that remove_copy refuses is left alone, as it is when the folder is gone
+            with contextlib.suppress(CopyError):
+                remove_copy(Path(job.data["copy"]))
             return "publish"
-        folder = folder_of(job)
+        # a copy deleted while the job waited at the questions gate would make every citation fail
         copy = Path(job.data["copy"])
+        if not copy.is_dir():
+            raise AuditError(
+                f"the copy of the code at {copy} is gone, so no citation can be checked against "
+                "it. It may have been deleted while the audit waited for answers. Start a new "
+                "audit with `ratchet audit`.")
+        folder = folder_of(job)
         try:
             gathered = _gather(folder)[0]
             answers = {label: text.strip() for label, text in job.data.get("answers", {}).items()
@@ -995,7 +1011,9 @@ def build_audit_graph(
                 lines += [f"- note: {text}" for text in entry.notes]
             (folder / "verdicts.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         finally:
-            remove_copy(copy)
+            # a copy that remove_copy refuses must not throw away the checker's work
+            with contextlib.suppress(CopyError):
+                remove_copy(copy)
         return "draft"
 
     @graph.step("draft", next=("publish",), gate=True)
@@ -1093,6 +1111,10 @@ def build_audit_graph(
         for dropped in applied.dropped:
             made.dropped.append(DraftDropped(
                 f"D{len(made.dropped) + 1}", dropped.finding.title, dropped.reason))
+        for group in applied.done:
+            old = next(item for item in group.items if item.source == OLD)
+            made.done.append(DraftDone(
+                group.old_id, group.text.title, old.old_verdict.value, left.get(group.old_id, "")))
         for bug in bugs:
             made.bugs.append(_spell(f"{bug.title}: {bug.what_happens}"))
         for entry in applied.bugs:
@@ -1183,7 +1205,7 @@ def done_ids(project: Project) -> set[str]:
         project: The project, as read from its .ratchet folder.
 
     Returns:
-        The ids, which a new list may not reuse.
+        The ids, which a new list may reuse only for a problem it carries forward.
     """
     done = set()
     for _, path in find_problem_lists(project):

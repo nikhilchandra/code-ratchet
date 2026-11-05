@@ -8,7 +8,9 @@ inventory files that the agent never opened.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,9 +20,14 @@ STDERR_MARK = "--- stderr ---"
 # The input fields of a tool call that hold one path.
 PATH_FIELDS = ("file_path", "path", "notebook_path")
 
-# A Windows path with a drive letter, or a POSIX path that starts a word.
+# A Windows path with a drive letter, found in the raw text because a shell would eat its backslashes.
 WINDOWS_PATH = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'<>|;&()]*")
-POSIX_PATH = re.compile(r"(?:^|(?<=[\s\"'=(]))/[^\s\"'<>|;&()]+")
+# A drive letter and a separator at the start of a token.
+DRIVE_START = re.compile(r"[A-Za-z]:[\\/]")
+# A Git Bash drive, such as /c or /c/Users.
+GIT_BASH_DRIVE = re.compile(r"/([A-Za-z])(?:/(.*))?$")
+# A leading option name that is joined to its value, such as --file= or name=.
+OPTION_PREFIX = re.compile(r"^-{0,2}[\w-]+=")
 
 # Absolute paths that every command may name.
 ALLOWED_PATHS = ("/dev/null",)
@@ -73,9 +80,10 @@ def paths_named(calls: list[ToolCall]) -> list[str]:
         calls: The tool calls of one turn.
 
     Returns:
-        The path fields of every call, the pattern of a Glob call when it is an absolute path,
-        and every absolute path written in the command text of a Bash call. Relative paths are
-        kept as written.
+        The path fields of every call, the pattern of a Glob call, the 'glob' field of a Grep
+        call, and every absolute, '~' or '..' path written in the command text of a Bash call. A
+        relative pattern or glob is joined to the call's 'path' field. The regex 'pattern' of a
+        Grep call is not a path and is left out. Relative paths are kept as written.
     """
     paths: list[str] = []
     for call in calls:
@@ -83,9 +91,12 @@ def paths_named(calls: list[ToolCall]) -> list[str]:
             value = call.arguments.get(field)
             if isinstance(value, str) and value:
                 paths.append(value)
-        pattern = call.arguments.get("pattern")
-        if call.name == "Glob" and isinstance(pattern, str) and _is_absolute(pattern):
-            paths.append(pattern)
+        base = call.arguments.get("path")
+        base = base if isinstance(base, str) else ""
+        # a Glob pattern and a Grep glob are paths below the call's path field
+        pattern = call.arguments.get("pattern") if call.name == "Glob" else call.arguments.get("glob")
+        if call.name in ("Glob", "Grep") and isinstance(pattern, str) and pattern:
+            paths.append(_joined(base, pattern))
         command = call.arguments.get("command")
         if call.name == "Bash" and isinstance(command, str):
             paths.extend(absolute_paths_in(command))
@@ -93,17 +104,60 @@ def paths_named(calls: list[ToolCall]) -> list[str]:
 
 
 def absolute_paths_in(command: str) -> list[str]:
-    """Finds the absolute paths written in the text of a shell command.
+    """Finds the paths that are written in a shell command and can lead out of the copy.
 
     Args:
         command: The command text.
 
     Returns:
-        Each Windows path with a drive letter and each POSIX path that starts a word, in the
-        order they appear. The null device is not counted.
+        Each Windows path with a drive letter, then each word that looks like an absolute path,
+        a '~' path, or a path with a '..' segment, in the order they appear. Search strings such
+        as "/api/", URLs and the null device are not counted.
     """
-    found = WINDOWS_PATH.findall(command) + POSIX_PATH.findall(command)
-    return [path for path in found if path not in ALLOWED_PATHS]
+    found = WINDOWS_PATH.findall(command)
+    for token in _tokens(command):
+        token = OPTION_PREFIX.sub("", token)
+        if not DRIVE_START.match(token) and _looks_like_path(token):
+            found.append(token)
+    return found
+
+
+def _tokens(command: str) -> list[str]:
+    """Splits a shell command into words, with the shell operators as words of their own.
+
+    Args:
+        command: The command text.
+
+    Returns:
+        The words with their quotes removed. A command with unbalanced quotes is split at spaces.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return [word.strip("\"'") for word in command.split()]
+
+
+def _looks_like_path(token: str) -> bool:
+    """Tells whether a word of a command names a place on disk.
+
+    Args:
+        token: One word of a command.
+
+    Returns:
+        True for a '~' path, a path with a '..' segment, and an absolute path. A path that starts
+        with a slash needs two segments, or one segment with a dot or a single letter, so that a
+        search string such as "/api/" is not taken for a path.
+    """
+    if token in ALLOWED_PATHS or "://" in token:
+        return False
+    if token.startswith("~") or ".." in re.split(r"[\\/]", token):
+        return True
+    if not token.startswith("/"):
+        return False
+    segments = [segment for segment in token.split("/") if segment]
+    return len(segments) >= 2 or (len(segments) == 1 and ("." in segments[0] or len(segments[0]) == 1))
 
 
 def paths_outside(log_path: Path, copy: Path) -> list[str]:
@@ -156,9 +210,41 @@ def _is_absolute(path: str) -> bool:
         path: The path as written.
 
     Returns:
-        True when it starts with a slash, or with a drive letter and a separator.
+        True when it starts with a slash or a '~', or with a drive letter and a separator.
     """
-    return path.startswith(("/", "\\")) or bool(re.match(r"[A-Za-z]:[\\/]", path))
+    return path.startswith(("/", "\\", "~")) or bool(re.match(r"[A-Za-z]:[\\/]", path))
+
+
+def _joined(base: str, pattern: str) -> str:
+    """Joins a Glob pattern or Grep glob to the path that the call searches in.
+
+    Args:
+        base: The call's path field, or an empty string when it has none.
+        pattern: The pattern as written.
+
+    Returns:
+        The pattern alone when it is absolute, starts with '~' or has no base, and the base and
+        the pattern joined by a slash otherwise.
+    """
+    if not base or _is_absolute(pattern):
+        return pattern
+    return f"{base}/{pattern}"
+
+
+def _git_bash_to_windows(path: str) -> str:
+    """Rewrites a Git Bash drive path such as /c/Users/me as C:/Users/me on Windows.
+
+    Args:
+        path: The path as written.
+
+    Returns:
+        The Windows form when running on Windows and the path starts with a one-letter drive,
+        and the path unchanged otherwise.
+    """
+    match = GIT_BASH_DRIVE.match(path)
+    if os.name != "nt" or not match:
+        return path
+    return f"{match.group(1).upper()}:/{match.group(2) or ''}"
 
 
 def _resolved(copy: Path, path: str) -> Path:
@@ -166,12 +252,12 @@ def _resolved(copy: Path, path: str) -> Path:
 
     Args:
         copy: The folder of the copy, which a relative path is taken from.
-        path: The path as written.
+        path: The path as written. A leading '~' is the home folder and /c/... is a Git Bash drive.
 
     Returns:
         The absolute path with links and '..' resolved.
     """
-    return (copy / path).resolve()
+    return (copy / os.path.expanduser(_git_bash_to_windows(path))).resolve()
 
 
 def _inside(path: str, copy: Path) -> bool:
