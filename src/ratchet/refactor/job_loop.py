@@ -22,7 +22,7 @@ from rooster import Agent, Job, JobStatus
 from ratchet.git import GitError, Repo
 from ratchet.problem_history import publish_time
 from ratchet.project import Project
-from ratchet.pytest_runner import OutcomeKind, run_pytest
+from ratchet.pytest_runner import OutcomeKind, has_pytest_cov, run_pytest
 from ratchet.records import commit_records, has_records
 from ratchet.refactor.job_graph import JobOutcome, RefactorError, build_job_graph, make_agents
 from ratchet.refactor.ledger import JobRecord, load_ledger, record_job, save_ledger
@@ -150,12 +150,15 @@ def run_refactor(
         raise RefactorError(f"the suite does not pass before the run starts (pytest exit code "
                             f"{baseline.code}), see {folder / 'baseline' / 'pytest.log'}")
     log(f"baseline: {count_of(len(baseline.outcomes), 'test')}")
+    covered = has_pytest_cov(project.config.test_command, project.root, project.config.test_timeout_s)
+    if not covered:
+        log("coverage is not checked: pytest-cov does not load in the project's test environment")
 
     ledger_path = folder / "ledger.json"
     ledger = load_ledger(ledger_path, problem_list.name)
     agents = agent_maker(project, settings, problem_list.relative_path, folder)
     graph = build_job_graph(project, settings, agents, baseline.outcomes, folder, ledger,
-                            ledger_path, problem_list, report=report)
+                            ledger_path, problem_list, report=report, coverage=covered)
 
     run = RefactorRun()
     for number in range(max_jobs):

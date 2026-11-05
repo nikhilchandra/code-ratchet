@@ -61,3 +61,10 @@ Answer with one JSON object and nothing else. Every field is always present. For
   "revisions": ["one concrete change to the plan"]
 }
 ```
+
+## Functions outside the plan
+
+After the implementer's turn, the script may ask you again. Its prompt then starts with "The
+implementer changed functions that the plan does not name" and lists those functions, with their
+pathway map and the diff. Approve them when the step needs them. Send them back with a revise
+that names what the implementer must undo or move when it does not. Leave `tests_to_write` empty.

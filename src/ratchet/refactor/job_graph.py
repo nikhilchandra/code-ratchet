@@ -8,15 +8,20 @@ A job goes through these steps:
     write-tests: the test writer writes the tests, and code checks that they pass on the code as
         it is.
     implement: the implementer makes the change, or reports that the plan cannot be done.
+    check-map: code maps the functions that the change touches, and a function that neither the
+        plan nor an earlier approval names goes to review-map.
+    review-map: the super-planner approves the functions outside the plan, or sends the job back
+        to implement.
     check-rules: code checks the rules it can check by itself.
-    test: the whole suite runs and is compared with the baseline.
+    test: the whole suite runs and is compared with the baseline. When coverage is on, every
+        added or changed line in src must also be run by some test.
     review: the reviewer judges the diff, and code turns an accept with an unmet check into a
         reject.
     fix-comments: code makes the reviewer's comment fixes when they change only comments.
     commit: the step is committed with the plan's title.
     undo: the code goes back to the last commit.
 
-A failed check, a test failure or a rejection sends the job back to implement with a report, a
+A failed check, a test failure, an untested line or a rejection sends the job back to implement with a report, a
 revise sends it back to plan, and a refused test write sends it back to write-tests, each until a
 cap is reached and the job is undone. When the job ends, job.data["outcome"] says how,
 and job.data["reason"] says why for an outcome other than committed.
@@ -36,12 +41,14 @@ from ratchet.git import Repo
 from ratchet.problem_history import problem_history
 from ratchet.project import Project
 from ratchet.records import records_log
-from ratchet.pathways import build_map, describe
+from ratchet.pathways import MODULE_PART, build_map, describe, functions_of_diff
 from ratchet.pytest_runner import (
     Outcome,
     OutcomeKind,
     find_regressions,
+    find_untested_lines,
     format_failure_report,
+    format_untested_report,
     run_pytest,
 )
 from ratchet.refactor.agent_answers import (
@@ -78,6 +85,10 @@ RECENT_EVENTS = 3
 
 # The kinds of event that come from a job, of which the planner sees only the latest.
 JOB_EVENT_KINDS = ("job_started", "committed", "done", "sent_back", "abandoned")
+
+
+# How many untested lines a console line names before it counts the rest.
+LINES_NAMED = 3
 
 
 # A function that shows what one step of a job did. It takes the job, the step's name and what
@@ -244,6 +255,46 @@ def _format_super_planner_prompt(plan: dict, pathways: dict, rules: str) -> str:
     ])
 
 
+def _format_map_review_prompt(
+    plan: dict, outside: list[str], pathways: dict, diff: str, rules: str
+) -> str:
+    """Returns the super-planner's prompt for the functions that the change touches outside the
+    plan: the plan, those functions with their pathway map, the diff, and the project's rules.
+
+    Args:
+        plan: The planner's plan, as the job's data holds it.
+        outside: The changed functions that neither the plan nor an earlier approval names.
+        pathways: The pathway map of those functions, as ratchet.pathways.describe() returns it.
+        diff: The diff of the code as it stands.
+        rules: The text of the project's rules.md.
+
+    Returns:
+        The prompt as markdown.
+    """
+    functions = "\n".join(f"- `{name}`" for name in outside)
+    return "\n\n".join([
+        "# The implementer changed functions that the plan does not name\n\n"
+        "Approve them when the plan's step needs them, and revise when it does not. A revise "
+        "sends the job back to the implementer with your revisions, and an approve lets the "
+        "functions stay. Leave `tests_to_write` empty.",
+        "# The functions outside the plan\n\n" + functions,
+        "# The plan\n\n```json\n" + json.dumps(plan, indent=2) + "\n```",
+        "# The pathway map of the functions outside the plan\n\n```json\n"
+        + json.dumps(pathways, indent=2) + "\n```",
+        "# The diff of the code as it stands\n\n```diff\n" + diff + "\n```",
+        "# The project's rules\n\n" + rules.strip(),
+    ])
+
+
+def _name_lines(untested: dict[str, list[int]]) -> str:
+    """Returns the untested lines for a console line, naming the first few as "src/app.py:12" and
+    counting the rest."""
+    named = [f"{name}:{number}" for name, numbers in untested.items() for number in numbers]
+    shown = ", ".join(named[:LINES_NAMED])
+    rest = len(named) - LINES_NAMED
+    return f"{shown} +{rest} more" if rest > 0 else shown
+
+
 def _format_writer_prompt(wanted: list[WantedTest], report: str) -> str:
     """Returns the test writer's prompt: the tests to write, and on a later turn the report on
     the last one.
@@ -340,13 +391,15 @@ def build_job_graph(
     ledger_path: Path,
     problem_list: ProblemList,
     report: StepReport = _report_nothing,
+    coverage: bool = False,
 ) -> AgentGraph:
-    """Returns the graph that carries one refactor job through its ten steps.
+    """Returns the graph that carries one refactor job through its twelve steps.
 
     The job's prompt is a problem that the person running ratchet asks to be planned next, such
     as "P19", or "". Each job keeps its prompts, reports, diffs and test logs in a folder named
     after it, beside its saved file. Every step except commit and undo reports what it did
-    through 'report', and check-rules reports only a broken rule.
+    through 'report', and check-rules reports only a broken rule and check-map only a function
+    outside the plan.
 
     Args:
         project: The project, as read from its .ratchet folder.
@@ -364,6 +417,9 @@ def build_job_graph(
             job_started.
         problem_list: The problem list that the jobs work on.
         report: The function that shows what each step did, as StepReport describes.
+        coverage: Whether the test step also measures coverage, and sends the job back to implement
+            when a line that the change adds or changes in src is run by no test. The caller sets
+            it when pytest-cov loads in the project's test environment.
 
     Returns:
         The graph, ready to start jobs.
@@ -451,7 +507,7 @@ def build_job_graph(
                        f"The planner had nothing left to plan after a revise: {answer.reason}")
         if not replanned:
             job.data.update(attempt=0, rejections=0, test_failures=0, report="", revisions=0,
-                            rewrites=0, started=[], written=[], write_report="")
+                            rewrites=0, started=[], written=[], write_report="", approved=[])
         job.data["plan"] = written
         if answer.stop:
             report(job, "plan", "nothing left to plan", cost_usd=cost, detail=answer.reason)
@@ -558,7 +614,7 @@ def build_job_graph(
                cost_usd=cost)
         return after
 
-    @graph.step("implement", next=("check-rules", "undo"))
+    @graph.step("implement", next=("check-map", "undo"))
     def implement(job: Job) -> str:
         # record the violations of the committed code before the job's first attempt
         if job.data["attempt"] == 0:
@@ -585,7 +641,44 @@ def build_job_graph(
                    cost_usd=cost, detail=answer.blocked_reason)
             return end(job, JobOutcome.BLOCKED, answer.blocked_reason)
         report(job, "implement", f"attempt {job.data['attempt']}", cost_usd=cost)
-        return "check-rules"
+        return "check-map"
+
+    @graph.step("check-map", next=("check-rules", "review-map"))
+    def check_map(job: Job) -> str:
+        pathway_map = build_map(project.root)
+        known = {*Plan.model_validate(job.data["plan"]).functions, *job.data["approved"]}
+        # a change to module-level code is not a change to a function
+        job.data["outside"] = [name for name in functions_of_diff(pathway_map, repo.diff())
+                               if name not in known and not name.endswith(f".{MODULE_PART}")]
+        if not job.data["outside"]:
+            return "check-rules"
+        report(job, "check-map", f"{count_of(len(job.data['outside']), 'function')} outside the "
+               "plan -> review-map", detail=", ".join(job.data["outside"]))
+        return "review-map"
+
+    @graph.step("review-map", next=("check-rules", "implement", "undo"))
+    def review_map(job: Job) -> str:
+        outside = job.data["outside"]
+        diff = repo.diff()
+        pathways = describe(build_map(project.root), outside)
+        prompt = _format_map_review_prompt(job.data["plan"], outside, pathways, diff, project.rules)
+        folder = attempt_folder(job)
+        reply = ask(super_planner, prompt, folder)
+        answer, cost = reply.data, reply.cost_usd
+        (folder / "map-review.json").write_text(answer.model_dump_json(indent=2), encoding="utf-8")
+        if answer.verdict == SuperVerdict.APPROVE:
+            job.data["approved"] += outside
+            report(job, "review-map", f"approve {count_of(len(outside), 'function')}",
+                   cost_usd=cost, detail=answer.summary)
+            return "check-rules"
+        notes = "\n".join(f"- {revision}" for revision in answer.revisions)
+        functions = "\n".join(f"- `{name}`" for name in outside)
+        after = send_back(job, "# The super-planner refused the functions outside the plan\n\n"
+                          f"{answer.summary}\n\n## The functions\n\n{functions}\n\n"
+                          f"## The revisions\n\n{notes}\n")
+        report(job, "review-map", f"refuse {where_next(job, after)}", cost_usd=cost,
+               detail=answer.summary)
+        return after
 
     @graph.step("check-rules", next=("test", "implement", "undo"))
     def check_rules_step(job: Job) -> str:
@@ -605,12 +698,24 @@ def build_job_graph(
     def test(job: Job) -> str:
         folder = attempt_folder(job)
         run = run_pytest(project.config.test_command, project.root, folder,
-                         project.config.test_timeout_s)
+                         project.config.test_timeout_s, coverage=coverage)
         worse = find_regressions(baseline, run.outcomes) if run.outcomes else {}
+        untested = {}
         if not worse and run.outcomes:
-            report(job, "test", f"passed ({count_of(len(run.outcomes), 'test')})")
-            return "review"
-        failure = format_failure_report(worse, run, folder / "pytest.log")
+            # An empty report means nothing was measured, such as when the project's own pytest
+            # options turn coverage off, so no line can be called untested.
+            if coverage and run.coverage:
+                untested = find_untested_lines(repo.diff(), run.coverage)
+            if not untested:
+                report(job, "test", f"passed ({count_of(len(run.outcomes), 'test')})")
+                return "review"
+            failure = format_untested_report(untested, folder / "pytest.log")
+            what = (f"{count_of(sum(map(len, untested.values())), 'line')} not run by any test: "
+                    f"{_name_lines(untested)}")
+        else:
+            failure = format_failure_report(worse, run, folder / "pytest.log")
+            what = (f"{len(worse)} newly failing: {name_tests(list(worse))}" if worse
+                    else "the test process crashed")
         (folder / "report.md").write_text(failure, encoding="utf-8")
         job.data["report"] = failure
         job.data["rejections"] = 0
@@ -618,8 +723,6 @@ def build_job_graph(
         after = "implement"
         if job.data["test_failures"] >= caps.test_failures:
             after = end(job, JobOutcome.ABANDONED, failure)
-        what = (f"{len(worse)} newly failing: {name_tests(list(worse))}" if worse
-                else "the test process crashed")
         report(job, "test", f"{what} {where_next(job, after)}")
         return after
 

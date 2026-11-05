@@ -119,3 +119,51 @@ def edit(old: str, new: str) -> Callable[[str], dict]:
 
 GOOD = ("# add them", "# adds a to b")
 BREAK = ("return a + b", "return a - b")
+
+
+# The committed text of src/shop/cli.py, a package module that the pathway map holds.
+SHOP_CLI = ('"""Totals a basket."""\n\n\ndef total(prices):\n    """Returns the sum."""\n'
+            '    return sum(prices)\n\n\ndef main():\n    """Shows the total."""\n'
+            '    print(total([1, 2]))\n')
+# A function that no test calls, which a turn appends to a module.
+SUB = '\n\ndef sub(a, b):\n    """Returns the difference."""\n    return a - b\n'
+
+
+def commit_shop(project, repo) -> None:
+    """Writes the package src/shop, with an empty __init__.py and cli.py as SHOP_CLI holds it,
+    and commits it to the project's repository 'repo'."""
+    package = project.root / "src" / "shop"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(SHOP_CLI, encoding="utf-8", newline="\n")
+    repo.commit("add a shop")
+
+
+def append_sub(path: str) -> None:
+    """Appends SUB to the file at 'path', from the project's folder, with Unix line endings."""
+    file = Path.cwd() / path
+    text = file.read_text(encoding="utf-8") + SUB
+    file.write_text(text, encoding="utf-8", newline="\n")
+
+
+def add_shop_sub(prompt: str) -> dict:
+    """Appends sub to src/shop/cli.py and answers done, as an implementer's turn."""
+    append_sub("src/shop/cli.py")
+    return done()
+
+
+def add_app_sub(prompt: str) -> dict:
+    """Appends sub to src/app.py and answers done, as an implementer's turn."""
+    append_sub("src/app.py")
+    return done()
+
+
+def write_sub_test(module: str) -> Callable[[str], dict]:
+    """Returns an implementer's turn that writes tests/test_sub.py, which imports sub from the
+    module named 'module' and checks that sub(3, 1) is 2, and answers done."""
+    def turn(prompt: str) -> dict:
+        file = Path.cwd() / "tests" / "test_sub.py"
+        file.write_text(f"from {module} import sub\n\n\ndef test_sub():\n"
+                        "    assert sub(3, 1) == 2\n", encoding="utf-8", newline="\n")
+        return done()
+    return turn

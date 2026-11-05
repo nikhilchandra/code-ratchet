@@ -37,15 +37,20 @@ from conftest import APP
 from scripted_agents import (
     BREAK,
     GOOD,
+    SHOP_CLI,
     ScriptedAgent,
     Turn,
+    add_app_sub,
+    add_shop_sub,
     approve,
+    commit_shop,
     done,
     edit,
     plan,
     review,
     revise,
     wanted,
+    write_sub_test,
     write_test,
 )
 
@@ -70,7 +75,8 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
 
     def run(planner: list[Turn], implementer: list[Turn] = (), reviewer: list[Turn] = (),
             super_planner: list[Turn] | None = None, test_writer: list[Turn] = (),
-            ledger: Ledger | None = None, focus: str = "", reports: list | None = None):
+            ledger: Ledger | None = None, focus: str = "", reports: list | None = None,
+            coverage: bool = False):
         # a super-planner left out approves every plan and asks for no tests
         if super_planner is None:
             super_planner = [approve()] * len(planner)
@@ -87,7 +93,8 @@ def run_job(scratch: tuple[Project, Repo], monkeypatch: pytest.MonkeyPatch):
         graph = build_job_graph(project, RefactorSettings(), agents, baseline,
                                 project.state_dir / "list",
                                 ledger or Ledger(problem_list=problem_list.name),
-                                project.state_dir / "list" / "ledger.json", problem_list, report)
+                                project.state_dir / "list" / "ledger.json", problem_list, report,
+                                coverage=coverage)
         return graph.start(focus, slug="job"), agents, graph
 
     return run
@@ -441,7 +448,9 @@ def test_the_diagram_draws_every_arrow_of_the_table(scratch, run_job) -> None:
         ("super-plan", "plan"), ("super-plan", "write-tests"), ("super-plan", "implement"),
         ("super-plan", "undo"),
         ("write-tests", "write-tests"), ("write-tests", "implement"), ("write-tests", "undo"),
-        ("implement", "check-rules"), ("implement", "undo"),
+        ("implement", "check-map"), ("implement", "undo"),
+        ("check-map", "check-rules"), ("check-map", "review-map"),
+        ("review-map", "check-rules"), ("review-map", "implement"), ("review-map", "undo"),
         ("check-rules", "test"), ("check-rules", "implement"), ("check-rules", "undo"),
         ("test", "review"), ("test", "implement"), ("test", "undo"),
         ("review", "commit"), ("review", "fix-comments"), ("review", "implement"), ("review", "undo"),
@@ -840,3 +849,160 @@ def test_an_implementer_that_deletes_a_written_test_is_sent_back(scratch, run_jo
     assert "tests/test_more.py was written by the test writer" in agents["implementer"].prompts[1]
     assert job.data["outcome"] == JobOutcome.COMMITTED
     assert repo.run("show", "HEAD:tests/test_more.py") == PASSING
+
+
+def shop_job(run_job, implementer: list[Turn], super_planner: list[Turn],
+             reviewer: list[Turn] = (), **options):
+    """Runs one job whose plan names shop.cli.total, as its only function."""
+    return run_job([plan(functions=["shop.cli.total"])], implementer, reviewer,
+                   super_planner=super_planner, **options)
+
+
+def test_a_function_outside_the_plan_goes_to_the_super_planner_and_its_approval_goes_on(
+        scratch, run_job) -> None:
+    """Proves a changed function that the plan does not name goes to the super-planner with the
+    diff, without the module-level code, and that its approval is kept and the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+
+    job, agents, _ = shop_job(run_job, [add_shop_sub], [approve(), approve()],
+                              [review("accept")], reports=reports)
+
+    prompts = agents["super_planner"].prompts
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert len(prompts) == 2
+    assert "shop.cli.sub" in prompts[1] and "+def sub(a, b):" in prompts[1]
+    assert "shop.cli.<module>" not in prompts[1]
+    assert job.data["approved"] == ["shop.cli.sub"]
+    assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
+    assert lines_of(reports, "review-map") == ["approve 1 function"]
+
+
+def test_a_refused_function_goes_back_to_implement_with_the_notes(scratch, run_job) -> None:
+    """Proves a refused function sends the job back to the implementer with the super-planner's
+    notes, counted as one rejection, and that an attempt that changes only the plan's function
+    goes on to the commit."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+
+    def only_total(prompt: str) -> dict:
+        text = SHOP_CLI.replace('"""Returns the sum."""', '"""Returns the sum of the prices."""')
+        (project.root / "src" / "shop" / "cli.py").write_text(text, encoding="utf-8",
+                                                              newline="\n")
+        return done()
+
+    job, agents, _ = shop_job(run_job, [add_shop_sub, only_total],
+                              [approve(), revise("drop sub")], [review("accept")],
+                              reports=reports)
+
+    second = agents["implementer"].prompts[1]
+    assert "drop sub" in second and "shop.cli.sub" in second
+    assert job.data["rejections"] == 1
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+    assert lines_of(reports, "review-map") == ["refuse -> attempt 2"]
+
+
+def test_three_refused_map_reviews_undo_the_job(scratch, run_job) -> None:
+    """Proves the third refusal of a function outside the plan abandons the job at the rejection
+    cap, and leaves the tree clean."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+
+    job, _, _ = shop_job(run_job, [add_shop_sub, done(), done()],
+                         [approve()] + [revise("drop sub")] * 3, reports=reports)
+
+    assert job.data["outcome"] == JobOutcome.ABANDONED
+    assert job.data["reason"].startswith("# The super-planner refused the functions outside the plan")
+    assert repo.changed_paths() == []
+    assert lines_of(reports, "review-map")[-1] == "refuse -> undo, at the cap of 3 rejections"
+
+
+def test_an_approved_function_is_not_reviewed_again(scratch, run_job) -> None:
+    """Proves a function that the super-planner approved does not go to it again on the attempt
+    after a reviewer's reject."""
+    project, repo = scratch
+    commit_shop(project, repo)
+
+    job, agents, _ = shop_job(run_job, [add_shop_sub, done()], [approve(), approve()],
+                              [review("reject", failing=("scope",)), review("accept")])
+
+    assert len(agents["super_planner"].prompts) == 2
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_module_level_change_does_not_start_a_map_review(scratch, run_job) -> None:
+    """Proves a change to module-level code alone is not a function outside the plan, so the
+    super-planner is not asked again."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+
+    def add_import(prompt: str) -> dict:
+        text = SHOP_CLI.replace('"""Totals a basket."""\n\n\n',
+                                '"""Totals a basket."""\n\nimport os\n\n\n')
+        (project.root / "src" / "shop" / "cli.py").write_text(text, encoding="utf-8",
+                                                              newline="\n")
+        return done()
+
+    job, agents, _ = shop_job(run_job, [add_import], [approve()], [review("accept")],
+                              reports=reports)
+
+    assert len(agents["super_planner"].prompts) == 1
+    assert lines_of(reports, "check-map") == []
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_line_no_test_runs_goes_back_to_implement(scratch, run_job) -> None:
+    """Proves that, with coverage on, an added line that no test runs sends the job back to the
+    implementer as a test failure that names the line, and that a test for it lets the job
+    commit."""
+    project, repo = scratch
+    reports: list = []
+    lines: list[int] = []
+
+    def add_sub(prompt: str) -> dict:
+        answer = add_app_sub(prompt)
+        # the line of sub's return, which is not its docstring
+        lines.append(app_text(project).splitlines().index("    return a - b") + 1)
+        return answer
+
+    job, agents, _ = run_job([plan()], [add_sub, write_sub_test("app")], [review("accept")],
+                             reports=reports, coverage=True)
+
+    line = lines[0]
+    texts = [(step, text) for step, text, _ in reports]
+    assert ("test", f"1 line not run by any test: src/app.py:{line} -> attempt 2") in texts
+    second = agents["implementer"].prompts[1]
+    assert "# Lines that no test runs" in second and f"lines {line}" in second
+    assert job.data["test_failures"] == 1 and job.data["rejections"] == 0
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_run_that_measures_nothing_does_not_call_every_line_untested(scratch, run_job) -> None:
+    """Proves that when the project's own pytest options turn coverage off, so no report is
+    written, the added lines are not called untested and the job commits."""
+    project, repo = scratch
+    project.config.test_command.append("--no-cov")
+
+    job, _, _ = run_job([plan()], [add_app_sub], [review("accept")], coverage=True)
+
+    assert job.data["test_failures"] == 0
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_three_coverage_failures_undo_the_job(scratch, run_job) -> None:
+    """Proves lines that no test runs count toward the test-failure cap, so the third time
+    abandons the job and leaves the tree clean."""
+    project, repo = scratch
+    reports: list = []
+
+    job, _, _ = run_job([plan()], [add_app_sub, done(), done()], reports=reports,
+                        coverage=True)
+
+    assert job.data["outcome"] == JobOutcome.ABANDONED
+    assert job.data["reason"].startswith("# Lines that no test runs")
+    assert lines_of(reports, "test")[-1].endswith("-> undo, at the cap of 3 test failures")
+    assert repo.changed_paths() == []

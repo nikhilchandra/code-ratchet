@@ -1,5 +1,6 @@
 """Checks whole refactor runs with scripted agents on a scratch project: one job after another,
-the ledger carried between them, and the checks before a run starts."""
+the ledger carried between them, the checks before a run starts, and the coverage and map checks
+of each job."""
 
 from __future__ import annotations
 
@@ -26,12 +27,16 @@ from scripted_agents import (
     GOOD,
     ScriptedAgent,
     Turn,
+    add_app_sub,
+    add_shop_sub,
     approve,
+    commit_shop,
     edit,
     plan,
     review,
     revise,
     wanted,
+    write_sub_test,
     write_test,
 )
 
@@ -309,3 +314,52 @@ def test_commits_since_counts_only_the_commits_after_the_time(
     assert job_loop.commits_since(repo, "2020-02-01 00:00") == 3
     assert job_loop.commits_since(repo, "2020-03-02 00:00") == 2
     assert job_loop.commits_since(repo, "2021-01-01 00:00") == 0
+
+
+def test_an_untested_line_goes_back_from_run_refactor(scratch, run) -> None:
+    """Proves a run turns coverage on when pytest-cov loads, so that an added line that no test
+    runs goes back to the implementer before the commit."""
+    project, repo = scratch
+
+    result, _, lines = run([plan()], [add_app_sub, write_sub_test("app")], [review("accept")],
+                           width=200)
+
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+    assert any("not run by any test: src/app.py:" in line for line in lines)
+    assert not any("coverage is not checked" in line for line in lines)
+    committed = repo.run("show", "--name-only", "--format=", "HEAD").split()
+    assert "src/app.py" in committed and "tests/test_sub.py" in committed
+
+
+def test_a_run_without_pytest_cov_says_once_that_coverage_is_not_checked(scratch, run) -> None:
+    """Proves a run whose test command does not load pytest-cov says once that coverage is not
+    checked, and commits an added line that no test runs."""
+    project, _ = scratch
+    project.config.test_command.extend(["-p", "no:pytest_cov"])
+
+    result, agents, lines = run([plan(), plan(stop=True)], [add_app_sub], [review("accept")],
+                                max_jobs=2, width=200)
+
+    assert sum("coverage is not checked" in line for line in lines) == 1
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+    assert len(agents["implementer"].prompts) == 1
+
+
+def test_a_function_outside_the_plan_is_reviewed_from_run_refactor(scratch, run) -> None:
+    """Proves a run checks the map after the implementer and has the super-planner review a
+    function outside the plan, before the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+
+    def add_tested_sub(prompt: str) -> dict:
+        add_shop_sub(prompt)
+        return write_sub_test("shop.cli")(prompt)
+
+    result, _, lines = run([plan(functions=["shop.cli.total"])], [add_tested_sub],
+                           [review("accept")], super_planner=[approve(), approve()])
+
+    # the step's column starts after the time (7), the job (9) and the problems (7)
+    steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]
+    assert "check-map" in steps and "review-map" in steps
+    assert steps.index("check-map") < steps.index("review-map")
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
