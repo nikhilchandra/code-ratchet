@@ -28,7 +28,7 @@ class Change(_Answer):
 
 
 class Added(_Answer):
-    """Holds one class, method or parameter that a step adds, and the requirement it serves."""
+    """Holds one function, class, method or parameter that a step adds, and the requirement it serves."""
 
     kind: str
     name: str
@@ -51,6 +51,7 @@ class Moved(_Answer):
     name: str
     # The JSON field is "from", which is a Python keyword.
     source: str = Field(alias="from")
+    # The new place, as package.module.qualname.
     to: str
 
 
@@ -88,6 +89,15 @@ class Plan(_Answer):
     # Statements about the code after the step, which the reviewer confirms one by one.
     checks: list[str]
     risks: str
+
+    def new_names(self) -> list[str]:
+        """Returns the names that the plan brings into the code, which the pathway map cannot hold
+        yet: each added name except a parameter, then the place each moved thing moves to. A name
+        appears once.
+        """
+        names = [item.name for item in self.added if item.kind != "parameter"]
+        names += [item.to for item in self.moved]
+        return list(dict.fromkeys(names))
 
 
 # ---------------------------------------------------------------- the super-planner's answer

@@ -81,6 +81,27 @@ def test_the_super_planners_answers_read_as_python_values() -> None:
         test.file for test in approve.tests_to_write]
 
 
+
+def test_a_plans_new_names_are_its_added_and_moved_names() -> None:
+    """Proves a plan's new names are the names it adds, apart from parameters, then the names it
+    moves things to, in order and each once."""
+    plan = Plan.model_validate(saved("plan.json") | {
+        "added": [
+            {"kind": "function", "name": "shop.cli.sub", "file": "src/shop/cli.py",
+             "requirement": "r", "why_not_simpler": "w"},
+            {"kind": "parameter", "name": "shop.cli.total.rounding", "file": "src/shop/cli.py",
+             "requirement": "r", "why_not_simpler": "w"},
+            {"kind": "class", "name": "shop.cart.Cart", "file": "src/shop/cart.py",
+             "requirement": "r", "why_not_simpler": "w"},
+        ],
+        "moved": [
+            {"name": "sub", "from": "src/shop/basket.py", "to": "shop.cli.sub"},
+            {"name": "add", "from": "src/shop/basket.py", "to": "shop.cli.add"},
+        ],
+    })
+
+    assert plan.new_names() == ["shop.cli.sub", "shop.cart.Cart", "shop.cli.add"]
+
 def test_a_missing_field_is_refused() -> None:
     """Proves every field must be present, as the prompts tell the agents."""
     answer = saved("plan.json")

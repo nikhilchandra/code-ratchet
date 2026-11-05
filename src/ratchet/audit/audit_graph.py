@@ -98,7 +98,7 @@ from ratchet.audit.list_markdown import (
     strip_owner_notes,
 )
 from ratchet.audit.settings import AuditSettings
-from ratchet.audit.turn_logs import paths_outside, unopened_files
+from ratchet.audit.turn_logs import output_commands, paths_outside, unopened_files
 from ratchet.audit.verdicts import AppliedVerdicts, DroppedEntry, FinalEntry, apply_verdicts
 from ratchet.git import Repo
 from ratchet.project import FOLDER, Project, read_markdown
@@ -685,10 +685,14 @@ def build_audit_graph(
     def check_turn(
         job: Job, name: str, log_path: Path | None, files: list[str] | None = None
     ) -> None:
-        """Notes the paths outside the copy that an agent's turn touched, and the files it never
-        opened."""
+        """Halts the audit when an agent's turn passed --output to git, which writes a file. Notes
+        the paths outside the copy that the turn touched, and the files it never opened."""
         if log_path is None or not log_path.is_file():
             return
+        writing = output_commands(log_path)
+        if writing:
+            raise AuditError(f"the {name} passed --output to git, which writes a file: "
+                             f"{'; '.join(writing[:3])}")
         copy = Path(job.data["copy"])
         outside = paths_outside(log_path, copy)
         if outside:
@@ -916,7 +920,7 @@ def build_audit_graph(
             with contextlib.suppress(CopyError, OSError):
                 remove_copy(Path(job.data["copy"]))
             return "publish"
-        # a copy deleted while the job waited at the questions gate would make every citation fail
+        # halt when the copy of the code is gone, since no citation can be checked against it
         copy = Path(job.data["copy"])
         if not copy.is_dir():
             raise AuditError(

@@ -11,6 +11,7 @@ import pytest
 from ratchet.audit.turn_logs import (
     ToolCall,
     absolute_paths_in,
+    output_commands,
     paths_outside,
     read_tool_calls,
     unopened_files,
@@ -171,8 +172,35 @@ def test_search_strings_are_not_paths(tmp_path):
     copy.mkdir()
 
     assert absolute_paths_in('grep -rn "/api/" src') == []
+    # a one-segment search string that names nothing on disk is not a path
+    assert absolute_paths_in('grep -rn "/apix" src') == []
+    assert outside_of(tmp_path, copy, "Bash", {"command": 'grep -rn "/apix" src'}) == []
     assert outside_of(tmp_path, copy, "Bash", {"command": 'grep -rn "/api/" src'}) == []
     assert outside_of(tmp_path, copy, "Grep", {"pattern": "/api/"}) == []
+
+
+def test_cd_to_the_root_or_a_root_folder_is_a_path():
+    assert absolute_paths_in("cd / && cat c/Users/me/code/x/.ratchet/p.md") == ["/"]
+    # the target of cd counts whether or not /home exists on this machine
+    assert absolute_paths_in("cd /home && cat me/x/.ratchet/p.md") == ["/home"]
+    assert absolute_paths_in("pushd /home && cat a.md") == ["/home"]
+
+
+def test_a_one_segment_absolute_path_that_exists_is_a_path():
+    # the first folder below the root of the current folder, such as /Users on Windows
+    segment = "/" + Path.cwd().resolve().parts[1]
+
+    assert absolute_paths_in(f"git diff --no-index {segment} /dev/null") == [segment]
+
+
+def test_bash_cd_to_the_root_is_outside(tmp_path):
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    cd_root = "cd / && cat c/Users/me/x/.ratchet/p.md"
+    cd_home = "cd /home && cat me/x/.ratchet/p.md"
+
+    assert outside_of(tmp_path, copy, "Bash", {"command": cd_root}) == ["/"]
+    assert outside_of(tmp_path, copy, "Bash", {"command": cd_home}) == ["/home"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Git Bash paths name Windows drives")
@@ -283,3 +311,45 @@ def test_an_unset_home_variable_falls_back_to_the_home_folder(tmp_path, monkeypa
     copy = tmp_path / "copy"
     copy.mkdir()
     assert outside_of(tmp_path, copy, "Bash", {"command": "cat $USERPROFILE/p.md"}) != []
+
+
+def test_a_one_segment_search_string_that_does_not_exist_is_not_a_path():
+    assert absolute_paths_in('grep -rn "/apix" src') == []
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_a_word_that_cannot_be_a_path_on_disk_is_not_a_path(monkeypatch, error):
+    def fail(token):
+        raise error("bad path")
+
+    monkeypatch.setattr("ratchet.audit.turn_logs._git_bash_to_windows", fail)
+    assert absolute_paths_in("awk /^def /{print}") == []
+
+
+def test_git_commands_that_pass_output_are_found(tmp_path):
+    writing = [
+        "git log -1 --output=C:/x/.ratchet/rules.md",
+        "git diff --output out.txt",
+        "git show --outp=y.txt",
+    ]
+    log = write_log(
+        tmp_path / "turn.log",
+        [
+            ("Bash", {"command": "git log --oneline"}),
+            ("Bash", {"command": writing[0]}),
+            ("Read", {"file_path": "--output=a.txt"}),
+            ("Bash", {"command": "git diff --stat"}),
+            ("Bash", {"command": writing[1]}),
+            ("Bash", {"command": "git diff --ours"}),
+            ("Bash", {"command": writing[2]}),
+        ],
+    )
+
+    assert output_commands(log) == writing
+
+
+def test_a_command_with_unbalanced_quotes_that_passes_output_is_found(tmp_path):
+    command = 'git log --output=out.txt --format="%h'
+    log = write_log(tmp_path / "turn.log", [("Bash", {"command": command})])
+
+    assert output_commands(log) == [command]

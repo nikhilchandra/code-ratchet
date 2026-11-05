@@ -1,8 +1,8 @@
 """The module contains the functions that read an agent's turn log and report which paths the
-agent's tool calls touched.
+agent's tool calls touched, and which git commands the agent ran that write a file.
 
-The audit uses them to tell whether an agent stayed inside its copy of the code, and to list the
-inventory files that the agent never opened.
+The audit uses them to tell whether an agent stayed inside its copy of the code, to list the
+inventory files that the agent never opened, and to halt on a git command that writes a file.
 """
 
 from __future__ import annotations
@@ -32,6 +32,9 @@ HOME_VARIABLE = re.compile(r"^(?:\$HOME|\$\{HOME\}|\$USERPROFILE|\$\{USERPROFILE
 LEADING_VARIABLE = re.compile(r"^(?:\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\}|%[A-Za-z_]\w*%)(?=[\\/])")
 # A leading option name that is joined to its value, such as --file= or name=.
 OPTION_PREFIX = re.compile(r"^-{0,2}[\w-]+=")
+
+# A word that is git's --output option, written in full or cut short to at least --ou, with or without a value.
+OUTPUT_OPTION = re.compile(r"^--ou(?:t(?:p(?:u(?:t)?)?)?)?(?:=|$)")
 
 # Absolute paths that every command may name.
 ALLOWED_PATHS = ("/dev/null",)
@@ -85,9 +88,9 @@ def paths_named(calls: list[ToolCall]) -> list[str]:
 
     Returns:
         The path fields of every call, the pattern of a Glob call, the 'glob' field of a Grep
-        call, and every absolute, '~', '..' or variable path written in the command text of a Bash call. A
-        relative pattern or glob is joined to the call's 'path' field. The regex 'pattern' of a
-        Grep call is not a path and is left out. Relative paths are kept as written.
+        call, and every absolute, '~', '..' or variable path written in the command text of a Bash
+        call. A relative pattern or glob is joined to the call's 'path' field. The regex 'pattern'
+        of a Grep call is not a path and is left out. Relative paths are kept as written.
     """
     paths: list[str] = []
     for call in calls:
@@ -118,13 +121,43 @@ def absolute_paths_in(command: str) -> list[str]:
         a '~' path, a path with a '..' segment, a path through a home variable such as $HOME, and
         a path through another variable followed by a separator such as $TMP/x, in the order they
         appear. Search strings such as "/api/", URLs and the null device are not counted. A bare
-        variable such as '$f' and a format such as '%H%n' are not paths.
+        variable such as '$f' and a format such as '%H%n' are not paths. The target of cd or pushd
+        always counts when it starts with a slash, including '/' itself. A word with one segment
+        after the slash counts when that place exists on disk.
     """
     found = WINDOWS_PATH.findall(command)
+    previous = ""
     for token in _tokens(command):
         token = OPTION_PREFIX.sub("", token)
-        if not DRIVE_START.match(token) and _looks_like_path(token):
-            found.append(token)
+        if not DRIVE_START.match(token):
+            changes_folder = previous in ("cd", "pushd") and token.startswith("/") and token not in ALLOWED_PATHS
+            if changes_folder or _looks_like_path(token):
+                found.append(token)
+        previous = token
+    return found
+
+
+def output_commands(log_path: Path) -> list[str]:
+    """Lists the Bash commands in a turn that pass git's --output option.
+
+    The git commands diff, log and show write their output to the file that --output names, and
+    the rules that allow those commands do not stop that write. Git also accepts the option cut
+    short, such as --outp, so every spelling from --ou up counts.
+
+    Args:
+        log_path: The log file that the agent wrote for the turn.
+
+    Returns:
+        Each Bash command with a word that is the option, in the order made. A command made twice
+        is listed once.
+    """
+    found: list[str] = []
+    for call in read_tool_calls(log_path):
+        command = call.arguments.get("command")
+        if call.name != "Bash" or not isinstance(command, str) or command in found:
+            continue
+        if any(OUTPUT_OPTION.match(word) for word in _tokens(command)):
+            found.append(command)
     return found
 
 
@@ -155,7 +188,7 @@ def _looks_like_path(token: str) -> bool:
         True for a '~' path, a path with a '..' segment, a path that starts with a home variable,
         a path that starts with another variable and a separator, and an absolute path. A path
         that starts with a slash needs two segments, or one segment with a dot or a single letter,
-        so that a search string such as "/api/" is not taken for a path.
+        or it must exist on disk, so that a search string such as "/api/" is not taken for a path.
     """
     if token in ALLOWED_PATHS or "://" in token:
         return False
@@ -166,7 +199,27 @@ def _looks_like_path(token: str) -> bool:
     if not token.startswith("/"):
         return False
     segments = [segment for segment in token.split("/") if segment]
-    return len(segments) >= 2 or (len(segments) == 1 and ("." in segments[0] or len(segments[0]) == 1))
+    if len(segments) >= 2 or (len(segments) == 1 and ("." in segments[0] or len(segments[0]) == 1)):
+        return True
+    return _on_disk(token)
+
+
+def _on_disk(token: str) -> bool:
+    """Tells whether a word that starts with a slash names a place that exists on this machine.
+
+    A path in the Git Bash form such as '/c/Users' is converted to its Windows form first. Any rule
+    that must tell a real path from a search string can share this check.
+
+    Args:
+        token: One word of a command.
+
+    Returns:
+        True when the place exists. A word that cannot be a path, such as '/^def /{print', is False.
+    """
+    try:
+        return Path(_git_bash_to_windows(token)).exists()
+    except (OSError, ValueError):
+        return False
 
 
 def paths_outside(log_path: Path, copy: Path) -> list[str]:

@@ -479,6 +479,58 @@ def test_a_missing_verdict_and_a_path_outside_the_copy_are_noted(
     assert "named paths outside the copy of the code" in text
 
 
+def running_bash(name: str, command: str, answer: Turn) -> Turn:
+    """Returns a turn that writes a log in which the agent 'name' ran one Bash command, and then
+    gives the answer of the turn 'answer'."""
+    message = json.dumps({"content": [{"name": "Bash", "input": {"command": command}}]})
+
+    def turn(prompt: str) -> dict:
+        Path(f"{name}.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return answer(prompt) if callable(answer) else answer
+    return turn
+
+
+def halted_jobs(project: Project) -> list:
+    """Returns the audit's jobs after removing the copy of each one."""
+    jobs = build_audit_graph(project, AuditSettings()).jobs()
+    for job in jobs:
+        remove_copy(Path(job.data["copy"]))
+    return jobs
+
+
+def test_an_agent_that_passes_output_to_git_halts_the_audit(
+    audit_project: Project, start
+) -> None:
+    """Proves an auditor that ran git with --output, which writes a file, halts the audit before
+    the review."""
+    rules = (audit_project.root / ".ratchet" / "rules.md").as_posix()
+    auditor = running_bash("auditor", f"git log -1 --output={rules}", auditor_turn(audit_project))
+
+    with pytest.raises(AuditError, match="--output"):
+        start(default_turns(audit_project) | {"auditor": [auditor]})
+    jobs = halted_jobs(audit_project)
+
+    assert [job.status for job in jobs] == [JobStatus.HALTED]
+    assert "--output" in jobs[0].halt_reason
+    folder = audit_folder(audit_project)
+    assert not (folder / "review-a.json").exists() and not (folder / "draft.md").exists()
+
+
+def test_a_list_reviewer_that_passes_output_to_git_halts_the_audit(
+    audit_project: Project, start
+) -> None:
+    """Proves a list reviewer that ran git with --output halts the audit, as the auditor does."""
+    reviewer = running_bash("list_reviewer_a", "git diff --output=out.txt", review_turn())
+
+    with pytest.raises(AuditError, match="--output"):
+        start(default_turns(audit_project) | {"list_reviewer_a": [reviewer]})
+    jobs = halted_jobs(audit_project)
+
+    assert [job.status for job in jobs] == [JobStatus.HALTED]
+    assert "--output" in jobs[0].halt_reason
+    assert not (audit_folder(audit_project) / "draft.md").exists()
+
+
 def test_the_cost_cap_halts_the_job_before_a_call(audit_project: Project, start) -> None:
     """Proves a step whose budgets could pass the cap is not started, and that earlier spending
     counts toward the cap."""
@@ -768,6 +820,27 @@ def test_a_blind_audit_that_reads_through_home_halts_the_job(
     assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
 
 
+def test_a_blind_audit_that_cds_to_the_root_halts_the_job(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a blind audit that goes to the root with 'cd /' and then reads the old list through a
+    path relative to the root stops the job."""
+    old = (audit_project.folder / f"{OLD_NAME}.md").resolve()
+    below_root = old.relative_to(old.anchor).as_posix()
+    command = json.dumps(f"cd / && cat {below_root}")
+    message = '{"content": [{"name": "Bash", "input": {"command": %s}}]}' % command
+
+    def fresh(prompt: str) -> dict:
+        Path("fresh.log").write_text("--- messages ---\n" + message + "\n", encoding="utf-8")
+        return fresh_turn(audit_project)
+
+    with pytest.raises(AuditError, match="blind audit"):
+        start(reaudit_turns(audit_project, old_list) | {"fresh": [fresh]}, slug=AGAIN)
+    for job in build_audit_graph(audit_project, AuditSettings()).jobs():
+        remove_copy(Path(job.data["copy"]))
+    assert not (audit_folder(audit_project, AGAIN) / "fresh.json").exists()
+
+
 def test_a_reaudit_runs_the_blind_audit_and_the_rechecker_and_skips_the_rest(
     audit_project: Project, start, old_list: list
 ) -> None:
@@ -873,6 +946,22 @@ def test_a_rechecker_that_stays_wrong_halts_the_audit(
         start(turns, slug=AGAIN)
     for job in build_audit_graph(audit_project, AuditSettings()).jobs():
         remove_copy(Path(job.data["copy"]))
+
+
+def test_a_rechecker_that_passes_output_to_git_halts_the_reaudit(
+    audit_project: Project, start, old_list: list
+) -> None:
+    """Proves a rechecker that ran git with --output halts the re-audit before its checks are
+    kept."""
+    rechecker = running_bash("rechecker", "git log -1 --output=out.txt", recheck_turn(old_list))
+    turns = reaudit_turns(audit_project, old_list) | {"rechecker": [rechecker]}
+
+    with pytest.raises(AuditError, match="--output"):
+        start(turns, slug=AGAIN)
+    jobs = {job.slug: job for job in halted_jobs(audit_project)}
+
+    assert jobs[AGAIN].status == JobStatus.HALTED and "--output" in jobs[AGAIN].halt_reason
+    assert not (audit_folder(audit_project, AGAIN) / "recheck.json").exists()
 
 
 def test_the_retry_cost_check_counts_what_the_step_already_spent(

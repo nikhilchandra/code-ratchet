@@ -111,6 +111,38 @@ def test_approving_is_refused_when_head_has_moved(audit_project: Project) -> Non
     assert settle_audit(audit_project, DISCARD).outcome == "discarded"
 
 
+def test_approving_is_refused_when_the_records_repository_is_damaged(
+    audit_project: Project,
+) -> None:
+    """Proves a draft is not published when .ratchet/.git is damaged, so nothing is written or
+    committed to the project's own repository, and the audit can still be discarded."""
+    waiting_run(audit_project)
+    root = audit_project.root
+    records_git = root / ".ratchet" / ".git"
+    records_git.rename(root.parent / "records-git")
+    records_git.mkdir()
+    (root / "src" / "app" / "core" / "model.py").write_text("changed\n", encoding="utf-8")
+    rules = (root / ".ratchet" / "rules.md").read_bytes()
+
+    def git(*command: str) -> str:
+        """Runs git in the project's own folder and returns its output."""
+        return subprocess.run(["git", *command], cwd=root, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    head = git("rev-parse", "HEAD")
+
+    with pytest.raises(AuditError, match="ratchet init"):
+        settle_audit(audit_project, APPROVE)
+
+    assert not find_problem_lists(audit_project)
+    assert (root / ".ratchet" / "rules.md").read_bytes() == rules
+    assert not list((root / ".ratchet" / "state").glob("*/ledger.json"))
+    assert git("rev-parse", "HEAD") == head
+    assert git("diff", "--cached", "--name-only") == ""
+
+    assert settle_audit(audit_project, DISCARD).outcome == "discarded"
+
+
 def test_the_template_rules_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Proves an audit does not start while rules.md still has the template marker."""
     monkeypatch.chdir(tmp_path)

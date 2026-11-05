@@ -36,8 +36,8 @@ def make_copy(root: Path, hide: list[str], history_with_ratchet: str) -> Path:
     """Makes a clone of a project's committed code with no other branch, tag or remote.
 
     The clone holds only the history of the project's current branch, and no object outside that
-    history is left in it. The history of the clone is cleaned of the .ratchet folder and of every path in 'hide'. The
-    clone is checked out at the project's HEAD, detached.
+    history is left in it. The history of the clone is cleaned of the .ratchet folder and of every
+    path in 'hide'. The clone is checked out at the project's HEAD, detached.
 
     Args:
         root: The project's own folder.

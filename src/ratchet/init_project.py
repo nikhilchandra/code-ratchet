@@ -17,9 +17,13 @@ TEMPLATES = Path(__file__).parent / "templates"
 # The lines of a .gitignore that already keep the .ratchet folder out of the project's git.
 IGNORE_FORMS = (FOLDER, f"{FOLDER}/", f"/{FOLDER}", f"/{FOLDER}/")
 
-
 # What the owner is told about the files of a .ratchet folder that the project's git stops tracking.
-RESTORE_NOTE = f"The files stay on disk in this clone, but checking out an older commit can replace or delete them, and pulling this commit into another clone deletes them there. In this clone, git -C {FOLDER} restore . brings them back from the records repository. Another clone has no records repository, so copy the {FOLDER} folder over from this one."
+RESTORE_NOTE = (
+    "The files stay on disk in this clone, but checking out an older commit can replace or delete "
+    "them, and pulling this commit into another clone deletes them there. In this clone, git -C "
+    f"{FOLDER} restore . brings them back from the records repository. Another clone has no "
+    f"records repository, so copy the {FOLDER} folder over from this one."
+)
 
 
 class InitError(RuntimeError):

@@ -14,7 +14,13 @@ The script appends three things to this prompt:
   source. For each function it holds the paths that lead from an entry point down to it, the
   functions it reaches, the files it reads and writes, and the calls that code could not resolve.
   A function that the map does not hold is listed as unknown, which usually means that the plan
-  named it wrongly
+  named it wrongly. A function that the plan adds, or moves to, is not in the code yet, so the map
+  lists it as new, which is expected
+  An entry point is a cli module's `main` and its command functions, a step on a rooster
+  `AgentGraph`, or a function that `[project.scripts]` in `pyproject.toml` names. When the project
+  has none of these, it is every function that no other function calls, where a call from
+  module-level code, such as under `if __name__ == "__main__"`, does not count. When the prompt
+  says the map found no entry points, list no paths and ask for no tests from the map
 - the project's `rules.md`, which is also in the shared section above
 
 ## Judging the plan
@@ -22,7 +28,7 @@ The script appends three things to this prompt:
 Check the plan against the rules and against the code as it is now. Send it back when:
 
 - it breaks a rule, or adds a class, a method or a parameter that nothing needs
-- its `functions` leaves out a function that its changes touch, or names one that does not exist
+- its `functions` leaves out a function that its changes touch, or names one that does not exist and is not listed as new
 - it changes what a user sees or can do
 - it leaves a second copy of what it sets out to put in one place
 - a check in `checks` could not be confirmed by reading the code

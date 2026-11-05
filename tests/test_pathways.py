@@ -184,6 +184,23 @@ def test_an_unresolved_call_is_listed_with_file_and_line(tmp_path: Path) -> None
     assert entry in found["app.poke.outer"]["unresolved"]
 
 
+def test_describe_lists_a_new_name_apart_from_an_unknown_one(tmp_path: Path) -> None:
+    """Proves a name that the map lacks is listed as new when it is given as new, and as unknown
+    otherwise, and that describe gives an empty new list when it is given none."""
+    root = make_tree(tmp_path, {"app/box.py": "class Box:\n    def open(self):\n        return 1\n"})
+    pathway_map = build_map(root)
+    names = ["app.box.Box.open", "app.box.missing", "app.box.helper"]
+
+    described = describe(pathway_map, names, new=["app.box.helper"])
+
+    assert list(described["functions"]) == ["app.box.Box.open"]
+    assert described["unknown"] == ["app.box.missing"]
+    assert described["new"] == ["app.box.helper"]
+    plain = describe(pathway_map, names)
+    assert plain["unknown"] == ["app.box.missing", "app.box.helper"]
+    assert plain["new"] == []
+
+
 def test_a_writer_and_reader_are_linked_through_a_file_name(tmp_path: Path) -> None:
     """Proves writers and readers of notes.json link both ways, and an f-string is undetermined."""
     root = make_tree(tmp_path, {
@@ -271,6 +288,83 @@ def test_entry_points_are_cli_commands_and_graph_steps(tmp_path: Path) -> None:
     assert pathway_map.entry_points == {"app.cli.main", "app.cli.run_x", "app.flow.build.go"}
     assert upstream_paths(pathway_map, "app.cli.helper") == ([["app.cli.run_x", "app.cli.helper"]], 0)
     assert upstream_paths(pathway_map, "app.flow.build.go") == ([["app.flow.build.go"]], 0)
+
+
+def test_a_project_script_is_an_entry(tmp_path: Path) -> None:
+    """Proves a function that [project.scripts] in pyproject.toml names is the only entry point,
+    so an uncalled function beside it is not one."""
+    root = make_tree(tmp_path, {
+        "app/run.py": (
+            "def start():\n    return helper()\n\n\n"
+            "def helper():\n    return 1\n\n\n"
+            "def spare():\n    return 2\n"
+        ),
+    })
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "tool"\n\n[project.scripts]\ntool = "app.run:start"\n', encoding="utf-8")
+    pathway_map = build_map(root)
+
+    assert pathway_map.entry_points == {"app.run.start"}
+    assert upstream_paths(pathway_map, "app.run.helper") == ([["app.run.start", "app.run.helper"]], 0)
+
+
+def test_uncalled_functions_are_entries_when_nothing_else_is(tmp_path: Path) -> None:
+    """Proves that with no cli module, no AgentGraph step and no pyproject.toml, the entry points
+    are the functions that no other function calls, where a call to itself does not count."""
+    root = make_tree(tmp_path, {
+        "app/lib.py": (
+            "def top():\n    return mid()\n\n\n"
+            "def mid():\n    return leaf()\n\n\n"
+            "def leaf():\n    return 0\n\n\n"
+            "def again(n):\n    return again(n - 1) if n else 0\n"
+        ),
+    })
+    pathway_map = build_map(root)
+
+    assert pathway_map.entry_points == {"app.lib.top", "app.lib.again"}
+    assert upstream_paths(pathway_map, "app.lib.leaf") == (
+        [["app.lib.top", "app.lib.mid", "app.lib.leaf"]], 0)
+
+
+def test_a_function_called_only_from_module_code_is_an_entry(tmp_path: Path) -> None:
+    """Proves main() called only under `if __name__ == "__main__":` is an entry point, and the
+    function it calls gets a path from it."""
+    root = make_tree(tmp_path, {
+        "app/script.py": (
+            "def main():\n    return work()\n\n\n"
+            "def work():\n    return 1\n\n\n"
+            'if __name__ == "__main__":\n    main()\n'
+        ),
+    })
+    pathway_map = build_map(root)
+
+    assert "app.script.main" in pathway_map.entry_points
+    assert "app.script.work" not in pathway_map.entry_points
+    assert upstream_paths(pathway_map, "app.script.work") == (
+        [["app.script.main", "app.script.work"]], 0)
+
+
+@pytest.mark.parametrize(("pyproject", "entries"), [
+    ("[project.scripts\ntool = ", {"app.run.start", "app.run.spare"}),
+    ('[project.scripts]\ntool = "app.run"\n', {"app.run.start", "app.run.spare"}),
+    ('[project.scripts]\ntool = "elsewhere.mod:start"\n', {"app.run.start", "app.run.spare"}),
+    ('[project.scripts]\ntool = "app.run:start [extra]"\n', {"app.run.start"}),
+], ids=["not-toml", "no-colon", "outside-src", "extras"])
+def test_a_broken_or_odd_pyproject_falls_back_to_uncalled_functions(
+        tmp_path: Path, pyproject: str, entries: set[str]) -> None:
+    """Proves a pyproject.toml that is not valid TOML, or whose script has no ':' or names a
+    function outside src, leaves the uncalled functions as the entry points, and that a script
+    with extras after it names its function."""
+    root = make_tree(tmp_path, {
+        "app/run.py": (
+            "def start():\n    return helper()\n\n\n"
+            "def helper():\n    return 1\n\n\n"
+            "def spare():\n    return 2\n"
+        ),
+    })
+    (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+
+    assert build_map(root).entry_points == entries
 
 
 def test_upstream_paths_are_capped_at_fifty(tmp_path: Path) -> None:

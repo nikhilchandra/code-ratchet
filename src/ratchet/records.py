@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ratchet.git import Repo
+from ratchet.git import GitError, Repo
 from ratchet.project import FOLDER
 
 # The records repository's .gitignore, which keeps each state/<list>/ledger.json and ignores the
@@ -91,8 +91,12 @@ def commit_records(root: Path, message: str) -> str | None:
         The short hash of the new commit, or None when nothing changed.
 
     Raises:
-        GitError: The folder is not a repository or the commit failed.
+        GitError: The folder is not its own repository, as has_records answers, or the commit
+            failed.
     """
+    # a damaged .git would let add and commit land in the project's own repository
+    if not has_records(root):
+        raise GitError(f"{root / FOLDER} is not a records repository. Run `ratchet init`.")
     repo = records_repo(root)
     repo.run("add", "-A")
     if not repo.run("status", "--porcelain").strip():

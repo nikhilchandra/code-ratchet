@@ -91,8 +91,9 @@ def write_profile(project: Project, role: Role, folder: Path) -> Path:
 def make_agents(project: Project, settings: AuditSettings, copy: Path, folder: Path) -> dict[str, Agent]:
     """Returns the audit's agents, each set up from its settings and working in the copy.
 
-    No agent may edit, and none may read the project or its .ratchet folder. All but the pair judge may read the copy's git history. The blind audit's
-    agent has the auditor's profile and settings, and is keyed "fresh".
+    No agent may edit, and none may read the project or its .ratchet folder. All but the pair judge
+    may read the copy's git history. The blind audit's agent has the auditor's profile and
+    settings, and is keyed "fresh".
 
     Args:
         project: The project, as read from its .ratchet folder.

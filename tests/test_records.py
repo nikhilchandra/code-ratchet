@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ratchet.git import Repo
+from ratchet.git import GitError, Repo
 from ratchet.records import commit_records, has_records, init_records, records_log, records_repo
 
 
@@ -14,6 +14,22 @@ def write(path: Path, text: str = "x\n") -> None:
     """Writes a file, making its folder first."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def committed_project(root: Path) -> Repo:
+    """Makes the project's own repository with one commit and returns its helper."""
+    project = Repo(root)
+    project.run("init", "-q")
+    write(root / "app.py", "one\n")
+    project.run("add", "-A")
+    project.run("-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "start")
+    return project
+
+
+def assert_untouched(project: Repo, commits: str) -> None:
+    """Checks the project's own repository has the given commits and nothing staged."""
+    assert project.run("rev-list", "--all").strip() == commits
+    assert project.run("diff", "--cached", "--name-only").strip() == ""
 
 
 def tracked(root: Path) -> set[str]:
@@ -137,3 +153,37 @@ def test_init_repairs_an_empty_records_git_folder(tmp_path: Path) -> None:
 
     assert tracked(tmp_path) == {".gitignore", "rules.md"}
     assert project.run("rev-list", "--all", check=False).strip() == ""
+
+
+def test_commit_refuses_a_damaged_records_folder(tmp_path: Path) -> None:
+    """Proves a commit is refused when .ratchet/.git is an empty folder or a file that points
+    nowhere, and that nothing lands in the project's own repository."""
+    project = committed_project(tmp_path)
+    commits = project.run("rev-list", "--all").strip()
+    write(tmp_path / "app.py", "two\n")
+    write(tmp_path / ".ratchet" / "rules.md")
+    entry = tmp_path / ".ratchet" / ".git"
+    entry.mkdir()
+
+    with pytest.raises(GitError, match="not a records repository"):
+        commit_records(tmp_path, "msg")
+    assert_untouched(project, commits)
+
+    entry.rmdir()
+    entry.write_text("gitdir: nowhere\n", encoding="utf-8")
+    with pytest.raises(GitError, match="not a records repository"):
+        commit_records(tmp_path, "msg")
+    assert_untouched(project, commits)
+
+
+def test_commit_refuses_a_project_with_no_records_repository(tmp_path: Path) -> None:
+    """Proves a commit is refused when .ratchet holds no .git at all, and that nothing lands in
+    the project's own repository."""
+    project = committed_project(tmp_path)
+    commits = project.run("rev-list", "--all").strip()
+    write(tmp_path / "app.py", "two\n")
+    write(tmp_path / ".ratchet" / "rules.md")
+
+    with pytest.raises(GitError, match="not a records repository"):
+        commit_records(tmp_path, "msg")
+    assert_untouched(project, commits)

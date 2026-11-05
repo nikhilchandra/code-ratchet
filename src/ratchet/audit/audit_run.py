@@ -340,8 +340,9 @@ def settle_audit(
         draft_path set. The owner reads the draft and approves again.
 
     Raises:
-        AuditError: No audit waits, the draft cannot be published, or HEAD has moved since the
-            audit started so that the list would be out of date.
+        AuditError: No audit waits, the draft cannot be published, HEAD has moved since the audit
+            started so that the list would be out of date, or the records repository is missing
+            or damaged.
         ProjectError: The [audit] section of config.toml is wrong.
         GitError: A git command failed.
     """
@@ -352,6 +353,8 @@ def settle_audit(
     if decision == APPROVE and _head(project) != job.data["head"]:
         raise AuditError("HEAD has moved since the audit started, so the list is out of date. "
                          "Discard this audit and start another.")
+    if decision == APPROVE and not has_records(project.root):
+        raise AuditError("this project has not been set up yet. Run `ratchet init` first.")
     try:
         if job.next_step == AFTER_QUESTIONS and decision == APPROVE:
             # an audit cut off at the questions gate goes on with no answers and stops at the draft

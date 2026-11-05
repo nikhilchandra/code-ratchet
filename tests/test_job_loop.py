@@ -406,3 +406,25 @@ def test_a_function_outside_the_plan_is_reviewed_from_run_refactor(scratch, run)
     assert "check-map" in steps and "review-map" in steps
     assert steps.index("check-map") < steps.index("review-map")
     assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+
+
+def test_a_function_the_plan_adds_is_not_reviewed_from_run_refactor(scratch, run) -> None:
+    """Proves a run commits a function that the plan lists in 'added' without a map review."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    added = {"kind": "function", "name": "shop.cli.sub", "file": "src/shop/cli.py",
+             "requirement": "a basket can take one price from another",
+             "why_not_simpler": "no function subtracts yet"}
+
+    def add_tested_sub(prompt: str) -> dict:
+        add_shop_sub(prompt)
+        return write_sub_test("shop.cli")(prompt)
+
+    result, agents, lines = run([plan(functions=["shop.cli.total"], added=[added])],
+                                [add_tested_sub], [review("accept")], super_planner=[approve()])
+
+    # the step's column starts after the time (7), the job (9) and the problems (7)
+    steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]
+    assert "review-map" not in steps
+    assert len(agents["super_planner"].prompts) == 1
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]

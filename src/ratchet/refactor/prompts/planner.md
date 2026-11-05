@@ -35,12 +35,14 @@ When nothing remains that can be done, answer with a stop instead of a plan.
 Check every file and line you name against the code as it is now, since earlier steps have
 changed it and the problem list's line numbers may be out of date.
 
-For every class, method or parameter that the step adds, name the requirement it serves and
+For every function, class, method or parameter that the step adds, name the requirement it serves and
 explain why nothing simpler meets it. A plan that adds a class to connect two other classes, or
 a method that only passes a call through, is the kind of plan the refactor exists to stop.
 
 Name in `functions` every function that the step changes, each as `package.module.qualname`, such
-as `invoices.pricing.line_total`, with `<module>` for the code at the top of a module. The script
+as `invoices.pricing.line_total`, with `<module>` for the code at the top of a module. Name the
+functions that the step adds or moves in `functions` too. In `added`, a function, method or class
+is named as `package.module.qualname`, and in `moved`, `to` is the new `package.module.qualname`. The script
 builds the paths that lead to these functions for the super-planner, so a function that you leave
 out is a path that nobody checks. When the script appends a super-planner's revisions, make a
 plan that meets each of them.
@@ -74,11 +76,11 @@ Answer with one JSON object and nothing else. Every field is always present. For
     {"file": "path/to/file.py", "what": "what changes in this file"}
   ],
   "added": [
-    {"kind": "class | method | parameter", "name": "...", "file": "...",
+    {"kind": "function | class | method | parameter", "name": "package.module.qualname", "file": "...",
      "requirement": "what needs it", "why_not_simpler": "why nothing that exists will do"}
   ],
   "removed": [{"kind": "class | method | parameter | module", "name": "...", "file": "..."}],
-  "moved": [{"name": "...", "from": "...", "to": "..."}],
+  "moved": [{"name": "...", "from": "...", "to": "package.module.qualname"}],
   "tests_affected": [
     {"file": "tests/...", "why": "what it reads that changes", "allowed_change": "..."}
   ],

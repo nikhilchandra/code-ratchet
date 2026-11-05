@@ -14,17 +14,20 @@ A job goes through these steps:
         to implement.
     check-rules: code checks the rules it can check by itself.
     test: the whole suite runs and is compared with the baseline. When coverage is on, every
-        added or changed line in src must also be run by some test.
+        added or changed line in src must also be run by some test. A run whose coverage report
+        is empty, such as when the project's own pytest options turn coverage off, measured
+        nothing, so no line counts as untested.
     review: the reviewer judges the diff, and code turns an accept with an unmet check into a
         reject.
     fix-comments: code makes the reviewer's comment fixes when they change only comments.
     commit: the step is committed with the plan's title.
     undo: the code goes back to the last commit.
 
-A failed check, a test failure, an untested line or a rejection sends the job back to implement with a report, a
-revise sends it back to plan, and a refused test write sends it back to write-tests, each until a
-cap is reached and the job is undone. When the job ends, job.data["outcome"] says how,
-and job.data["reason"] says why for an outcome other than committed.
+A failed check, a test failure, an untested line or a rejection sends the job back to implement
+with a report. A revise sends it back to plan. A refused test write sends it back to
+write-tests. Each has a cap, and a job that reaches one is undone. When the job ends,
+job.data["outcome"] says how, and job.data["reason"] says why for an outcome other than
+committed.
 """
 
 from __future__ import annotations
@@ -78,6 +81,12 @@ from ratchet.refactor.review_reports import (
 from ratchet.refactor.rule_checks import check_rules, find_violations, snapshot_ratchet_files
 from ratchet.refactor.settings import COMMAND, RefactorSettings
 from ratchet.refactor.written_tests import find_write_faults, read_written, save_written
+
+# The note that tells the super-planner the pathway map has no entry points to start a path from.
+NO_ENTRY_POINTS = (
+    "The map found no entry points in this project, so every upstream_paths list is empty. "
+    "List no paths and ask for no tests from the map, and judge the plan on its own."
+)
 
 # How many of the latest jobs the planner sees.
 RECENT_JOBS = 10
@@ -236,25 +245,29 @@ def _format_planner_prompt(project: Project, job: Job, ledger: Ledger, problems_
     return "\n".join(lines) + "\n"
 
 
-def _format_super_planner_prompt(plan: dict, pathways: dict, rules: str) -> str:
-    """Returns the super-planner's prompt: the plan, the pathway map of its functions, and the
-    project's rules.
+def _format_super_planner_prompt(plan: dict, pathways: dict, has_entries: bool, rules: str) -> str:
+    """Returns the super-planner's prompt: the plan, the pathway map of its functions, a note when
+    the map has no entry points, and the project's rules.
 
     Args:
         plan: The planner's plan, as the job's data holds it.
         pathways: The pathway map of the plan's functions, as ratchet.pathways.describe() returns
             it.
+        has_entries: Whether the pathway map found any entry point.
         rules: The text of the project's rules.md.
 
     Returns:
         The prompt as markdown.
     """
-    return "\n\n".join([
+    sections = [
         "# The plan\n\n```json\n" + json.dumps(plan, indent=2) + "\n```",
         "# The pathway map of the plan's functions\n\n```json\n"
         + json.dumps(pathways, indent=2) + "\n```",
-        "# The project's rules\n\n" + rules.strip(),
-    ])
+    ]
+    if not has_entries:
+        sections.append("# No entry points\n\n" + NO_ENTRY_POINTS)
+    sections.append("# The project's rules\n\n" + rules.strip())
+    return "\n\n".join(sections)
 
 
 def _format_map_review_prompt(
@@ -538,8 +551,11 @@ def build_job_graph(
 
     @graph.step("super-plan", next=("plan", "write-tests", "implement", "undo"))
     def super_plan(job: Job) -> str:
-        pathways = describe(build_map(project.root), Plan.model_validate(job.data["plan"]).functions)
-        prompt = _format_super_planner_prompt(job.data["plan"], pathways, project.rules)
+        pathway_map = build_map(project.root)
+        plan = Plan.model_validate(job.data["plan"])
+        pathways = describe(pathway_map, plan.functions, new=plan.new_names())
+        prompt = _format_super_planner_prompt(
+            job.data["plan"], pathways, bool(pathway_map.entry_points), project.rules)
         reply = ask(super_planner, prompt, planning_folder(job))
         answer, cost = reply.data, reply.cost_usd
         (planning_folder(job) / "super-plan.json").write_text(
@@ -645,7 +661,8 @@ def build_job_graph(
     @graph.step("check-map", next=("check-rules", "review-map"))
     def check_map(job: Job) -> str:
         pathway_map = build_map(project.root)
-        known = {*Plan.model_validate(job.data["plan"]).functions, *job.data["approved"]}
+        plan = Plan.model_validate(job.data["plan"])
+        known = {*plan.functions, *plan.new_names(), *job.data["approved"]}
         # a change to module-level code is not a change to a function
         job.data["outside"] = [name for name in functions_of_diff(pathway_map, repo.diff())
                                if name not in known and not name.endswith(f".{MODULE_PART}")]
@@ -706,8 +723,7 @@ def build_job_graph(
         worse = find_regressions(baseline, run.outcomes) if run.outcomes else {}
         untested = {}
         if not worse and run.outcomes:
-            # An empty report means nothing was measured, such as when the project's own pytest
-            # options turn coverage off, so no line can be called untested.
+            # find the changed lines that no test runs, when coverage is on and the run measured it
             if coverage and run.coverage:
                 untested = find_untested_lines(repo.diff(), run.coverage, project.root, run.omit)
             if not untested:

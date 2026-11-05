@@ -40,6 +40,7 @@ from scripted_agents import (
     BREAK,
     GOOD,
     SHOP_CLI,
+    SUB,
     ScriptedAgent,
     Turn,
     add_app_sub,
@@ -530,6 +531,47 @@ def test_the_super_planner_sees_the_plan_the_pathway_map_and_the_rules(scratch, 
     assert "Keep it small." in prompt
     assert job.data["outcome"] == JobOutcome.COMMITTED
     assert agents["test_writer"].prompts == []
+
+
+def test_the_super_planner_gets_paths_on_a_project_without_cli(scratch, run_job) -> None:
+    """Proves a project with no cli module still gives the super-planner upstream paths, from
+    the function that no other function calls, and no note that the map found no entry points."""
+    project, repo = scratch
+    package = project.root / "src" / "shop"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "basket.py").write_text(
+        '"""Totals a basket."""\n\n\ndef total(prices):\n    """Returns the total."""\n'
+        '    return _sum(prices)\n\n\ndef _sum(prices):\n    """Returns the sum."""\n'
+        '    return sum(prices)\n', encoding="utf-8", newline="\n")
+    repo.commit("add a shop")
+    expected = describe(build_map(project.root), ["shop.basket._sum"])
+
+    assert expected["functions"]["shop.basket._sum"]["upstream_paths"] == [
+        ["shop.basket.total", "shop.basket._sum"]]
+
+    job, agents, _ = run_job([plan(functions=["shop.basket._sum"])], [edit(*GOOD)],
+                             [review("accept")])
+
+    from ratchet.refactor.job_graph import NO_ENTRY_POINTS
+    prompt = agents["super_planner"].prompts[0]
+    assert json.dumps(expected, indent=2) in prompt
+    assert NO_ENTRY_POINTS not in prompt
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_the_super_planner_is_told_when_the_map_has_no_entry_points(scratch, run_job) -> None:
+    """Proves a project whose map has no entry points tells the super-planner so, and the job
+    still commits."""
+    project, _ = scratch
+
+    assert build_map(project.root).entry_points == set()
+
+    job, agents, _ = run_job([plan()], [edit(*GOOD)], [review("accept")])
+
+    from ratchet.refactor.job_graph import NO_ENTRY_POINTS
+    assert NO_ENTRY_POINTS in agents["super_planner"].prompts[0]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
 
 
 @pytest.mark.parametrize("functions", [["nowhere.at_all"], []])
@@ -1052,6 +1094,88 @@ def test_deleting_an_unplanned_function_goes_to_the_super_planner_and_its_neighb
     assert "shop.cli.main" not in prompts[1]
     assert job.data["approved"] == ["shop.cli.helper"]
     assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+# An entry of a plan's 'added' that names the function sub, which add_shop_sub appends.
+ADDED_SUB = {"kind": "function", "name": "shop.cli.sub", "file": "src/shop/cli.py",
+             "requirement": "a basket can take one price from another",
+             "why_not_simpler": "no function subtracts yet"}
+
+
+def test_a_function_the_plan_adds_goes_straight_to_check_rules(scratch, run_job) -> None:
+    """Proves a function that the plan lists in 'added' is not outside the plan, so the
+    super-planner is not asked again and the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+
+    job, agents, _ = run_job([plan(functions=["shop.cli.total"], added=[ADDED_SUB])],
+                             [add_shop_sub], [review("accept")], super_planner=[approve()],
+                             reports=reports)
+
+    assert len(agents["super_planner"].prompts) == 1
+    assert lines_of(reports, "check-map") == []
+    assert job.data["approved"] == []
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_function_the_plan_moves_goes_straight_to_check_rules(scratch, run_job) -> None:
+    """Proves a function that the plan moves to a new name, given as the moved entry's 'to', is
+    not outside the plan, so the super-planner is not asked again and the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+    moved = {"name": "sub", "from": "src/shop/basket.py", "to": "shop.cli.sub"}
+
+    job, agents, _ = run_job([plan(functions=["shop.cli.total"], moved=[moved])],
+                             [add_shop_sub], [review("accept")], super_planner=[approve()],
+                             reports=reports)
+
+    assert len(agents["super_planner"].prompts) == 1
+    assert lines_of(reports, "check-map") == []
+    assert job.data["approved"] == []
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_the_super_planner_sees_an_added_function_as_new(scratch, run_job) -> None:
+    """Proves a function that the plan names in both 'functions' and 'added', which the map
+    does not hold yet, reaches the super-planner as new and not as unknown."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    names = ["shop.cli.total", "shop.cli.sub"]
+    described = describe(build_map(project.root), names, new=["shop.cli.sub"])
+
+    assert described["unknown"] == [] and described["new"] == ["shop.cli.sub"]
+
+    job, agents, _ = run_job([plan(functions=names, added=[ADDED_SUB])], [add_shop_sub],
+                             [review("accept")], super_planner=[approve()])
+
+    assert json.dumps(described, indent=2) in agents["super_planner"].prompts[0]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_an_unplanned_function_beside_an_added_one_still_goes_to_review_map(
+        scratch, run_job) -> None:
+    """Proves a plan that adds a function still sends a change to another function it does not
+    name to the super-planner, and only that function."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    reports: list = []
+
+    def add_sub_and_change_main(prompt: str) -> dict:
+        text = SHOP_CLI.replace("print(total([1, 2]))", "print(total([1, 2, 3]))") + SUB
+        (project.root / "src" / "shop" / "cli.py").write_text(text, encoding="utf-8",
+                                                              newline="\n")
+        return done()
+
+    job, agents, _ = run_job([plan(functions=["shop.cli.total"], added=[ADDED_SUB])],
+                             [add_sub_and_change_main], [review("accept")],
+                             super_planner=[approve(), map_approve()], reports=reports)
+
+    assert len(agents["super_planner"].prompts) == 2
+    assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
+    assert job.data["approved"] == ["shop.cli.main"]
     assert job.data["outcome"] == JobOutcome.COMMITTED
 
 
