@@ -32,7 +32,7 @@ def snapshot_ratchet_files(project: Project) -> dict[Path, bytes]:
     return {path: path.read_bytes() for path in sorted(project.folder.iterdir()) if path.is_file()}
 
 
-def _is_test_file(path: str) -> bool:
+def is_test_file(path: str) -> bool:
     """Answers whether a changed file holds tests, by pytest's naming.
 
     Args:
@@ -76,7 +76,7 @@ def check_rules(
         if not project.may_change(path):
             problems.append(f"{path} is not among the files that a step may change")
 
-    tests = [path for path in changed if _is_test_file(path)]
+    tests = [path for path in changed if is_test_file(path)]
     if tests:
         for line in repo.diff(*tests).splitlines():
             if line.startswith("+") and not line.startswith("+++") and SKIP_MARKER.search(line):
