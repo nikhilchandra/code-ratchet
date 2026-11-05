@@ -1,7 +1,8 @@
 """The module maps the Python packages under a repository's src folder into a graph of calls.
 
-Every function and method is named package.module.qualname, and a function defined inside another
-is named outer.inner. The code at the top of a module is named package.module.<module>. The map
+Every function, method and class is named package.module.qualname, and a function defined inside
+another is named outer.inner. A line directly in a class body, outside its methods, belongs to the
+class. The code outside every function and class is named package.module.<module>. The map
 lists the calls it can resolve, lists every call it cannot resolve, finds the entry points, and
 links the functions that write a file to the functions that read the same file name. It can be
 queried for the paths that lead down to a function, for what a function reaches, and for the
@@ -49,7 +50,7 @@ _WRITE_PREFIXES = ("save", "write")
 
 @dataclass
 class FunctionNode:
-    """Holds one function, method or module body in the map, with the lines it spans."""
+    """Holds one function, method, class or module body in the map, with the lines it spans."""
 
     name: str
     module: str
@@ -102,6 +103,8 @@ class PathwayMap:
     module_files: dict[str, Path] = field(default_factory=dict)
     # Maps each posix path relative to the root to its module.
     file_modules: dict[str, str] = field(default_factory=dict)
+    # Maps each module to the lines of its module-level import statements.
+    import_lines: dict[str, set[int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -254,6 +257,11 @@ class _Builder:
         self.map.functions[key] = FunctionNode(key, module, path, 1, end)
         self._stmts[key] = tree.body
         self._params[key] = set()
+        # record the lines of each module-level import statement
+        lines = self.map.import_lines[module] = set()
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
         package = module if path.name == "__init__.py" else module.rpartition(".")[0]
         imports = self.imports[module] = {}
         for node in ast.walk(tree):
@@ -287,11 +295,15 @@ class _Builder:
                 continue
             full = prefix + node.name
             names[node.name] = full
+            start = min([node.lineno] + [item.lineno for item in node.decorator_list])
             if isinstance(node, ast.ClassDef):
                 info = self.classes[full] = _Class(module, node.bases)
+                end = node.end_lineno or node.lineno
+                self.map.functions[full] = FunctionNode(
+                    full, module, self.map.module_files[module], start, end
+                )
                 self._index_scope(node.body, f"{full}.", info.methods, module, full, parent)
                 continue
-            start = min([node.lineno] + [item.lineno for item in node.decorator_list])
             self.map.functions[full] = FunctionNode(
                 full, module, self.map.module_files[module], start, node.end_lineno or node.lineno
             )
@@ -372,10 +384,10 @@ class _Builder:
 
         It returns None when the name cannot be resolved.
         """
-        if dotted in self.infos or dotted in self.map.functions:
-            return dotted
         if dotted in self.classes:
             return self._method(dotted, "__init__") or dotted
+        if dotted in self.infos or dotted in self.map.functions:
+            return dotted
         owner, _, last = dotted.rpartition(".")
         if owner in self.classes:
             return self._method(owner, last)
@@ -904,7 +916,8 @@ def describe(pathway_map: PathwayMap, names: list[str], new: Sequence[str] = ())
 
     Args:
         pathway_map: The map to search.
-        names: The functions to describe, as package.module.qualname.
+        names: The functions, methods and classes to describe, as package.module.qualname, and the
+            code outside every function and class, as package.module.<module>.
         new: The names that a plan adds or moves to, which the map does not hold yet.
 
     Returns:
@@ -986,9 +999,12 @@ def functions_of_diff(pathway_map: PathwayMap, diff_text: str) -> list[str]:
     """Returns the sorted functions in src that enclose a changed line of a unified diff.
 
     An added line counts at its line in the new file. A removed line counts at its line in the
-    committed file, read with git show HEAD. A deleted file counts every function it held. When the
-    committed file cannot be read or parsed, a removed line falls back to the line of the new file
-    that it sits before. A changed line outside any function belongs to the module's <module> node.
+    committed file, read with git show HEAD. A deleted file counts every function and class it held.
+    When the committed file cannot be read or parsed, a removed line falls back to the line of the
+    new file that it sits before, and a removed import is not recognized there. A changed line
+    directly in a class body belongs to the class, and a changed line outside every function and
+    class belongs to the module's <module> node. Blank lines and module-level imports count for
+    nothing.
 
     Args:
         pathway_map: The map of the working tree.
@@ -1013,33 +1029,32 @@ def functions_of_diff(pathway_map: PathwayMap, diff_text: str) -> list[str]:
                 old = _old_map(pathway_map.root, line.old_path, old_module)
             if line.new_path is None and old is not None:
                 changed.update(old.functions)
+        if line.marker != " " and not line.text[1:].strip():
+            continue
         if line.marker == "+" and module:
-            changed.add(_enclosing(pathway_map, module, line.new_line))
+            if line.new_line not in pathway_map.import_lines.get(module, ()):
+                changed.add(_enclosing(pathway_map, module, line.new_line))
         elif line.marker == "-" and old is not None and old_module:
-            changed.add(_enclosing(old, old_module, line.old_line))
+            if line.old_line not in old.import_lines.get(old_module, ()):
+                changed.add(_enclosing(old, old_module, line.old_line))
         elif line.marker == "-" and module:
             changed.add(_removed_in(pathway_map, module, line.new_line, line.text[1:]))
     return sorted(changed)
 
 
 def _removed_in(pathway_map: PathwayMap, module: str, line: int, text: str) -> str:
-    """Returns the function that a removed line was in, given the new-file line it sits before.
+    """Returns the function or class that a removed line was in, given the new-file line it sits
+    before.
 
-    An indented line that sat at the end of a function now sits before whatever follows that
-    function, so when the next line starts a node or is outside every function, the line before
-    it is used instead.
+    An indented line continues the code above it, so it is placed by the line before. Any other
+    line is placed by the line it sits before.
     """
-    after = _enclosing(pathway_map, module, line)
-    if not text[:1].isspace() or line < 2:
-        return after
-    node = pathway_map.functions.get(after)
-    if node is not None and node.start != line and not after.endswith(f".{MODULE_PART}"):
-        return after
-    return _enclosing(pathway_map, module, line - 1)
+    return _enclosing(pathway_map, module, line - 1 if text[:1].isspace() else line)
 
 
 def _enclosing(pathway_map: PathwayMap, module: str, line: int) -> str:
-    """Returns the innermost function of module that spans line, or the module's <module> node."""
+    """Returns the innermost function or class of module that spans line, or the module's <module>
+    node."""
     best = None
     for node in pathway_map.functions.values():
         if node.module != module or node.name.endswith(f".{MODULE_PART}"):

@@ -154,6 +154,32 @@ def commit_shop(project, repo) -> None:
     repo.commit("add a shop")
 
 
+# The committed text of src/shop/basket.py, a module with an import, a constant and a class.
+SHOP_BASKET = ('"""Holds a basket."""\n\nimport json\n\nLIMIT = 10\n\n\nclass Basket:\n'
+               '    """Holds the prices of a basket."""\n\n    prices: list = []\n')
+
+
+def commit_shop_basket(project, repo) -> None:
+    """Writes src/shop/basket.py as SHOP_BASKET holds it, and commits it to the project's
+    repository 'repo'. The package src/shop must already be committed, as commit_shop does."""
+    path = project.root / "src" / "shop" / "basket.py"
+    path.write_text(SHOP_BASKET, encoding="utf-8", newline="\n")
+    repo.commit("add a basket")
+
+
+def edit_shop_basket(*replacements: tuple[str, str]) -> Callable[[str], dict]:
+    """Returns an implementer's turn that writes src/shop/basket.py, from the project's folder,
+    as SHOP_BASKET with each (old, new) pair of 'replacements' applied, and answers done."""
+    def turn(prompt: str) -> dict:
+        text = SHOP_BASKET
+        for old, new in replacements:
+            text = text.replace(old, new)
+        path = Path.cwd() / "src" / "shop" / "basket.py"
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return done()
+    return turn
+
+
 def append_sub(path: str) -> None:
     """Appends SUB to the file at 'path', from the project's folder, with Unix line endings."""
     file = Path.cwd() / path

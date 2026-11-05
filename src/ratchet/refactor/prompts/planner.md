@@ -39,8 +39,10 @@ For every function, class, method or parameter that the step adds, name the requ
 explain why nothing simpler meets it. A plan that adds a class to connect two other classes, or
 a method that only passes a call through, is the kind of plan the refactor exists to stop.
 
-Name in `functions` every function that the step changes, each as `package.module.qualname`, such
-as `invoices.pricing.line_total`, with `<module>` for the code at the top of a module. Name the
+Name in `functions` every function, method and class that the step changes, each as
+`package.module.qualname`, such as `invoices.pricing.line_total`. Name a class for a change directly
+in its body, such as a new field. Name `package.module.<module>` for a change to code outside every
+function and class, such as a constant. Blank lines and module-level imports are not counted. Name the
 functions that the step adds or moves in `functions` too. In `added`, a function, method or class
 is named as `package.module.qualname`, and in `moved`, `to` is the new `package.module.qualname`. The script
 builds the paths that lead to these functions for the super-planner, so a function that you leave

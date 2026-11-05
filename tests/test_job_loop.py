@@ -31,7 +31,10 @@ from scripted_agents import (
     add_shop_sub,
     approve,
     commit_shop,
+    commit_shop_basket,
+    done,
     edit,
+    edit_shop_basket,
     map_approve,
     plan,
     review,
@@ -405,6 +408,32 @@ def test_a_function_outside_the_plan_is_reviewed_from_run_refactor(scratch, run)
     steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]
     assert "check-map" in steps and "review-map" in steps
     assert steps.index("check-map") < steps.index("review-map")
+    assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
+
+
+def test_a_class_field_outside_the_plan_is_reviewed_from_run_refactor(scratch, run) -> None:
+    """Proves a run checks the map after the implementer and has the super-planner review a
+    field added to a class that the plan does not name, before the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    commit_shop_basket(project, repo)
+
+    def add_tested_field(prompt: str) -> dict:
+        edit_shop_basket(("    prices: list = []\n",
+                          "    prices: list = []\n    names: list = []\n"))(prompt)
+        (project.root / "tests" / "test_basket.py").write_text(
+            "from shop.basket import Basket\n\n\ndef test_names():\n"
+            "    assert Basket.names == []\n", encoding="utf-8", newline="\n")
+        return done()
+
+    result, agents, lines = run([plan(functions=["shop.cli.total"])], [add_tested_field],
+                                [review("accept")], super_planner=[approve(), map_approve()])
+
+    # the step's column starts after the time (7), the job (9) and the problems (7)
+    steps = [line[23:36].strip() for line in lines if line[7:].startswith("job-")]
+    assert "check-map" in steps and "review-map" in steps
+    assert steps.index("check-map") < steps.index("review-map")
+    assert "shop.basket.Basket" in agents["super_planner"].prompts[1]
     assert [record.outcome for record in result.jobs] == [JobOutcome.COMMITTED]
 
 

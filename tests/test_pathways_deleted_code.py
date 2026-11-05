@@ -41,21 +41,22 @@ def _changed(root: Path) -> list[str]:
 
 
 def test_deleting_a_function_in_the_middle_names_it_not_its_neighbour(tmp_path: Path) -> None:
-    """Proves that deleting b() from between a() and c() names b, and the blank lines before it
-    as module-level code, but not the unchanged c."""
+    """Proves that deleting b() from between a() and c() names b, and not the unchanged c or the
+    blank lines removed with b."""
     _commit(tmp_path, {"src/app/mod.py": b"def a():\n    return 1\n\n\ndef b():\n    return 2\n"
                                          b"\n\ndef c():\n    return 3\n"})
     _write(tmp_path, "src/app/mod.py", b"def a():\n    return 1\n\n\ndef c():\n    return 3\n")
 
-    assert _changed(tmp_path) == ["app.mod.<module>", "app.mod.b"]
+    assert _changed(tmp_path) == ["app.mod.b"]
 
 
 def test_deleting_the_last_function_names_it_not_the_one_before(tmp_path: Path) -> None:
-    """Proves that deleting the last function of a file names it, and not the function before."""
+    """Proves that deleting the last function of a file names it, and not the function before or
+    the blank lines removed with it."""
     _commit(tmp_path, {"src/app/mod.py": b"def a():\n    return 1\n\n\ndef b():\n    return 2\n"})
     _write(tmp_path, "src/app/mod.py", b"def a():\n    return 1\n")
 
-    assert _changed(tmp_path) == ["app.mod.<module>", "app.mod.b"]
+    assert _changed(tmp_path) == ["app.mod.b"]
 
 
 def test_a_deleted_module_names_every_function_it_held(tmp_path: Path) -> None:
@@ -104,3 +105,32 @@ def test_a_changed_function_is_named_when_the_diff_has_no_prefix_config(tmp_path
     _write(tmp_path, "src/app/mod.py", b"def a():\n    return 1\n\n\ndef b():\n    return 3\n")
 
     assert _changed(tmp_path) == ["app.mod.b"]
+
+
+def test_a_removed_blank_line_above_a_class_field_names_nothing_with_the_committed_file(
+        tmp_path: Path) -> None:
+    """Proves that removing a blank line from a class body names nothing, when the removed line
+    is placed through the committed file."""
+    _commit(tmp_path, {"src/app/mod.py": b"class Box:\n\n    size: int = 1\n"})
+    _write(tmp_path, "src/app/mod.py", b"class Box:\n    size: int = 1\n")
+
+    assert _changed(tmp_path) == []
+
+
+def test_a_comment_changed_directly_in_a_class_body_names_the_class(tmp_path: Path) -> None:
+    """Proves that a comment changed in a class body, outside its methods, names the class, and
+    not the method below it or the module."""
+    source = b"class Box:\n    # old\n    size = 1\n\n    def open(self):\n        return 1\n"
+    _commit(tmp_path, {"src/app/mod.py": source})
+    _write(tmp_path, "src/app/mod.py", source.replace(b"# old", b"# new"))
+
+    assert _changed(tmp_path) == ["app.mod.Box"]
+
+
+def test_a_removed_import_names_nothing(tmp_path: Path) -> None:
+    """Proves that removing a module-level import names nothing, when the removed line is placed
+    through the committed file."""
+    _commit(tmp_path, {"src/app/mod.py": b"import json\nimport os\n\n\ndef a():\n    return 1\n"})
+    _write(tmp_path, "src/app/mod.py", b"import os\n\n\ndef a():\n    return 1\n")
+
+    assert _changed(tmp_path) == []

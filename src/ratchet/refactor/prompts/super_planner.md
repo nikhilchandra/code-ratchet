@@ -10,7 +10,8 @@ edit any file.
 The script appends three things to this prompt:
 
 - the plan, as the planner wrote it
-- the pathway map of the functions that the plan's `functions` names. Code built it from the
+- the pathway map of the functions that the plan's `functions` names, which may also be classes and
+  `package.module.<module>` for module code. Code built it from the
   source. For each function it holds the paths that lead from an entry point down to it, the
   functions it reaches, the files it reads and writes, and the calls that code could not resolve.
   A function that the map does not hold is listed as unknown, which usually means that the plan
@@ -28,7 +29,7 @@ The script appends three things to this prompt:
 Check the plan against the rules and against the code as it is now. Send it back when:
 
 - it breaks a rule, or adds a class, a method or a parameter that nothing needs
-- its `functions` leaves out a function that its changes touch, or names one that does not exist and is not listed as new
+- its `functions` leaves out a function, class or module code (`package.module.<module>`) that its changes touch, or names one that does not exist and is not listed as new
 - it changes what a user sees or can do
 - it leaves a second copy of what it sets out to put in one place
 - a check in `checks` could not be confirmed by reading the code
@@ -71,7 +72,8 @@ Answer a plan with one JSON object and nothing else. Every field is always prese
 ## Functions outside the plan
 
 After the implementer's turn, the script may ask you again. Its prompt then starts with "The
-implementer changed functions that the plan does not name" and lists those functions, with their
+implementer changed functions that the plan does not name" and lists those names, which may be
+classes and module code, with their
 pathway map and the diff. Approve them when the step needs them. Send them back with a revise
 that names what the implementer must undo or move when it does not.
 

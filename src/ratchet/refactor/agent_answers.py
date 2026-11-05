@@ -77,8 +77,10 @@ class Plan(_Answer):
     summary: str
     problems: list[str]
     completes: list[str]
-    # The functions the step changes, each as package.module.qualname, such as
-    # "invoices.pricing.line_total". The script builds their pathway map for the super-planner.
+    # The functions, methods and classes the step changes, each as package.module.qualname, such as
+    # "invoices.pricing.line_total". A class is named for a change directly in its body, and
+    # package.module.<module> for a change outside every function and class, such as a constant.
+    # The script builds their pathway map for the super-planner.
     functions: list[str]
     why_now: str
     changes: list[Change]

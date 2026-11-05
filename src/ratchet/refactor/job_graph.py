@@ -8,8 +8,8 @@ A job goes through these steps:
     write-tests: the test writer writes the tests, and code checks that they pass on the code as
         it is.
     implement: the implementer makes the change, or reports that the plan cannot be done.
-    check-map: code maps the functions that the change touches, and a function that neither the
-        plan nor an earlier approval names goes to review-map.
+    check-map: code maps the functions, classes and module code that the change touches, and
+        one that neither the plan nor an earlier approval names goes to review-map.
     review-map: the super-planner approves the functions outside the plan, or sends the job back
         to implement.
     check-rules: code checks the rules it can check by itself.
@@ -44,7 +44,7 @@ from ratchet.git import Repo
 from ratchet.problem_history import problem_history
 from ratchet.project import Project
 from ratchet.records import records_log
-from ratchet.pathways import MODULE_PART, build_map, describe, functions_of_diff
+from ratchet.pathways import build_map, describe, functions_of_diff
 from ratchet.pytest_runner import (
     Outcome,
     OutcomeKind,
@@ -663,9 +663,8 @@ def build_job_graph(
         pathway_map = build_map(project.root)
         plan = Plan.model_validate(job.data["plan"])
         known = {*plan.functions, *plan.new_names(), *job.data["approved"]}
-        # a change to module-level code is not a change to a function
         job.data["outside"] = [name for name in functions_of_diff(pathway_map, repo.diff())
-                               if name not in known and not name.endswith(f".{MODULE_PART}")]
+                               if name not in known]
         if not job.data["outside"]:
             return "check-rules"
         report(job, "check-map", f"{count_of(len(job.data['outside']), 'function')} outside the "

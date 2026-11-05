@@ -201,6 +201,63 @@ def test_describe_lists_a_new_name_apart_from_an_unknown_one(tmp_path: Path) -> 
     assert plain["new"] == []
 
 
+# A module with a class that holds a constant, a nested class and a method, and a decorated
+# class, with the line numbers that test_every_class_has_a_node_named_by_its_qualname expects.
+CLASSES = '''\
+import dataclasses
+
+
+class Box:
+    LIMIT = 3
+
+    class Inner:
+        pass
+
+    def open(self):
+        return 1
+
+
+@dataclasses.dataclass
+class Point:
+    x: int = 0
+'''
+
+
+def test_every_class_has_a_node_named_by_its_qualname(tmp_path: Path) -> None:
+    """Proves each class, nested ones included, is in the map as package.module.Qualname, with
+    the lines of its body, starting at its decorator when it has one, and that its methods keep
+    their own nodes."""
+    pathway_map = build_map(make_tree(tmp_path, {"app/mod.py": CLASSES}))
+    spans = {name: (node.start, node.end) for name, node in pathway_map.functions.items()}
+
+    assert spans["app.mod.Box"] == (4, 11)
+    assert spans["app.mod.Box.Inner"] == (7, 8)
+    assert spans["app.mod.Box.open"] == (10, 11)
+    assert spans["app.mod.Point"] == (14, 16)
+
+
+def test_calling_a_class_still_resolves_to_its_init(tmp_path: Path) -> None:
+    """Proves a call of the class Box resolves to Box.__init__, and not to the class's own node."""
+    root = make_tree(tmp_path, {"app/mod.py": (
+        "class Box:\n    def __init__(self):\n        pass\n\n\ndef make():\n    return Box()\n"
+    )})
+    pathway_map = build_map(root)
+
+    assert pathway_map.calls["app.mod.make"] == {"app.mod.Box.__init__"}
+
+
+def test_describe_reports_a_class_and_module_code(tmp_path: Path) -> None:
+    """Proves describe reports a class and package.module.<module> as known names, so a plan
+    may name them."""
+    root = make_tree(tmp_path, {"app/mod.py": "LIMIT = 3\n\n\nclass Box:\n    size = 1\n"})
+    names = ["app.mod.Box", "app.mod.<module>"]
+
+    described = describe(build_map(root), names)
+
+    assert list(described["functions"]) == names
+    assert described["unknown"] == []
+
+
 def test_a_writer_and_reader_are_linked_through_a_file_name(tmp_path: Path) -> None:
     """Proves writers and readers of notes.json link both ways, and an f-string is undetermined."""
     root = make_tree(tmp_path, {

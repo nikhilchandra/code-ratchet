@@ -47,8 +47,10 @@ from scripted_agents import (
     add_shop_sub,
     approve,
     commit_shop,
+    commit_shop_basket,
     done,
     edit,
+    edit_shop_basket,
     map_approve,
     map_revise,
     plan,
@@ -1046,25 +1048,90 @@ def test_a_map_review_with_no_answer_puts_the_plan_shape_back(scratch, run_job) 
     assert super_planner.schema is SuperPlan
 
 
-def test_a_module_level_change_does_not_start_a_map_review(scratch, run_job) -> None:
-    """Proves a change to module-level code alone is not a function outside the plan, so the
-    super-planner is not asked again."""
+def test_an_added_or_removed_import_does_not_start_a_map_review(scratch, run_job) -> None:
+    """Proves that an import added to one module and an import removed from another, with the
+    blank lines that come with them, are not changes outside the plan, so the super-planner is
+    not asked again."""
     project, repo = scratch
     commit_shop(project, repo)
+    commit_shop_basket(project, repo)
     reports: list = []
 
-    def add_import(prompt: str) -> dict:
+    def change_imports(prompt: str) -> dict:
         text = SHOP_CLI.replace('"""Totals a basket."""\n\n\n',
                                 '"""Totals a basket."""\n\nimport os\n\n\n')
         (project.root / "src" / "shop" / "cli.py").write_text(text, encoding="utf-8",
                                                               newline="\n")
-        return done()
+        return edit_shop_basket(("import json\n", ""))(prompt)
 
-    job, agents, _ = shop_job(run_job, [add_import], [approve()], [review("accept")],
+    job, agents, _ = shop_job(run_job, [change_imports], [approve()], [review("accept")],
                               reports=reports)
 
     assert len(agents["super_planner"].prompts) == 1
     assert lines_of(reports, "check-map") == []
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_new_field_in_a_class_the_plan_does_not_name_goes_to_review_map(
+        scratch, run_job) -> None:
+    """Proves a field added to the class Basket, which the plan does not name, goes to the
+    super-planner as shop.basket.Basket, and that its approval is kept and the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    commit_shop_basket(project, repo)
+    reports: list = []
+    add_field = edit_shop_basket(("    prices: list = []\n",
+                                  "    prices: list = []\n    names: list = []\n"))
+
+    job, agents, _ = shop_job(run_job, [add_field], [approve(), map_approve()],
+                              [review("accept")], reports=reports)
+
+    assert len(agents["super_planner"].prompts) == 2
+    assert job.data["approved"] == ["shop.basket.Basket"]
+    assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_changed_module_constant_goes_to_review_map(scratch, run_job) -> None:
+    """Proves a changed module constant, which the plan does not cover by naming
+    shop.basket.<module>, goes to the super-planner as shop.basket.<module>."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    commit_shop_basket(project, repo)
+    reports: list = []
+
+    job, agents, _ = shop_job(run_job, [edit_shop_basket(("LIMIT = 10", "LIMIT = 20"))],
+                              [approve(), map_approve()], [review("accept")], reports=reports)
+
+    assert len(agents["super_planner"].prompts) == 2
+    assert job.data["approved"] == ["shop.basket.<module>"]
+    assert lines_of(reports, "check-map") == ["1 function outside the plan -> review-map"]
+    assert job.data["outcome"] == JobOutcome.COMMITTED
+
+
+def test_a_plan_that_names_a_class_and_module_code_goes_straight_to_check_rules(
+        scratch, run_job) -> None:
+    """Proves a plan may name a class and package.module.<module> in 'functions'. The
+    super-planner sees both as known names, a change to the class's field and to the module's
+    constant is not outside the plan, and the job commits."""
+    project, repo = scratch
+    commit_shop(project, repo)
+    commit_shop_basket(project, repo)
+    reports: list = []
+    names = ["shop.cli.total", "shop.basket.Basket", "shop.basket.<module>"]
+    described = describe(build_map(project.root), names)
+    change_both = edit_shop_basket(("LIMIT = 10", "LIMIT = 20"),
+                                   ("    prices: list = []\n",
+                                    "    prices: list = []\n    names: list = []\n"))
+
+    job, agents, _ = run_job([plan(functions=names)], [change_both], [review("accept")],
+                             super_planner=[approve()], reports=reports)
+
+    assert described["unknown"] == []
+    assert json.dumps(described, indent=2) in agents["super_planner"].prompts[0]
+    assert len(agents["super_planner"].prompts) == 1
+    assert lines_of(reports, "check-map") == []
+    assert job.data["approved"] == []
     assert job.data["outcome"] == JobOutcome.COMMITTED
 
 
