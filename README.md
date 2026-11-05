@@ -14,15 +14,16 @@ tests, the checks between agents, and git.
   A planner picks the next step from the project's problem list. A super-planner checks the
   plan against `rules.md` and the pathway map of the functions it changes, and may ask for
   tests. A test writer writes those tests, which must pass on the current code and then stay
-  frozen. An implementer makes the change. A map check sends any function the plan did not
-  name back to the super-planner, and, when pytest-cov loads, a coverage check sends back any
+  frozen. An implementer makes the change. A map check sends any function, class or module
+  code (`package.module.<module>`) the plan did not name back to the super-planner, and, when pytest-cov loads, a coverage check sends back any
   line the change adds to src that no test runs. The test suite and code checks guard the
   change, and a reviewer judges it. A step that passes is committed, and one that fails is
   undone.
 - **`ratchet init`** sets up a project: it writes `.ratchet/config.toml` and `.ratchet/rules.md`
   from templates and makes `.ratchet` its own repository.
 - **`ratchet audit -p "..."`** writes the problem list that `refactor` works through. Agents
-  audit a blind copy of the code, and the owner approves the draft before it becomes a list.
+  audit the project itself, unable to read `.ratchet`, and the owner approves the draft before
+  it becomes a list.
 - **`ratchet problems`** reads the problem lists and the history of each problem. It costs
   nothing.
 - **`ratchet reopen P7 "reason"`** marks a finished problem as open again.
@@ -119,10 +120,26 @@ with `[a]pprove, [e]dit, [d]iscard, [l]ater`. With no terminal the audit stops a
 one audit may wait at a time, and `--approve` is refused when HEAD has moved since the audit
 began.
 
-Agents work in a temporary copy of the code with real git. The copy has no branches, tags or
-remote. When `.ratchet` appears anywhere in the project's git history, a re-audit skips the
-blind audit, prints a note that names the oldest commit that holds it, and marks the published list
-"Not blind".
+Agents work in the project. Their file tools are confined to it and denied `.ratchet`,
+`.git` and the `hide` patterns. All but the pair judge may run read-only git (status, diff,
+log, show, blame), and a command with `--no-index`, `--contents`, `--output`, `-C`,
+`--git-dir`, `--work-tree`, `-c` or `--exec-path` is refused before it runs. After each turn
+its log is checked: a call that got through halts the audit, and a refused call is only noted.
+
+When `.ratchet` appears anywhere in the project's git history (any branch, tag, stash or
+reflog entry), a re-audit skips the blind audit and runs the auditor in its place beside the
+rechecker. It shows the note "The blind audit was skipped. .ratchet was committed to git
+history in <commit>, so the old problem lists can still be read there." and marks the
+published list "Not blind". A first audit shows no note.
+
+**One run at a time.** Only one graph, refactor or audit, runs on a project at a time, under
+the lock file `.ratchet/state/graph.lock`. A second run is refused with a message that names
+the job, such as "Audit job-3 is waiting for your answers. Finish or discard it first." An
+audit waiting at its questions or draft keeps the lock. A run stopped by an error or Ctrl-C
+undoes its work, marks the job halted and releases the lock. A run that died without a word
+(a power cut, a killed process) is rolled back by the next run, which says "The last refactor
+(job-12) stopped without finishing. Its changes were undone." (for an audit, "It was
+halted.") and starts clean. Nothing is resumed.
 
 **The format of an entry.** A published list gives each problem a heading, then field lines,
 then its text, evidence, simpler option, "Done when" and tests:
@@ -147,7 +164,7 @@ line that the next re-audit reads), "Dropped" (ids `D1`) and "Bugs noticed".
 
 ```toml
 [audit]
-hide = []                       # path patterns denied to the agents' file tools in the copy
+hide = []                       # path patterns denied to the agents' file tools in the project
 max_pairs = 40                  # most pairs the pair judge is asked about
 max_cost_usd = 40.0             # the most one audit may spend, at list price
 
