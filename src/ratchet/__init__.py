@@ -1,7 +1,10 @@
-"""Hands a coding goal to a team of agents that work in small, tested, committed steps.
+"""The package audits a Python project's design, then fixes it one small, tested step at a time
+with Claude agents.
 
-ratchet is built on agent-rooster. Its first command, `ratchet refactor`, improves a project's
-structure one step at a time while keeping its behavior the same. A planner chooses each step,
-an implementer makes it, the project's own tests and code checks guard it, and a reviewer judges
-it. A step that passes is committed, and one that fails is undone.
+`ratchet audit` has agents read the code and write a list of problems, which the owner approves
+before it is saved. `ratchet refactor` works through that list one problem at a time. A planner
+plans each step, a super-planner checks the plan against the rest of the code, a test writer writes
+tests first, an implementer makes the change, and a reviewer judges it. Plain code checks the work
+between agents. A step that passes is committed, and one that fails is undone. ratchet is built on
+agent-rooster.
 """

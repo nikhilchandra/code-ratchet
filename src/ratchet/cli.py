@@ -32,8 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     """Returns the parser for ratchet's command line."""
     parser = argparse.ArgumentParser(
         prog="ratchet",
-        description="Hands a coding goal to a team of agents that work in small, tested, "
-                    "committed steps.",
+        description="Audits a Python project's design, then fixes it one small, tested step "
+                    "at a time with Claude agents.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser(
