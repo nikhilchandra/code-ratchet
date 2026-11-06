@@ -1,7 +1,9 @@
 [project]
 name = "code-ratchet"
 version = "0.1.0"
-description = "Hands a coding goal to a team of agents that work in small, tested, committed steps."
+description = "Audit a Python project's design, then fix it one small, tested step at a time with Claude agents."
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "agent-rooster",
