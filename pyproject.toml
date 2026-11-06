@@ -14,7 +14,7 @@ dependencies = [
 ratchet = "ratchet.cli:main"
 
 [tool.uv.sources]
-agent-rooster = { path = "../agent-rooster", editable = true }
+agent-rooster = { git = "https://github.com/nikhilchandra/agent-rooster.git" }
 
 [dependency-groups]
 dev = [
