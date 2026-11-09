@@ -65,6 +65,40 @@ def test_commit_returns_the_new_hash_and_leaves_ratchet_out(tmp_path: Path) -> N
     assert repo.run("show", "--name-only", "--format=", "HEAD").split() == ["src/app.py"]
 
 
+def make_ignoring_repo(root: Path) -> Repo:
+    """Makes a repository in 'root' set up the way ratchet init leaves one: .gitignore lists
+    .ratchet/, so the .ratchet folder was never committed."""
+    def git(*arguments: str) -> None:
+        subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "ratchet@example.com")
+    git("config", "user.name", "ratchet")
+    (root / ".gitignore").write_text(".ratchet/\n", encoding="utf-8")
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (root / ".ratchet").mkdir()
+    (root / ".ratchet" / "rules.md").write_text("Keep it small.\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "start")
+    return Repo(root)
+
+
+def test_a_project_that_ignores_ratchet_can_diff_save_and_commit(tmp_path: Path) -> None:
+    """Proves diff, save_work and commit work when .gitignore lists .ratchet/, as ratchet init
+    makes it. git refuses an excluding pathspec that names an ignored folder, so the step's
+    files must be added without one."""
+    repo = make_ignoring_repo(tmp_path)
+    (tmp_path / "app.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / ".ratchet" / "rules.md").write_text("Changed.\n", encoding="utf-8")
+
+    assert "+x = 2" in repo.diff()
+    assert b"+x = 2" in repo.save_work()
+    repo.commit("change x")
+
+    assert repo.run("show", "--name-only", "--format=", "HEAD").split() == ["app.py"]
+    assert repo.changed_paths() == []
+
+
 def test_commit_with_nothing_to_commit_fails(tmp_path: Path) -> None:
     """Proves committing an empty step is an error rather than a silent no-op."""
     with pytest.raises(GitError, match="git commit"):

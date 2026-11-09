@@ -64,6 +64,20 @@ class Repo:
             raise GitError(f"git {' '.join(arguments)} failed: {finished.stderr.strip()}")
         return finished.stdout
 
+    def _stage_step(self) -> None:
+        """Stages every change outside .ratchet.
+
+        git refuses an excluding pathspec that names an ignored folder, and ratchet init lists
+        .ratchet/ in .gitignore. When git already ignores .ratchet, the plain pathspec stages
+        the step alone.
+        """
+        # git check-ignore exits 0 when the path is ignored
+        ignored = subprocess.run(
+            [find_program("git"), "check-ignore", "-q", FOLDER], cwd=self.root, capture_output=True
+        ).returncode == 0
+        paths = (".",) if ignored else self.step_paths
+        self.run("add", "-A", "--", *paths)
+
     def last_commit(self) -> str:
         """Returns the short hash of the last commit."""
         return self.run("rev-parse", "--short", "HEAD").strip()
@@ -119,7 +133,7 @@ class Repo:
         Returns:
             The diff, which is empty when nothing changed.
         """
-        self.run("add", "-A", "--", *self.step_paths)
+        self._stage_step()
         try:
             return self.run("diff", "--cached", "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--", *paths)
         finally:
@@ -137,7 +151,7 @@ class Repo:
         Raises:
             GitError: The commit failed, such as when nothing changed.
         """
-        self.run("add", "-A", "--", *self.step_paths)
+        self._stage_step()
         self.run("commit", "-q", "-m", message)
         return self.last_commit()
 
@@ -156,7 +170,7 @@ class Repo:
         Returns:
             The patch, which is empty when nothing changed.
         """
-        self.run("add", "-A", "--", *self.step_paths)
+        self._stage_step()
         try:
             return subprocess.run(
                 [find_program("git"), "diff", "--cached", "--binary"],
