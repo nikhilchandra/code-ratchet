@@ -11,7 +11,15 @@ from dataclasses import dataclass, replace
 
 from ratchet import architecture
 from ratchet.architecture import CodeFinding, Module, find_modules
-from ratchet.audit.agent_answers import Citation, Finding, Grade, OldEntryCheck, OldVerdict, PairVerdict
+from ratchet.audit.agent_answers import (
+    Citation,
+    Finding,
+    Grade,
+    OldEntryCheck,
+    OldVerdict,
+    PairVerdict,
+    Question,
+)
 from ratchet.audit.code_facts import area_of, enclosing_name, tests_reaching
 from ratchet.project import Project
 from ratchet.target_design import TargetDesign
@@ -45,6 +53,14 @@ _OLD_STATUS = {
 }
 
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
+
+# the words that most questions open with, which say nothing about what is asked
+QUESTION_WORDS = frozenset(
+    {"should", "would", "which", "there", "what", "this", "the", "a", "an", "is", "it", "be", "or", "to"}
+)
+
+# the least share of its words that two question titles must have in common to be joined by code
+SAME_WORDING = 0.8
 
 
 @dataclass(frozen=True)
@@ -232,7 +248,56 @@ def group_items(items: list[Item]) -> list[list[Item]]:
     return _in_order(items, members)
 
 
-def pair_candidates(groups: list[list[Item]], max_pairs: int) -> list[PairCandidate]:
+def make_question_items(questions: list[tuple[str, Question]]) -> list[Item]:
+    """Labels every question that an agent asked and places it in the code.
+
+    Args:
+        questions: The questions, each with the letter of the source that asked it.
+
+    Returns:
+        The items, in the order of the questions. Each is labeled with its source letter and its
+        number among the questions of that source, counted from 1, such as "L1" or "A2". A
+        question's context stands in the item's what_is_wrong.
+    """
+    counts: dict[str, int] = {}
+    items = []
+    for source, question in questions:
+        counts[source] = counts.get(source, 0) + 1
+        ranges = tuple(
+            (place.file, place.line, max(place.line, place.end_line)) for place in question.evidence
+        )
+        items.append(Item(
+            f"{source}{counts[source]}", source, _question_finding(question), "", ranges, "", None, (),
+        ))
+    return items
+
+
+def group_questions(items: list[Item]) -> list[list[Item]]:
+    """Joins the questions that are certainly the same question.
+
+    Code joins only questions whose titles share nearly all their words. Two questions that cite
+    overlapping lines may still ask different things, such as whether money should be a Decimal
+    and whether a message should stay, so they are left for the duplicate judge as a pair. A
+    group never holds two questions from the same source.
+
+    Args:
+        items: The questions to group, as made by make_question_items.
+
+    Returns:
+        The groups, each in the order of the items, ordered by the first item of each.
+    """
+    members = {item.label: [item] for item in items}
+    owner = {item.label: item.label for item in items}
+    for index, first in enumerate(items):
+        for second in items[index + 1 :]:
+            if _same_wording(first, second):
+                _join(members, owner, first.label, second.label)
+    return _in_order(items, members)
+
+
+def pair_candidates(
+    groups: list[list[Item]], max_pairs: int, first_number: int = 1
+) -> list[PairCandidate]:
     """Picks the pairs of ungrouped items that the duplicate judge should decide.
 
     Two items are a candidate when they come from different sources, neither has been joined to
@@ -242,9 +307,11 @@ def pair_candidates(groups: list[list[Item]], max_pairs: int) -> list[PairCandid
     Args:
         groups: The groups, as made by group_items.
         max_pairs: The most pairs to return.
+        first_number: The number of the first pair, so that pairs of questions can be numbered
+            after pairs of findings.
 
     Returns:
-        The candidates, likeliest first, numbered from 1.
+        The candidates, likeliest first, numbered from first_number.
     """
     singles = [group[0] for group in groups if len(group) == 1]
     scored = []
@@ -258,7 +325,7 @@ def pair_candidates(groups: list[list[Item]], max_pairs: int) -> list[PairCandid
     scored.sort(key=lambda entry: -entry[0])
     return [
         PairCandidate(number, first, second, score)
-        for number, (score, first, second) in enumerate(scored[:max_pairs], start=1)
+        for number, (score, first, second) in enumerate(scored[:max_pairs], start=first_number)
     ]
 
 
@@ -392,6 +459,23 @@ def _from_code(found: CodeFinding) -> Finding:
     )
 
 
+def _question_finding(question: Question) -> Finding:
+    """Writes a question in the fields of a finding, so that it can be grouped like one.
+
+    Args:
+        question: The question an agent asked.
+
+    Returns:
+        A finding with the question's title and evidence, and its context as what_is_wrong. The
+        other fields are empty.
+    """
+    return Finding(
+        subject="", title=question.title, what_is_wrong=question.why_it_may_be_deliberate,
+        grade=Grade.STANDARD, breaks="", inferred_from=[], history="", evidence=question.evidence,
+        simpler_option="", done_when=[], waits_on=[], tests=[],
+    )
+
+
 def _citation(place: architecture.Citation) -> Citation:
     """Writes a code checker's citation as an agent citation.
 
@@ -456,6 +540,36 @@ def _overlap(first: Item, second: Item) -> bool:
         for file, start, end in first.ranges
         for other_file, other_start, other_end in second.ranges
     )
+
+
+def _same_wording(first: Item, second: Item) -> bool:
+    """Tells whether two question titles are made of nearly the same words.
+
+    Args:
+        first: One question.
+        second: The other question.
+
+    Returns:
+        True when the words that both titles share, leaving out QUESTION_WORDS, are at least
+        SAME_WORDING of all the words of the two titles together. A title with no words left
+        is never the same as another.
+    """
+    words = _question_words(first.finding.title), _question_words(second.finding.title)
+    if not words[0] or not words[1]:
+        return False
+    return len(words[0] & words[1]) / len(words[0] | words[1]) >= SAME_WORDING
+
+
+def _question_words(title: str) -> set[str]:
+    """Picks the words out of a question title.
+
+    Args:
+        title: A question's title.
+
+    Returns:
+        The lowercase words of any length, without QUESTION_WORDS.
+    """
+    return set(re.findall(r"\w+", title.lower())) - QUESTION_WORDS
 
 
 def _join(members: dict[str, list[Item]], owner: dict[str, str], first: str, second: str) -> bool:

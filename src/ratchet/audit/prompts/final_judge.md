@@ -66,5 +66,17 @@ Two groups that each carry an old id are never merged.
 
 ## The owner's answers
 
-For each answered question, give a decision. It is `problem` with a finding, `dropped`, `parked`
-or `rule` with the text for the project's rules.
+Each answered question is given with the questions the agents asked that it covers, and the
+owner's one answer to it. Give a decision for each one. It is `problem` with a finding, `dropped`,
+`parked` or `rule` with the text for the project's rules.
+
+- An answered question is settled whenever its answer settles it: a rule for rules.md, a dropped
+  finding, or a problem. Never park it without a reason, and give the reason in `reason`.
+- When the answers to two questions disagree, park both. In `conflicts_with`, list the labels of
+  the questions whose answers disagree with this one. Both questions then stay open, and the owner
+  sees both answers. Use `conflicts_with` as an empty list for every other decision.
+
+An entry with the `question` outcome is shown to the owner. Its `title` is one plain question
+sentence, and its `what_is_wrong` is one or two sentences of context followed by the choices and
+what each would mean. Write both in everyday words, with none of the words of the audit's workings,
+such as grade, stated, inferred, fault or finding, and no labels.

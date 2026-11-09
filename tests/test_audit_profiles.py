@@ -273,12 +273,23 @@ def test_a_final_judge_prompt_shows_each_question_with_its_answer() -> None:
         why_it_may_be_deliberate="a migration", what_would_settle="the owner's plan",
     )
 
-    prompt = format_final_judge_prompt([make_group()], "", [("Q1", question, "yes, keep both")])
+    prompt = format_final_judge_prompt([make_group()], "", [("Q1", [question], "yes, keep both")])
 
-    assert '"label": "Q1"' in prompt
+    assert '"Q1"' in prompt
     assert "Why two stores" in prompt
     assert "a migration" in prompt
     assert "yes, keep both" in prompt
+
+
+def test_the_prompts_ask_for_plain_questions_and_name_conflicts(tmp_path: Path) -> None:
+    """Proves the final judge is told to name conflicting answers in conflicts_with, the old list
+    checker is told what to do when answers disagree, and the auditor is no longer told to sort
+    its questions by kind."""
+    project = make_project(tmp_path)
+
+    assert "conflicts_with" in build_profile(project, Role.FINAL_JUDGE)
+    assert "disagree" in build_profile(project, Role.OLD_LIST_CHECKER)
+    assert "kind `rules`" not in build_profile(project, Role.AUDITOR)
 
 
 def test_written_profiles_are_accepted_by_agents(tmp_path: Path) -> None:

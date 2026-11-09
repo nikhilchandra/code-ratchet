@@ -77,7 +77,11 @@ from ratchet.audit.citations import CitationResult, check_citations, render_repo
 from ratchet.audit.code_facts import InventoryItem, build_inventory
 from ratchet.audit.evidence_hints import build_evidence_hints, renamed_files
 from ratchet.audit.grouping import (
+    ADDED_A,
+    ADDED_B,
+    BLIND_AUDITOR as BLIND_AUDITOR_SOURCE,
     CODE,
+    LISTED,
     Group,
     GroupingResult,
     NEW,
@@ -86,8 +90,10 @@ from ratchet.audit.grouping import (
     Item,
     finish_groups,
     group_items,
+    group_questions,
     join_pairs,
     make_items,
+    make_question_items,
     pair_candidates,
 )
 from ratchet.audit.list_markdown import (
@@ -313,25 +319,26 @@ def _gather(folder: Path) -> tuple[list[tuple[str, Question]], list[Bug]]:
         folder: The audit's folder.
 
     Returns:
-        The questions, each with its label such as "Q1" counted from 1, and the bugs. A question
-        or bug whose title repeats an earlier one, ignoring case, is left out.
+        The questions, each with the letter of the source that asked it, and the bugs. A question
+        whose title repeats an earlier question of the same source, ignoring case, is left out, and
+        so is a bug whose title repeats an earlier bug.
     """
     answers = [
-        _load_answer(folder, "auditor", AuditorAnswer),
-        *(_load_answer(folder, role, ListReview) for role in REVIEWERS),
-        _load_answer(folder, BLIND_AUDITOR, AuditorAnswer),
+        (LISTED, _load_answer(folder, "auditor", AuditorAnswer)),
+        *zip((ADDED_A, ADDED_B), (_load_answer(folder, role, ListReview) for role in REVIEWERS)),
+        (BLIND_AUDITOR_SOURCE, _load_answer(folder, BLIND_AUDITOR, AuditorAnswer)),
     ]
     questions: list[tuple[str, Question]] = []
     bugs: list[Bug] = []
-    asked: set[str] = set()
+    asked: set[tuple[str, str]] = set()
     noticed: set[str] = set()
-    for answer in answers:
+    for source, answer in answers:
         if answer is None:
             continue
         for question in answer.questions:
-            if question.title.strip().lower() not in asked:
-                asked.add(question.title.strip().lower())
-                questions.append((f"Q{len(questions) + 1}", question))
+            if (source, question.title.strip().lower()) not in asked:
+                asked.add((source, question.title.strip().lower()))
+                questions.append((source, question))
         for bug in answer.bugs:
             if bug.title.strip().lower() not in noticed:
                 noticed.add(bug.title.strip().lower())
@@ -344,22 +351,101 @@ def _places(citations: list[Citation]) -> list[str]:
     return [f"- {place.file}:{place.line}-{place.end_line}: {place.shows}" for place in citations]
 
 
-def _question_text(question: Question) -> str:
-    """Writes a question for the owner, with its kind, the places it is about, and what would
-    settle it.
+def _question_text(copies: list[Question]) -> str:
+    """Writes a question for the owner as its context, its choices, and the places it is about.
 
     Args:
-        question: The question an agent asked.
+        copies: The questions that the agents asked in their own words and that were merged into
+            one. The first copy gives the context and the choices.
 
     Returns:
-        The question's text as markdown.
+        The question's text as markdown, with the places that every copy cites listed once each.
     """
-    lines = [f"This is a question about the {question.kind}.", ""]
-    lines += [question.why_it_may_be_deliberate.strip(), ""]
-    lines += [f"What would settle it: {question.what_would_settle.strip()}"]
-    if question.evidence:
-        lines += ["", *_places(question.evidence)]
+    first = copies[0]
+    lines = [first.why_it_may_be_deliberate.strip(), "", first.what_would_settle.strip()]
+    places = list(dict.fromkeys(
+        line for copy in copies for line in _places(copy.evidence)))
+    if places:
+        lines += ["", "Where this shows up in the code:", *places]
     return "\n".join(lines).strip()
+
+
+def _merged_questions(
+    asked: list[tuple[str, Question]], items: list[Item], groups: list[list[Item]]
+) -> list[dict]:
+    """Writes one row for the owner for each group of questions.
+
+    Args:
+        asked: The questions, as _gather returns them.
+        items: The question items made from them, in the same order.
+        groups: The groups of those items.
+
+    Returns:
+        One row per group, in the order of the group's first question. A row holds the id "Q1",
+        "Q2" and so on, the title of its first question, its text, and its copies, each as the
+        label of the item and the question.
+    """
+    by_label = {item.label: question for item, (_, question) in zip(items, asked)}
+    rows = []
+    for number, group in enumerate(groups, start=1):
+        copies = [by_label[item.label] for item in group]
+        rows.append({
+            "id": f"Q{number}", "title": copies[0].title, "text": _question_text(copies),
+            "copies": [{"label": item.label, "question": by_label[item.label]} for item in group],
+        })
+    return rows
+
+
+def _conflict_folds(ids: list[str], decisions: dict[str, QuestionVerdict]) -> list[list[str]]:
+    """Finds the sets of answered questions whose answers disagree with each other.
+
+    Args:
+        ids: The ids of the answered questions, in question order.
+        decisions: The final judge's decision on each question, by id.
+
+    Returns:
+        Each set of two or more ids that are linked through conflicts_with, in question order. Two
+        ids are linked when either one's decision names the other. A name that is not in ids is
+        ignored.
+    """
+    links: dict[str, set[str]] = {label: set() for label in ids}
+    for label in ids:
+        decision = decisions.get(label)
+        for other in decision.conflicts_with if decision else []:
+            if other in links and other != label:
+                links[label].add(other)
+                links[other].add(label)
+    folds: list[list[str]] = []
+    seen: set[str] = set()
+    for label in ids:
+        if label in seen or not links[label]:
+            continue
+        fold: set[str] = set()
+        pending = [label]
+        while pending:
+            current = pending.pop()
+            if current not in fold:
+                fold.add(current)
+                pending.extend(links[current])
+        seen |= fold
+        folds.append([other for other in ids if other in fold])
+    return folds
+
+
+def _answer_line(answers: list[str]) -> str:
+    """Writes the owner's answers as the text of an Answer line.
+
+    Args:
+        answers: The answers to one question, or to several questions that were kept as one.
+
+    Returns:
+        The answer with its whitespace made single spaces when there is one answer, and
+        'these answers disagree: "A"; "B"' when there are several.
+    """
+    lines = [" ".join(answer.split()) for answer in answers]
+    if len(lines) == 1:
+        return lines[0]
+    return "these answers disagree: " + "; ".join(f'"{line}"' for line in lines)
 
 
 def _history_text(project: Project, list_name: str, problem_id: str) -> str:
@@ -480,7 +566,7 @@ def _as_verdict(question: AnsweredQuestion) -> QuestionVerdict:
     """
     return QuestionVerdict(
         label=f"O {question.id}", decision=question.decision, reason=question.reason,
-        finding=question.finding, rule_text=question.rule_text,
+        finding=question.finding, rule_text=question.rule_text, conflicts_with=[],
     )
 
 
@@ -890,14 +976,20 @@ def build_audit_graph(
             blind_auditor=blind_auditor.problems if blind_auditor else [],
         )
         groups = group_items(items)
+        asked, _ = _gather(folder)
+        question_items = make_question_items(asked)
+        question_groups = group_questions(question_items)
 
-        # ask the duplicate judge about the pairs that the rules cannot settle
+        # ask the duplicate judge about the pairs of findings and of questions that the rules cannot settle
         candidates = pair_candidates(groups, settings.max_pairs)
+        question_candidates = pair_candidates(
+            question_groups, settings.max_pairs, first_number=len(candidates) + 1)
         verdicts = []
-        if candidates:
+        if candidates or question_candidates:
             check_cost(job, settings.duplicate_judge.budget_usd)
             try:
-                reply = ask(agents_of(job)[Role.DUPLICATE_JUDGE], format_duplicate_judge_prompt(candidates),
+                reply = ask(agents_of(job)[Role.DUPLICATE_JUDGE],
+                            format_duplicate_judge_prompt([*candidates, *question_candidates]),
                             folder / "prompts")
             except NoAnswerError as error:
                 note(job, f"{error}, so no pair was joined by its decision")
@@ -905,8 +997,11 @@ def build_audit_graph(
                 verdicts = reply.data.pairs
                 check_turn(job, Role.DUPLICATE_JUDGE, reply.log_path)
         groups, records = join_pairs(groups, candidates, verdicts)
+        question_groups, question_records = join_pairs(question_groups, question_candidates, verdicts)
         result = finish_groups(project, design, items, groups, job.data["reaudit"])
         _write_json(folder / "pairs.json", records)
+        _write_json(folder / "question-pairs.json", question_records)
+        _write_json(folder / "questions.json", _merged_questions(asked, question_items, question_groups))
         _write_json(folder / "groups.json", {"groups": result.groups, "done": result.done})
         return "check-citations"
 
@@ -920,13 +1015,13 @@ def build_audit_graph(
         done = [_fix_group(root, group, results) for group in result.done]
         (folder / "citations.md").write_text(render_report(results), encoding="utf-8")
         _write_json(folder / "groups.json", {"groups": groups, "done": done})
-        return "questions" if _gather(folder)[0] else "check"
+        return "questions" if _read_json(folder / "questions.json") else "check"
 
     @graph.step("questions", next=("check",), gate=True)
     def questions(job: Job) -> str:
         folder = folder_of(job)
-        rows = [{"id": label, "title": question.title, "text": _question_text(question)}
-                for label, question in _gather(folder)[0]]
+        rows = [{key: row[key] for key in ("id", "title", "text")}
+                for row in _read_json(folder / "questions.json")]
         job.data["questions"] = rows
         lines = [f"# {QUESTIONS_HEADING}", ""]
         for row in rows:
@@ -946,18 +1041,24 @@ def build_audit_graph(
                              "started on. Run `ratchet audit` again.")
         root = project.root
         folder = folder_of(job)
-        gathered = _gather(folder)[0]
+        merged = _read_json(folder / "questions.json")
         answers = {label: text.strip() for label, text in job.data.get("answers", {}).items()
                    if text.strip()}
         if "answers" in job.data:
-            _write_json(folder / "answers.json", answers)
+            # the owner's answer to a merged question is recorded for each copy of it
+            _write_json(folder / "answers.json", {
+                copy["label"]: answers[row["id"]]
+                for row in merged if row["id"] in answers for copy in row["copies"]})
         result = _load_groups(folder)
         asked = [group for group in result.groups if not _skips_final_judge(group)]
         skipped = [group for group in result.groups if _skips_final_judge(group)]
 
         # ask the final judge about the groups it must judge and the questions that were answered
-        answered = [(label, question, answers[label]) for label, question in gathered
-                    if label in answers]
+        answered = [
+            (row["id"], [Question.model_validate(copy["question"]) for copy in row["copies"]],
+             answers[row["id"]])
+            for row in merged if row["id"] in answers
+        ]
         judged = FinalJudgeAnswer(checks=[], decisions=[])
         if asked or answered:
             check_cost(job, settings.final_judge.budget_usd)
@@ -1037,7 +1138,8 @@ def build_audit_graph(
     def draft(job: Job) -> str:
         folder = folder_of(job)
         applied, decisions = _load_applied(folder)
-        gathered, bugs = _gather(folder)
+        rows = _read_json(folder / "questions.json")
+        bugs = _gather(folder)[1]
         answers = {label: text.strip() for label, text in job.data.get("answers", {}).items()
                    if text.strip()}
         decided = {decision.label: decision for decision in decisions}
@@ -1051,27 +1153,45 @@ def build_audit_graph(
         # turn the owner's answered questions into what the final judge decided for each
         new_problems: list[tuple[FinalEntry, str]] = []
         rules: list[str] = []
-        for label, question in gathered:
+        folds = _conflict_folds([row["id"] for row in rows if row["id"] in answers], decided)
+        absorbed = {label for fold in folds for label in fold[1:]}
+        titles = {row["id"]: row["title"] for row in rows}
+        for row in rows:
+            label = row["id"]
+            # a question absorbed into the first question of its conflict is not listed again
+            if label in absorbed:
+                continue
+            fold = next((fold for fold in folds if fold[0] == label), None)
+            # every question in a conflict stays open, whatever its own decision says
+            if fold is not None:
+                text = row["text"]
+                for other in fold[1:]:
+                    text += f"\n\nThe answer to this question disagrees with the answer to: {titles[other]}"
+                for member in fold:
+                    if member in decided and decided[member].reason.strip():
+                        text += f"\n\nThe audit left it open: {decided[member].reason.strip()}"
+                made.questions.append(DraftQuestion(
+                    label, row["title"], text, _answer_line([answers[member] for member in fold])))
+                continue
             decision = decided.get(label) if label in answers else None
-            text = _question_text(question)
-            if label in answers:
-                text += f"\n\nThe owner answered: {answers[label]}"
+            text = row["text"]
             if decision is None or decision.decision == QuestionDecision.PARKED:
                 if decision is not None:
                     text += f"\n\nThe audit left it open: {decision.reason.strip()}"
-                made.questions.append(DraftQuestion(label, question.title, text))
+                made.questions.append(
+                    DraftQuestion(label, row["title"], text, _answer_line([answers.get(label, "")])))
             elif decision.decision == QuestionDecision.PROBLEM:
                 status = NEW if job.data["reaudit"] else OPEN
                 entry = FinalEntry(decision.finding, "", status, (label,), "", (), ())
                 new_problems.append((entry, label))
             elif decision.decision == QuestionDecision.DROPPED:
                 made.dropped.append(DraftDropped(
-                    f"D{len(made.dropped) + 1}", question.title, decision.reason))
+                    f"D{len(made.dropped) + 1}", row["title"], decision.reason))
             elif decision.rule_text.strip():
                 rules.append(decision.rule_text)
 
         # decide the old list's questions from the owner's answers, or ask them again
-        asked_again: list[tuple[str, str]] = []
+        asked_again: list[tuple[str, str, str]] = []
         old_questions = [
             entry for entry in split_entries(read_markdown(project.folder, f"{old_name}.md"))
             if entry.section == QUESTIONS_HEADING
@@ -1079,12 +1199,10 @@ def build_audit_graph(
         for entry in old_questions:
             text, answer = _old_question(entry)
             decision = decided.get(f"O {entry.id}") if answer else None
-            if answer:
-                text += f"\n\nThe owner answered: {answer}"
             if decision is None or decision.decision == QuestionDecision.PARKED:
                 if decision is not None:
                     text += f"\n\nThe audit left it open: {decision.reason.strip()}"
-                asked_again.append((entry.title, text))
+                asked_again.append((entry.title, text, answer))
             elif decision.decision == QuestionDecision.PROBLEM:
                 made_entry = FinalEntry(decision.finding, "", NEW, (entry.id,), "", (), ())
                 new_problems.append((made_entry, entry.id))
@@ -1121,12 +1239,12 @@ def build_audit_graph(
             ))
 
         # the entries that the final judge made questions of follow the questions that were asked
-        for number, entry in enumerate(applied.questions, start=len(gathered) + 1):
+        for number, entry in enumerate(applied.questions, start=len(rows) + 1):
             made.questions.append(
                 DraftQuestion(f"Q{number}", entry.finding.title, entry.finding.what_is_wrong))
-        for number, (title, text) in enumerate(
-                asked_again, start=len(gathered) + len(applied.questions) + 1):
-            made.questions.append(DraftQuestion(f"Q{number}", title, text))
+        for number, (title, text, answer) in enumerate(
+                asked_again, start=len(rows) + len(applied.questions) + 1):
+            made.questions.append(DraftQuestion(f"Q{number}", title, text, _answer_line([answer])))
         for dropped in applied.dropped:
             made.dropped.append(DraftDropped(
                 f"D{len(made.dropped) + 1}", dropped.finding.title, dropped.reason))

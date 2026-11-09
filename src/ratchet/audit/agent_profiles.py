@@ -368,7 +368,7 @@ def format_duplicate_judge_prompt(pairs: list[PairCandidate]) -> str:
     """Returns the prompt of the duplicate judge.
 
     Args:
-        pairs: The numbered pairs of findings to decide.
+        pairs: The numbered pairs to decide, each of two findings or of two questions.
 
     Returns:
         The prompt as markdown.
@@ -431,7 +431,7 @@ def _checked_text(item: Item, finding: Finding, reviews: dict[str, list[EntryRev
 def format_final_judge_prompt(
     groups: list[Group],
     citation_report: str,
-    answers: list[tuple[str, Question, str]],
+    answers: list[tuple[str, list[Question], str]],
     reviews: dict[str, list[EntryReview]] | None = None,
 ) -> str:
     """Returns the prompt of the final judge.
@@ -444,8 +444,8 @@ def format_final_judge_prompt(
     Args:
         groups: The groups from the deterministic merge.
         citation_report: The report on the citations.
-        answers: The owner's answered questions, each as the question's label, the question and
-            the owner's answer.
+        answers: The owner's answered questions, each as the question's label, the questions that
+            were merged into it, and the owner's one answer to them.
         reviews: The reviewers' verdicts on each entry, keyed by the label of the item that
             holds the entry. None when no reviewer gave a verdict.
 
@@ -466,8 +466,8 @@ def format_final_judge_prompt(
             "other_texts": [_checked_text(item, item.finding, reviews) for item in others],
         })
     answered = [
-        {"label": label, "question": question.model_dump(mode="json"), "answer": answer}
-        for label, question, answer in answers
+        {"label": label, "copies": [copy.model_dump(mode="json") for copy in copies], "answer": answer}
+        for label, copies, answer in answers
     ]
     return "\n\n".join([
         "# The groups\n\nGive a check for every group.\n\n" + _json_block(rows),

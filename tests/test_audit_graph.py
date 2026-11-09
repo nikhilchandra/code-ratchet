@@ -25,8 +25,10 @@ from ratchet.audit.agent_profiles import make_agents
 from ratchet.audit.audit_graph import AuditError, build_audit_graph
 from ratchet.audit.code_facts import build_inventory
 from ratchet.audit.evidence_hints import old_citations
+from ratchet.audit.list_markdown import QUESTIONS_HEADING, DraftQuestion
 from ratchet.audit.settings import COMMAND, AuditSettings
 from ratchet.init_project import init_project
+from ratchet.owner_terminal import ask_questions
 from ratchet.project import Project, load_project
 from ratchet.problems_view import show_history
 from ratchet.records import commit_records, records_log
@@ -302,7 +304,7 @@ def test_the_questions_gate_waits_and_the_owners_answers_reach_the_final_judge(
                 "evidence": [], "why_it_may_be_deliberate": "Money is rounded at each step.",
                 "what_would_settle": "A word from the owner."}
     rule = {"label": "Q1", "decision": "rule", "reason": "settled", "finding": SECOND,
-            "rule_text": "Amounts are rounded to cents in one place only."}
+            "rule_text": "Amounts are rounded to cents in one place only.", "conflicts_with": []}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
         "rules_reviewer": [review_turn("agreed against the rules")],
@@ -412,7 +414,7 @@ def test_an_answered_question_can_become_a_problem(audit_project: Project, start
                 "why_it_may_be_deliberate": "x", "what_would_settle": "y"}
     problem = finding("app.core.model", "tax belongs in the model", MODEL, 7, "return round(a + b, 2)")
     decision = {"label": "Q1", "decision": "problem", "reason": "the owner agrees",
-                "finding": problem, "rule_text": ""}
+                "finding": problem, "rule_text": "", "conflicts_with": []}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
         "final_judge": [final_judge_turn(decisions=[decision])],
@@ -439,7 +441,7 @@ def test_the_citations_of_a_question_made_problem_are_checked(
     problem["evidence"].append({"file": MODEL, "line": 3, "end_line": 3,
                                 "quote": "this text is not in the file", "shows": "nothing"})
     decision = {"label": "Q1", "decision": "problem", "reason": "the owner agrees",
-                "finding": problem, "rule_text": ""}
+                "finding": problem, "rule_text": "", "conflicts_with": []}
     turns = default_turns(audit_project) | {
         "auditor": [auditor_turn(audit_project, questions=[question])],
         "final_judge": [final_judge_turn(decisions=[decision])],
@@ -1650,3 +1652,298 @@ def test_a_hook_refused_forbidden_option_is_noted_not_halted(
     assert job.status == JobStatus.WAITING and job.next_step == "publish"
     draft = (audit_folder(audit_project) / "draft.md").read_text(encoding="utf-8")
     assert "the permission rules refused" in draft
+
+
+# ---------------------------------------------------------------- the owner's questions
+
+FLOAT_ANSWER = "Float arithmetic is totally acceptable"
+DECIMAL_ANSWER = "Sure, use Decimal for money"
+TOTAL_LINE = "return round(a + b, 2)"
+
+
+def plain_question(title: str, *places: tuple[str, int, int, str, str]) -> dict:
+    """Returns a question for the owner in plain words. Each place is given as (file, first
+    line, last line, quote, what the lines show)."""
+    return {
+        "kind": "design", "title": title,
+        "evidence": [{"file": file, "line": line, "end_line": end, "quote": quote, "shows": shows}
+                     for file, line, end, quote, shows in places],
+        "why_it_may_be_deliberate": "The total adds prices as plain floats, which can lose a cent.",
+        "what_would_settle": "Yes: prices move to Decimal and totals stay exact. No: floats "
+                             "stay, and small rounding errors are accepted.",
+    }
+
+
+# the same question about money, asked by three agents in their own words
+FLOAT_COPIES = (
+    plain_question("Is float arithmetic acceptable for money?",
+                   (MODEL, 6, 7, "def total(a, b):", "adds two prices as floats")),
+    plain_question("Should prices be kept as Decimal?",
+                   (MODEL, 7, 7, TOTAL_LINE, "rounds a sum of floats")),
+    plain_question("Can the total lose cents?",
+                   (MODEL, 7, 7, TOTAL_LINE, "keeps money in floats")),
+)
+
+
+def float_copies_judge_turn(prompt: str) -> dict:
+    """Answers a pair of two FLOAT_COPIES as the same question, and every other pair as
+    different."""
+    titles = {copy["title"] for copy in FLOAT_COPIES}
+    return {"pairs": [
+        {"pair": row["pair"],
+         "same": row["first"]["title"] in titles and row["second"]["title"] in titles,
+         "reason": "the same question about money"}
+        for row in rows_of(prompt)]}
+
+
+def three_copies_turns(project: Project, **changes: object) -> dict[str, list[Turn]]:
+    """Returns the turns of a first audit in which the auditor, the rules reviewer and the
+    standard reviewer each ask one copy of FLOAT_COPIES, and the duplicate judge joins them."""
+    auditor, rules, standard = FLOAT_COPIES
+    return default_turns(project) | {
+        "auditor": [auditor_turn(project, questions=[auditor])],
+        "rules_reviewer": [review_turn(added=[ADDED], questions=[rules])],
+        "standard_reviewer": [review_turn(questions=[standard])],
+        "duplicate_judge": [float_copies_judge_turn],
+    } | changes
+
+
+def verdict(label: str, decision: str, *, conflicts_with: tuple[str, ...] = (),
+            rule_text: str = "") -> dict:
+    """Returns the final judge's decision on the answered question 'label'."""
+    return {"label": label, "decision": decision, "reason": "The answers leave it open.",
+            "finding": SECOND, "rule_text": rule_text, "conflicts_with": list(conflicts_with)}
+
+
+def published_questions(project: Project) -> list:
+    """Returns the question entries of the newest list."""
+    return [entry for entry in find_latest_problem_list(project).entries
+            if entry.section == QUESTIONS_HEADING]
+
+
+def answer_of(entry) -> str:
+    """Returns the text on an entry's Answer line, which is "" when the line is empty."""
+    found = re.search(r"^Answer:(.*)$", entry.text, re.MULTILINE)
+    assert found, entry.text
+    return found.group(1).strip()
+
+
+def test_three_agents_ask_the_same_question_and_the_owner_is_asked_once(
+    audit_project: Project, start
+) -> None:
+    """Proves the auditor and both reviewers asking the same question in their own words, at
+    overlapping lines, gives the owner one question that shows the places of all three copies."""
+    job, agents, graph = start(three_copies_turns(audit_project))
+
+    assert job.status == JobStatus.WAITING and job.next_step == "check"
+    rows = job.data["questions"]
+    assert len(rows) == 1
+    text = (audit_folder(audit_project) / "questions.md").read_text(encoding="utf-8")
+    assert len(re.findall(r"^### Q", text, re.MULTILINE)) == 1
+    for shows in ("adds two prices as floats", "rounds a sum of floats", "keeps money in floats"):
+        assert shows in rows[0]["text"], shows
+
+
+def test_a_different_question_about_the_same_lines_is_asked_separately(
+    audit_project: Project, start
+) -> None:
+    """Proves a question that cites the same lines as the money questions but asks something
+    else, such as whether a message should stay, is not merged with them, and the owner is asked
+    two questions."""
+    message = plain_question("Should the 'Big order!' message stay?",
+                             (MODEL, 7, 7, TOTAL_LINE, "prints a message for a big order"))
+    turns = three_copies_turns(audit_project)
+    turns["standard_reviewer"] = [review_turn(questions=[FLOAT_COPIES[2], message])]
+
+    job, agents, graph = start(turns)
+
+    titles = [row["title"] for row in job.data["questions"]]
+    assert len(titles) == 2
+    assert "Should the 'Big order!' message stay?" in titles
+
+
+def test_one_agent_asking_the_same_question_twice_is_asked_once(
+    audit_project: Project, start
+) -> None:
+    """Proves one agent asking the same question twice, in another case, gives the owner one
+    question."""
+    title = "Is float arithmetic acceptable for money?"
+    turns = default_turns(audit_project) | {"auditor": [auditor_turn(
+        audit_project, questions=[plain_question(title), plain_question(title.lower())])]}
+
+    job, agents, graph = start(turns)
+
+    assert len(job.data["questions"]) == 1
+
+
+def test_one_answer_reaches_every_copy_and_the_final_judge(audit_project: Project, start) -> None:
+    """Proves the owner's one answer to a merged question is recorded for each agent's copy, and
+    that the final judge's prompt shows the answer with the title of every copy."""
+    job, agents, graph = start(three_copies_turns(audit_project))
+
+    graph.resume(SLUG, {"answers": {"Q1": DECIMAL_ANSWER}})
+
+    answers = json.loads((audit_folder(audit_project) / "answers.json").read_text(encoding="utf-8"))
+    assert {label: answers.get(label) for label in ("L1", "A1", "B1")} == {
+        "L1": DECIMAL_ANSWER, "A1": DECIMAL_ANSWER, "B1": DECIMAL_ANSWER}
+    prompt = agents["final_judge"].prompts[0]
+    assert DECIMAL_ANSWER in prompt
+    for copy in FLOAT_COPIES:
+        assert copy["title"] in prompt, copy["title"]
+
+
+@pytest.mark.parametrize("decisions", [[], [verdict("Q1", "parked")]], ids=["none", "parked"])
+def test_an_answered_question_never_publishes_with_an_empty_answer_line(
+    audit_project: Project, start, decisions: list[dict]
+) -> None:
+    """Proves an answered question that the final judge leaves open, with no decision or parked
+    with a reason, is published with the owner's answer on its Answer line."""
+    turns = default_turns(audit_project) | {
+        "auditor": [auditor_turn(audit_project, questions=[FLOAT_COPIES[0]])],
+        "final_judge": [final_judge_turn(decisions=decisions)],
+    }
+    job, agents, graph = start(turns)
+    graph.resume(SLUG, {"answers": {"Q1": DECIMAL_ANSWER}})
+    graph.resume(SLUG, {"decision": "approve"})
+
+    questions = published_questions(audit_project)
+
+    assert len(questions) == 1
+    assert answer_of(questions[0]) == DECIMAL_ANSWER
+
+
+def disagreeing_turns(project: Project, decisions: list[dict]) -> dict[str, list[Turn]]:
+    """Returns the turns of a first audit in which the auditor and the rules reviewer ask two
+    questions that code cannot join, and the final judge gives the decisions 'decisions'."""
+    float_question = plain_question("Is float arithmetic acceptable for money?",
+                                    (MODEL, 7, 7, TOTAL_LINE, "adds two prices as floats"))
+    decimal_question = plain_question(
+        "Should run keep prices as Decimal instead?",
+        (MAIN, 5, 5, "return round(model.total(1, 2), 2)", "rounds the total again"))
+    return default_turns(project) | {
+        "auditor": [auditor_turn(project, questions=[float_question])],
+        "rules_reviewer": [review_turn(added=[ADDED], questions=[decimal_question])],
+        "final_judge": [final_judge_turn(decisions=decisions)],
+    }
+
+
+def test_two_disagreeing_answers_keep_the_question_open_with_both_answers(
+    audit_project: Project, start
+) -> None:
+    """Proves two answered questions that the final judge parks as in conflict with each other
+    are published as one open question that names the other and holds both answers, and that no
+    rule is added."""
+    decisions = [verdict("Q1", "parked", conflicts_with=("Q2",)),
+                 verdict("Q2", "parked", conflicts_with=("Q1",))]
+    job, agents, graph = start(disagreeing_turns(audit_project, decisions))
+    assert len(job.data["questions"]) == 2
+    graph.resume(SLUG, {"answers": {"Q1": FLOAT_ANSWER, "Q2": DECIMAL_ANSWER}})
+    graph.resume(SLUG, {"decision": "approve"})
+
+    questions = published_questions(audit_project)
+
+    assert len(questions) == 1
+    assert "Should run keep prices as Decimal instead?" in questions[0].text
+    answer = answer_of(questions[0])
+    assert FLOAT_ANSWER in answer and DECIMAL_ANSWER in answer
+    assert "(decided in" not in (audit_project.folder / "rules.md").read_text(encoding="utf-8")
+
+
+def test_a_disputed_answer_never_becomes_a_rule_even_when_the_other_side_was_settled(
+    audit_project: Project, start
+) -> None:
+    """Proves a question that the final judge settles as a rule is still kept open, with no rule
+    and no dropped entry, when another answered question names it as in conflict."""
+    decisions = [verdict("Q1", "parked", conflicts_with=("Q2",)),
+                 verdict("Q2", "rule", rule_text="Money is kept as Decimal.")]
+    job, agents, graph = start(disagreeing_turns(audit_project, decisions))
+    graph.resume(SLUG, {"answers": {"Q1": FLOAT_ANSWER, "Q2": DECIMAL_ANSWER}})
+    graph.resume(SLUG, {"decision": "approve"})
+
+    published = find_latest_problem_list(audit_project)
+    questions = published_questions(audit_project)
+
+    rules = (audit_project.folder / "rules.md").read_text(encoding="utf-8")
+    assert "Money is kept as Decimal." not in rules
+    titles = {"Is float arithmetic acceptable for money?", "Should run keep prices as Decimal instead?"}
+    assert not [entry for entry in published.entries
+                if entry.section == "Dropped" and entry.title in titles]
+    assert len(questions) == 1
+    answer = answer_of(questions[0])
+    assert FLOAT_ANSWER in answer and DECIMAL_ANSWER in answer
+
+
+def test_an_audit_with_no_questions_writes_an_empty_question_file_and_skips_the_gate(
+    audit_project: Project, start
+) -> None:
+    """Proves an audit in which no agent asks a question writes an empty questions.json and runs
+    on to the draft without stopping at the questions gate."""
+    job, agents, graph = start()
+
+    questions = audit_folder(audit_project) / "questions.json"
+    assert questions.is_file()
+    assert json.loads(questions.read_text(encoding="utf-8")) == []
+    assert job.status == JobStatus.WAITING and job.next_step == "publish"
+    assert not job.data.get("questions")
+
+
+def test_a_parked_old_question_is_asked_again_with_its_answer_on_the_answer_line(
+    audit_project: Project, start
+) -> None:
+    """Proves an answered old question that the old list checker parks is published again with
+    the owner's answer on its Answer line, and not repeated in its text."""
+    title = "Is float arithmetic acceptable for money?"
+    first = default_turns(audit_project) | {
+        "auditor": [auditor_turn(audit_project, questions=[plain_question(title)])]}
+    job, agents, graph = start(first)
+    graph.resume(SLUG)
+    graph.resume(SLUG, {"decision": "approve"})
+    entries = [entry for entry in find_latest_problem_list(audit_project).entries
+               if entry.is_problem]
+    age_list(audit_project)
+    old_path = audit_project.folder / f"{OLD_NAME}.md"
+    old_path.write_text(old_path.read_text(encoding="utf-8").replace(
+        "Answer:", "Answer: Round only in pricing.", 1), encoding="utf-8")
+    decision = {"id": "Q1", "decision": "parked", "reason": "The answer does not say which.",
+                "finding": SECOND, "rule_text": ""}
+    turns = reaudit_turns(audit_project, entries) | {
+        "old_list_checker": [old_list_checker_turn(entries, answered_questions=[decision])]}
+    job, agents, graph = start(turns, slug=AGAIN)
+    graph.resume(AGAIN, {"decision": "approve"})
+
+    asked = [entry for entry in published_questions(audit_project) if entry.title == title]
+
+    assert len(asked) == 1
+    assert answer_of(asked[0]) == "Round only in pricing."
+    assert "The owner answered" not in asked[0].text
+
+
+# the words of the audit's own workings, which the owner should never have to read
+INTERNAL_WORDS = re.compile(r"(?i)\b(grade|stated|inferred|fault|finding|auditor|reviewer|judge)\b")
+# a source label such as C1, L1 or B2
+SOURCE_LABEL = re.compile(r"\b[CLABFOR]\d+\b")
+
+
+def test_a_question_reads_plainly_with_no_boilerplate_or_internal_words(
+    audit_project: Project, start
+) -> None:
+    """Proves a question for the owner, in questions.md and in the terminal, opens with its
+    context and holds no line naming its kind, no label before the choices, no word of the
+    audit's workings and no source label."""
+    question = plain_question("Should prices be kept as Decimal instead of float?",
+                              (MODEL, 7, 7, TOTAL_LINE, "the total adds two floats"))
+    turns = default_turns(audit_project) | {
+        "auditor": [auditor_turn(audit_project, questions=[question])]}
+    job, agents, graph = start(turns)
+    rows = job.data["questions"]
+    shown: list[str] = []
+    ask_questions([DraftQuestion(row["id"], row["title"], row["text"]) for row in rows],
+                  ask=lambda _: "", show=shown.append)
+
+    assert rows[0]["text"].startswith(question["why_it_may_be_deliberate"])
+    for text in ((audit_folder(audit_project) / "questions.md").read_text(encoding="utf-8"),
+                 "\n".join(shown)):
+        assert "This is a question about" not in text
+        assert "What would settle it" not in text
+        assert not INTERNAL_WORDS.search(text), INTERNAL_WORDS.search(text)
+        assert not SOURCE_LABEL.search(text), SOURCE_LABEL.search(text)

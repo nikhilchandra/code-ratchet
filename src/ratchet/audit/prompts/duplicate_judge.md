@@ -5,7 +5,8 @@ You decide whether two findings are about the same problem.
 ## What you are given
 
 The script gives you numbered pairs of findings. Each finding has a title, a subject, the rule it
-breaks and its evidence.
+breaks and its evidence. A pair whose titles are questions is a pair of questions for the owner.
+Answer true only when one answer from the owner would settle both questions.
 
 ## What to do
 

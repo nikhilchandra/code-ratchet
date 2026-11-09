@@ -71,6 +71,8 @@ class DraftQuestion:
     id: str
     title: str
     text: str
+    # The answer already written on the Answer line, which is "" for a question not yet answered.
+    answer: str = ""
 
 
 @dataclass
@@ -146,7 +148,7 @@ def render_draft(draft: Draft) -> str:
     lines += [f"## {QUESTIONS_HEADING}", ""]
     for question in draft.questions:
         lines += [f"### {question.id}. {question.title}", "", question.text.strip(), "",
-                  "Answer:", ""]
+                  f"Answer: {question.answer}".rstrip(), ""]
     lines += ["## Dropped", ""]
     for dropped in draft.dropped:
         lines += [f"### {dropped.id}. {dropped.title}", "", dropped.reason.strip(), ""]

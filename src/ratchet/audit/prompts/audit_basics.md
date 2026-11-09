@@ -37,8 +37,17 @@ Every finding carries a grade, and says which rule it breaks.
 ## Questions and bugs
 
 - When a rule is too vague to apply, or code may be deliberate and you cannot tell, ask the owner
-  a question. A question of kind `rules` is about what the rules mean, and one of kind `design`
-  is about what the code is for. Say why the code may be deliberate and what would settle it.
+  a question. The owner is not an expert, so write for someone who has not read the code. Set
+  `kind` to `design` when the question is about what the code is for, and to `rules` when it is
+  about what a rule means. Fill the fields like this, and write nothing that says what kind of
+  question it is.
+  - `title`: one plain question sentence that ends with a question mark.
+  - `why_it_may_be_deliberate`: one or two sentences of context, which say what the code does and
+    why that may be on purpose.
+  - `what_would_settle`: the choices, and what each one would mean for the code.
+  - Use everyday words. Never use the words grade, stated, inferred, fault or finding, a source
+    label such as C1 or L1, or the name of an agent role.
+- Ask each question once. If two things you noticed lead to the same question, ask it once.
 - When code behaves wrongly but the fault is not a matter of design, report it as a bug. A bug is
   not a problem to refactor.
 - Never raise a deliberate exception that the rules describe.

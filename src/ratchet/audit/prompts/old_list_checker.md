@@ -37,7 +37,8 @@ give an entry in `answered_questions` with its id and one decision.
 
 - `problem`: the answer shows a real problem. Put the finding in `finding`.
 - `dropped`: the answer shows the code is fine.
-- `parked`: the answer does not settle the matter.
+- `parked`: the answer does not settle the matter. An `Answer:` line that lists answers that
+  disagree stays `parked`, unless the owner replaced it with one answer.
 - `rule`: the answer is a rule for the project. Put its text in `rule_text`.
 
 ## Notes from reviewers

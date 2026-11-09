@@ -6,9 +6,19 @@ from pathlib import Path
 
 import pytest
 
+import ratchet.audit.grouping as grouping
 from ratchet.architecture import Citation as CodeCitation
 from ratchet.architecture import CodeFinding
-from ratchet.audit.agent_answers import Citation, Finding, Grade, OldEntryCheck, OldVerdict, PairVerdict
+from ratchet.audit.agent_answers import (
+    Citation,
+    Finding,
+    Grade,
+    OldEntryCheck,
+    OldVerdict,
+    PairVerdict,
+    Question,
+    QuestionKind,
+)
 from ratchet.audit.grouping import (
     BLOCKED,
     DONE,
@@ -381,3 +391,67 @@ def test_a_done_or_gone_entry_keeps_only_its_own_item_and_the_rest_go_on_as_new(
     assert any("P2" in note for note in second.notes)
     keys = [group.key for group in (*result.groups, *result.done)]
     assert sorted(keys, key=lambda key: int(key[1:])) == [f"G{n}" for n in range(1, len(keys) + 1)]
+
+
+def question(title: str, *places: Citation) -> Question:
+    """Returns a question for the owner with the given title, citing the given places."""
+    return Question(
+        kind=QuestionKind.DESIGN, title=title, evidence=list(places),
+        why_it_may_be_deliberate="Prices are added as plain numbers.",
+        what_would_settle="Yes keeps the numbers, no moves money to Decimal.",
+    )
+
+
+def test_questions_citing_overlapping_lines_are_offered_as_pairs_not_joined() -> None:
+    """Proves three questions from three sources that cite overlapping lines of one file, each in
+    its own words, are left apart by code and offered to the duplicate judge as pairs, since
+    questions about the same lines may still ask different things."""
+    items = grouping.make_question_items([
+        (grouping.LISTED, question("Is float arithmetic fine for money?", cite(MODEL_FILE, 6, 7))),
+        (grouping.ADDED_A, question("Should prices be kept as Decimal?", cite(MODEL_FILE, 7))),
+        (grouping.ADDED_B, question("Can totals lose cents when adding?", cite(MODEL_FILE, 7, 9))),
+    ])
+
+    groups = grouping.group_questions(items)
+    candidates = pair_candidates(groups, max_pairs=5)
+
+    assert labels(groups) == [["L1"], ["A1"], ["B1"]]
+    assert sorted((candidate.first.label, candidate.second.label) for candidate in candidates) == [
+        ("A1", "B1"), ("L1", "A1"), ("L1", "B1")]
+
+
+def test_questions_with_nearly_the_same_wording_become_one_group() -> None:
+    """Proves two questions with no citations, whose titles differ only by question words and
+    case, are joined by code into one group."""
+    items = grouping.make_question_items([
+        (grouping.LISTED, question("Should total() use Decimal for money?")),
+        (grouping.ADDED_A, question("would TOTAL use decimal for money")),
+    ])
+
+    assert labels(grouping.group_questions(items)) == [["L1", "A1"]]
+
+
+def test_a_longer_question_is_not_joined_by_code_and_is_offered_as_a_pair() -> None:
+    """Proves a question that adds words to another is not joined by code, and that the two are
+    offered to the duplicate judge as the first pair."""
+    items = grouping.make_question_items([
+        (grouping.LISTED, question("Should total() use Decimal?")),
+        (grouping.ADDED_A, question("Should total() use Decimal for tax?")),
+    ])
+
+    groups = grouping.group_questions(items)
+    candidates = pair_candidates(groups, max_pairs=5)
+
+    assert labels(groups) == [["L1"], ["A1"]]
+    assert [(candidate.pair, candidate.first.label, candidate.second.label)
+            for candidate in candidates] == [(1, "L1", "A1")]
+
+
+def test_a_question_made_only_of_question_words_is_not_joined_and_does_not_fail() -> None:
+    """Proves two titles made only of question words stay two groups, with no division by zero."""
+    items = grouping.make_question_items([
+        (grouping.LISTED, question("What is this?")),
+        (grouping.ADDED_A, question("Which is it?")),
+    ])
+
+    assert labels(grouping.group_questions(items)) == [["L1"], ["A1"]]

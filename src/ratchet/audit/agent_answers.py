@@ -267,6 +267,9 @@ class QuestionVerdict(_Answer):
     reason: str
     finding: Finding
     rule_text: str
+    # The labels of the other answered questions whose answers disagree with this one, and [] when
+    # none does.
+    conflicts_with: list[str]
 
 
 class FinalJudgeAnswer(_Answer):
