@@ -1,0 +1,18 @@
+# The command that runs the whole test suite, and the longest it may take, in seconds.
+test_command = ["uv", "run", "pytest", "-q"]
+test_timeout_s = 300
+
+# The files agents may change.
+editable = ["src/**", "tests/**"]
+frozen = []
+
+# The project is tiny, so the audit's agents use a cheaper model and smaller caps than the
+# defaults. The caps are measured at API prices; on a subscription nothing is billed.
+[audit]
+max_cost_usd = 10.0
+auditor = { model = "sonnet", budget_usd = 2.0, timeout_s = 900 }
+rules_reviewer = { model = "sonnet", budget_usd = 1.0, timeout_s = 900 }
+standard_reviewer = { model = "sonnet", budget_usd = 1.0, timeout_s = 900 }
+old_list_checker = { model = "sonnet", budget_usd = 1.0, timeout_s = 900 }
+duplicate_judge = { model = "sonnet", budget_usd = 0.5, timeout_s = 600 }
+final_judge = { model = "sonnet", budget_usd = 1.0, timeout_s = 900 }
