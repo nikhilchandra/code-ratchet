@@ -61,8 +61,6 @@ problems left in on purpose: `receipt.py` works out the total itself, copying th
 and `pricing.py` prints a message, although its rules say only the command line may print. Its
 settings use a cheaper model and small caps, so a first run uses little of your plan.
 
-> **Work in progress.** Short excerpts of real output will be added to each step below.
-
 **1. Set up a copy.** ratchet works on a project that is its own git repository, so it cannot
 run inside this one. From this repository's root, give the script a folder that does not exist
 yet:
