@@ -47,29 +47,103 @@ uv sync
 uv run pytest        # runs the tests, with no calls to Claude
 ```
 
-You install `code-ratchet`, and the command you type is `ratchet`.
-
-## What it looks like
-
-> **Work in progress.** Example output from a real run will be added here soon.
+You install `code-ratchet`, and the command you type is `ratchet`. To use it on your own
+projects, install the command once:
 
 ```bash
-ratchet init                          # set up ratchet in your project
-ratchet audit -p "look at pricing"    # agents audit the code; you answer and approve
-ratchet problems                      # read the list of problems
-ratchet refactor --max-jobs 1         # fix one problem: plan, test, change, check, review
-ratchet problems P3 --history         # everything that happened to one problem
+uv tool install git+https://github.com/nikhilchandra/code-ratchet
 ```
 
-A problem in a published list looks like this:
+## Try it on the example
+
+[examples/shop](examples/shop) is a 40-line project made for trying ratchet. It has two design
+problems left in on purpose: `receipt.py` works out the total itself, copying the tax rate,
+and `pricing.py` prints a message, although its rules say only the command line may print. Its
+settings use a cheaper model and small caps, so a first run uses little of your plan.
+
+> **Work in progress.** Short excerpts of real output will be added to each step below.
+
+**1. Set up a copy.** ratchet works on a project that is its own git repository, so it cannot
+run inside this one. From this repository's root, give the script a folder that does not exist
+yet:
+
+```bash
+uv run python examples/shop/try_it.py ~/shop                        # macOS or Linux
+uv run python examples/shop/try_it.py C:/Users/you/Desktop/shop     # Windows
+```
+
+It copies the example there, makes the copy a git repository with one commit, and runs
+`ratchet init`. It calls no agent. Then go to the copy with `cd`, using the folder you gave.
+
+**2. Read the two files you would write for your own project.**
+
+- `.ratchet/rules.md` says how the code should be organized: what the project is for, its
+  parts, which part may use which, and which parts may touch the outside world, such as
+  printing. A block at the end states the same rules in a form that plain code can check.
+- `.ratchet/config.toml` says how to run the tests, which files agents may change, and how much
+  each agent may use.
+
+**3. Audit the code.**
+
+```bash
+ratchet audit -p "look at how the total is worked out"
+```
+
+The `-p` text tells the agents where to look first. ratchet runs its own code checks, then the
+agents read the code and compare it with your rules. If they have questions, ratchet asks them
+in the terminal. Then it shows a summary of the draft list and offers `[a]pprove`, `[e]dit`,
+`[d]iscard` or `[l]ater`. Approve it, and the list is saved in `.ratchet/`. It should hold the
+two planted problems, and it may find more.
+
+**4. Read the list.**
+
+```bash
+ratchet problems        # one line for each problem
+ratchet problems P1     # the full entry for one problem
+```
+
+An entry looks like this:
 
 ```markdown
-### P3. Tax is rounded in two places
+### P1. The receipt works out the total itself
 
 Status: open
-Grade: stated (Breaks: "a fact is written in one place")
-Subject: invoices.pricing.price_with_tax
+Grade: stated (Breaks: "pricing is the only place that knows the tax rate")
+Subject: shop.receipt.receipt
 ```
+
+**5. Fix one problem.**
+
+```bash
+ratchet refactor --max-jobs 1
+```
+
+ratchet prints one line for each step of the job: the plan, the check of the plan, the tests
+written first, the change, the test run, the checks, and the review. If the change passes, it
+is committed. Run `git log` and `git show` in the copy to see it. If it keeps failing, it is
+undone and the code is as it was.
+
+**6. Follow a problem.**
+
+```bash
+ratchet problems P1 --history
+```
+
+This shows everything that happened to the problem: when the audit found it, when a job
+started on it, and when it was finished. Run `ratchet refactor` again for the next problem.
+
+## Start with your own project
+
+In a Python project that uses git and pytest, with nothing uncommitted and its tests passing:
+
+1. **`ratchet init`** creates `.ratchet/`, with a `config.toml` and a `rules.md` to fill in. It
+   keeps them in a git repository of their own, out of your project's history.
+2. **Fill in `.ratchet/rules.md`,** using the shop example's as a guide, and set the test
+   command in `.ratchet/config.toml`.
+3. **Run `ratchet audit`, then `ratchet refactor --max-jobs 1`,** as in steps 3 to 6 above.
+
+The default settings use stronger models and larger caps than the example, so an audit of a
+real project uses a good share of your plan. You can lower them in `config.toml`.
 
 ## How an audit works
 
