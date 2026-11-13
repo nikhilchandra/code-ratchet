@@ -9,7 +9,7 @@ resolution-markers = [
 [[package]]
 name = "agent-rooster"
 version = "0.1.0"
-source = { git = "https://github.com/nikhilchandra/agent-rooster.git#65f84ce88bb1881855e2050f322d48e17051927f" }
+source = { git = "https://github.com/nikhilchandra/agent-rooster.git#cadc24ca986875ed2061e07a60d789588aed0d67" }
 dependencies = [
     { name = "claude-agent-sdk" },
     { name = "pydantic" },
