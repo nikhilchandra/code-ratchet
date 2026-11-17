@@ -115,6 +115,7 @@ from ratchet.project import FOLDER, Project, read_markdown
 from ratchet.problem_history import problem_history, publish_time
 from ratchet.problems_view import describe_event
 from ratchet.records import commit_records, has_records, records_log
+from ratchet.refactor.progress_lines import count_of
 from ratchet.refactor.ledger import (
     Ledger,
     ProblemEvent,
@@ -143,6 +144,10 @@ EVENT_TIME = "%Y-%m-%d %H:%M"
 
 # A function that makes the audit's agents, with the arguments of make_agents().
 AgentMaker = Callable[[Project, AuditSettings, Path], dict[str, Agent]]
+
+
+def _say_nothing(line: str) -> None:
+    """Shows nothing, for an audit that runs without a console."""
 
 
 class AuditError(RuntimeError):
@@ -738,7 +743,7 @@ def _oldest_ratchet_commit(repo: Repo) -> str:
 
 def build_audit_graph(
     project: Project, settings: AuditSettings, agent_maker: AgentMaker = make_agents,
-    force_first: bool = False,
+    force_first: bool = False, say: Callable[[str], None] = _say_nothing,
 ) -> AgentGraph:
     """Returns the graph that carries one audit through its nine steps.
 
@@ -751,6 +756,8 @@ def build_audit_graph(
         settings: The audit command's settings.
         agent_maker: The function that makes the audit's agents.
         force_first: True to audit as a first audit even when the project has a problem list.
+        say: Shows one line of progress to the owner. Each step says what it is about to do
+            and what it found, and the lines are also kept in the audit's run.log.
 
     Returns:
         The graph, ready to start jobs. A job waits at the questions gate for
@@ -781,6 +788,17 @@ def build_audit_graph(
                 f"the next step may spend up to ${needed:.2f}, and the audit has spent "
                 f"${total:.2f} of its ${settings.max_cost_usd:.2f} cap"
             )
+
+    def progress(job: Job, text: str, cost_usd: float | None = None) -> None:
+        """Shows one line of progress after the time, with what an agent turn cost when there
+        was one, and adds the line to the audit's run.log."""
+        now = datetime.now()
+        cost = f"  ${cost_usd:.2f}" if cost_usd is not None else ""
+        say(f"{now:%H:%M}  {text}{cost}")
+        folder = folder_of(job)
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / "run.log").open("a", encoding="utf-8") as file:
+            file.write(f"{now:%Y-%m-%d %H:%M:%S}  {text}{cost}\n")
 
     def note(job: Job, text: str) -> None:
         """Adds a sentence for the owner that belongs to no entry."""
@@ -835,8 +853,12 @@ def build_audit_graph(
         design = read_target_design(project.rules)
         folder = folder_of(job)
         folder.mkdir(parents=True, exist_ok=True)
-        _write_json(folder / "code-findings.json", check_architecture(project, design))
-        _write_json(folder / "inventory.json", build_inventory(project, design))
+        code_findings = check_architecture(project, design)
+        inventory = build_inventory(project, design)
+        _write_json(folder / "code-findings.json", code_findings)
+        _write_json(folder / "inventory.json", inventory)
+        progress(job, f"the code checks found {count_of(len(code_findings), 'problem')} in "
+                      f"{count_of(len({item.file for item in inventory}), 'file')}")
         job.data.update(head=repo.run("rev-parse", "HEAD").strip(), reaudit=reaudit, notes=[],
                         hidden=list(hidden_paths(project, settings)),
                         old_list="", published="",
@@ -884,6 +906,8 @@ def build_audit_graph(
         chosen = agents_of(job)
         # with .ratchet in the history, the auditor stands in for the blind auditor
         blind = chosen[Role.AUDITOR if ratchet_commit else BLIND_AUDITOR]
+        progress(job, f"the {_spoken(blind.name)} reads the code, and the old list checker "
+                      f"checks the {count_of(len(old_ids), 'problem')} of {old_name}")
         blind_auditor_reply, old_list_checker_reply = ask_together(
             [(blind, blind_auditor_prompt), (chosen[Role.OLD_LIST_CHECKER], old_list_checker_prompt)],
             folder / "prompts")
@@ -896,6 +920,11 @@ def build_audit_graph(
         _write_json(folder / f"{BLIND_AUDITOR}.json", blind_auditor_reply.data)
         note_units(job, BLIND_AUDITOR, blind_auditor_reply.data, inventory)
         check_turn(job, Role.OLD_LIST_CHECKER, old_list_checker_reply.log_path)
+        progress(job, f"the {_spoken(blind.name)} found {_found(blind_auditor_reply.data)}",
+                 blind_auditor_reply.cost_usd)
+        progress(job, "the old list checker checked "
+                      f"{count_of(len(old_list_checker_reply.data.checks), 'old problem')}",
+                 old_list_checker_reply.cost_usd)
 
         # ask again for the old ids that have no current place, and keep the better checks
         answer: OldListCheckerAnswer = old_list_checker_reply.data
@@ -907,6 +936,8 @@ def build_audit_graph(
                 chosen[Role.OLD_LIST_CHECKER],
                 format_old_list_checker_prompt(old_text, histories, records, git_log, hints, unusable),
                 folder / "prompts" / "retry")
+            progress(job, f"the old list checker was asked again about {', '.join(unusable)}",
+                     retry.cost_usd)
             check_turn(job, Role.OLD_LIST_CHECKER, retry.log_path)
             again = {check.id: check for check in retry.data.checks}
             kept = {check.id: check for check in answer.checks}
@@ -929,8 +960,10 @@ def build_audit_graph(
         check_cost(job, settings.auditor.budget_usd)
         inventory = _load_inventory(folder)
         prompt = format_auditor_prompt(job.prompt, _load_code_findings(folder), inventory)
+        progress(job, "the auditor reads the code")
         reply = ask(agents_of(job)[Role.AUDITOR], prompt, folder / "prompts")
         answer: AuditorAnswer = reply.data
+        progress(job, f"the auditor found {_found(answer)}", reply.cost_usd)
         _write_json(folder / "auditor.json", answer)
         note_units(job, "auditor", answer, inventory)
         check_turn(job, "auditor", reply.log_path, sorted({item.file for item in inventory}))
@@ -945,11 +978,15 @@ def build_audit_graph(
         prompt = format_review_prompt(entries, _load_code_findings(folder))
         chosen = agents_of(job)
         requests = [(chosen[role], prompt) for role in REVIEWERS]
+        progress(job, "the rules reviewer and the standard reviewer check the auditor's "
+                      f"{count_of(len(listed), 'problem')}")
         for (agent, _), reply in zip(requests, ask_together(requests, folder / "prompts")):
             if isinstance(reply, NoAnswerError):
                 note(job, f"{reply}, so the audit went on without that review")
                 continue
             _write_json(folder / f"{agent.name}.json", reply.data)
+            progress(job, f"the {_spoken(agent.name)} added {_found(reply.data, 'added')}",
+                     reply.cost_usd)
             given = {verdict.label for verdict in reply.data.reviews}
             missing = [label for label in entries if label not in given]
             if missing:
@@ -987,6 +1024,9 @@ def build_audit_graph(
         verdicts = []
         if candidates or question_candidates:
             check_cost(job, settings.duplicate_judge.budget_usd)
+            progress(job, "the duplicate judge decides whether "
+                          f"{count_of(len(candidates) + len(question_candidates), 'pair')} "
+                          "of findings or questions are the same")
             try:
                 reply = ask(agents_of(job)[Role.DUPLICATE_JUDGE],
                             format_duplicate_judge_prompt([*candidates, *question_candidates]),
@@ -995,6 +1035,9 @@ def build_audit_graph(
                 note(job, f"{error}, so no pair was joined by its decision")
             else:
                 verdicts = reply.data.pairs
+                same = sum(1 for verdict in verdicts if verdict.same)
+                progress(job, f"the duplicate judge found {count_of(same, 'pair')} the same",
+                         reply.cost_usd)
                 check_turn(job, Role.DUPLICATE_JUDGE, reply.log_path)
         groups, records = join_pairs(groups, candidates, verdicts)
         question_groups, question_records = join_pairs(question_groups, question_candidates, verdicts)
@@ -1003,6 +1046,9 @@ def build_audit_graph(
         _write_json(folder / "question-pairs.json", question_records)
         _write_json(folder / "questions.json", _merged_questions(asked, question_items, question_groups))
         _write_json(folder / "groups.json", {"groups": result.groups, "done": result.done})
+        progress(job, f"grouping turned {count_of(len(items), 'finding')} into "
+                      f"{count_of(len(result.groups), 'problem')} and "
+                      f"{count_of(len(question_groups), 'question')}")
         return "check-citations"
 
     @graph.step("check-citations", next=("questions", "check"))
@@ -1014,6 +1060,9 @@ def build_audit_graph(
         groups = [_fix_group(root, group, results) for group in result.groups]
         done = [_fix_group(root, group, results) for group in result.done]
         (folder / "citations.md").write_text(render_report(results), encoding="utf-8")
+        wrong = sum(1 for checked in results if checked.fixed is None)
+        progress(job, f"checked {count_of(len(results), 'quoted passage')} against the code, "
+                      f"and {wrong} could not be found")
         _write_json(folder / "groups.json", {"groups": groups, "done": done})
         return "questions" if _read_json(folder / "questions.json") else "check"
 
@@ -1069,8 +1118,11 @@ def build_audit_graph(
                     reviews.setdefault(verdict.label, []).append(verdict)
             prompt = format_final_judge_prompt(
                 asked, (folder / "citations.md").read_text(encoding="utf-8"), answered, reviews)
+            progress(job, f"the final judge decides {count_of(len(asked), 'problem')} and "
+                          f"{count_of(len(answered), 'answered question')}")
             reply = ask(agents_of(job)[Role.FINAL_JUDGE], prompt, folder / "prompts")
             judged = reply.data
+            progress(job, "the final judge is done", reply.cost_usd)
             _write_json(folder / f"{Role.FINAL_JUDGE}.json", judged)
             check_turn(job, Role.FINAL_JUDGE, reply.log_path)
 
@@ -1335,6 +1387,22 @@ def build_audit_graph(
         return None
 
     return graph
+
+
+def _spoken(name: str) -> str:
+    """Returns an agent's name as it is said, such as "rules reviewer" for "rules_reviewer"."""
+    return name.replace("_", " ")
+
+
+def _found(answer: AuditorAnswer | ListReview, field: str = "problems") -> str:
+    """Returns what an auditor found or a reviewer added, such as "3 problems, 1 question, 0 bugs".
+
+    Args:
+        answer: The auditor's or the reviewer's answer.
+        field: "problems" for an auditor's answer, or "added" for a reviewer's.
+    """
+    return (f"{count_of(len(getattr(answer, field)), 'problem')}, "
+            f"{count_of(len(answer.questions), 'question')}, {count_of(len(answer.bugs), 'bug')}")
 
 
 def _moved_since_start(project: Project, head: str) -> str:

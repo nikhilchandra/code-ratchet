@@ -81,9 +81,13 @@ class AuditRun:
     draft_path: str = ""
 
 
-def _graph(project: Project, agent_maker: AgentMaker, force_first: bool = False) -> AgentGraph:
-    """Returns the audit graph of a project, with the settings from its config.toml."""
-    return build_audit_graph(project, load_settings(project), agent_maker, force_first)
+def _graph(
+    project: Project, agent_maker: AgentMaker, force_first: bool = False,
+    show: Callable[[str], None] = print,
+) -> AgentGraph:
+    """Returns the audit graph of a project, with the settings from its config.toml, which shows
+    its progress lines with 'show'."""
+    return build_audit_graph(project, load_settings(project), agent_maker, force_first, show)
 
 
 def waiting_audit(graph: AgentGraph) -> Job | None:
@@ -321,7 +325,7 @@ def start_audit(
     if interactive is None:
         interactive = is_interactive()
     settings = load_settings(project)
-    graph = build_audit_graph(project, settings, agent_maker, fresh)
+    graph = build_audit_graph(project, settings, agent_maker, fresh, show)
     slug = _new_slug(graph, datetime.now().strftime("audit-%Y%m%d-%Hh%Mm"))
     take_lock(project, graph=AUDIT, job=slug, job_file=graph.state_dir / f"{slug}.json", say=show)
     try:
@@ -353,7 +357,8 @@ def start_audit(
 
 
 def settle_audit(
-    project: Project, decision: str, agent_maker: AgentMaker = make_agents
+    project: Project, decision: str, agent_maker: AgentMaker = make_agents,
+    show: Callable[[str], None] = print,
 ) -> AuditRun:
     """Approves or discards the draft of the audit that is waiting.
 
@@ -361,6 +366,7 @@ def settle_audit(
         project: The project, as read from its .ratchet folder.
         decision: APPROVE or DISCARD.
         agent_maker: The function that makes the audit's agents.
+        show: Writes one line of the audit's progress to the owner.
 
     Returns:
         The run, published or discarded. An audit that waited at the questions gate and is
@@ -375,7 +381,7 @@ def settle_audit(
         ProjectError: The [audit] section of config.toml is wrong.
         GitError: A git command failed.
     """
-    graph = _graph(project, agent_maker)
+    graph = _graph(project, agent_maker, show=show)
     job = waiting_audit(graph)
     if job is None:
         raise AuditError("no audit is waiting for a decision. Start one with `ratchet audit`.")

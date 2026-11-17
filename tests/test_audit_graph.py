@@ -218,6 +218,35 @@ def audit_folder(project: Project, slug: str = SLUG) -> Path:
     return project.state_dir / "audits" / slug
 
 
+def test_a_full_walk_shows_a_line_for_each_stage_and_keeps_them_in_run_log(
+    audit_project: Project,
+) -> None:
+    """Proves an audit that runs to its draft shows a progress line as each stage starts and
+    ends, with each agent turn's cost, and writes the same lines to the audit's run.log."""
+    shown: list[str] = []
+    answers = {"auditor": AuditorAnswer, "rules_reviewer": ListReview,
+               "standard_reviewer": ListReview, "duplicate_judge": DuplicateJudgeAnswer,
+               "final_judge": FinalJudgeAnswer}
+    turns = default_turns(audit_project)
+    agents = {name: ScriptedAgent(name, schema, turns.get(name, []), cost_usd=0.5)
+              for name, schema in answers.items()}
+    graph = build_audit_graph(audit_project, AuditSettings(), lambda *_: agents, say=shown.append)
+
+    graph.start("", slug=SLUG)
+
+    # drop the time in front of each line
+    lines = [line[7:] for line in shown]
+    assert lines[0].startswith("the code checks found ")
+    assert lines[1] == "the auditor reads the code"
+    assert lines[2].startswith("the auditor found ") and lines[2].endswith("$0.50")
+    assert any(line.startswith("the rules reviewer added ") for line in lines)
+    assert any(line.startswith("grouping turned ") for line in lines)
+    assert any(line.startswith("checked ") for line in lines)
+    assert lines[-1] == "the final judge is done  $0.50"
+    logged = (audit_folder(audit_project) / "run.log").read_text(encoding="utf-8").splitlines()
+    assert [line[21:] for line in logged] == lines
+
+
 def test_a_full_walk_publishes_a_readable_list_and_commits(
     audit_project: Project, start
 ) -> None:
