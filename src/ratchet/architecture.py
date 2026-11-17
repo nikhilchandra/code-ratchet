@@ -4,7 +4,7 @@ The checker reads each module's imports and syntax tree. With a target design fr
 finds imports the design does not allow, files that belong to no part, and places where a module
 in a part that may not touch the outside world does so. With or without a design, it finds import
 cycles, imports inside functions, global statements, mutable default arguments, bare except
-clauses and except clauses that only pass.
+clauses, and except clauses that catch every error and only pass.
 
 The module also holds find_modules, read_imports and parse_module, which the audit's code facts
 and grouping use too.
@@ -702,6 +702,16 @@ def _is_mutable(node: ast.expr) -> bool:
     return False
 
 
+def _catches_everything(handler: ast.ExceptHandler) -> bool:
+    """Tells whether an except clause catches every error: a bare except, or one that names
+    Exception or BaseException, alone or in a tuple."""
+    if handler.type is None:
+        return True
+    named = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(isinstance(name, ast.Name) and name.id in ("Exception", "BaseException")
+               for name in named)
+
+
 def _syntax_findings(module: Module, tree: ast.Module, lines: list[str]) -> list[CodeFinding]:
     """Finds the global statements, mutable defaults and careless handlers in a module.
 
@@ -727,8 +737,10 @@ def _syntax_findings(module: Module, tree: ast.Module, lines: list[str]) -> list
         elif isinstance(node, ast.ExceptHandler):
             if node.type is None:
                 found["bare_except"].append((node.lineno, "has a bare except"))
-            if all(isinstance(statement, ast.Pass) for statement in node.body):
-                found["silent_except"].append((node.lineno, "ignores the error with pass"))
+            # a handler of one named error, such as FileNotFoundError, may pass on purpose
+            if _catches_everything(node) and all(isinstance(statement, ast.Pass)
+                                                 for statement in node.body):
+                found["silent_except"].append((node.lineno, "ignores every error with pass"))
 
     kinds = {
         "global_statement": (
@@ -747,9 +759,9 @@ def _syntax_findings(module: Module, tree: ast.Module, lines: list[str]) -> list
             "has no bare except",
         ),
         "silent_except": (
-            "S14", "except clauses that only pass",
-            "Handle the error, log it, or let it rise.",
-            "has no except clause that only passes",
+            "S14", "except clauses that catch every error and only pass",
+            "Catch only the errors that are expected, and handle, log or raise the rest.",
+            "has no except clause that catches every error and only passes",
         ),
     }
     findings = []

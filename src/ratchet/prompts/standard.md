@@ -56,8 +56,10 @@ agents need not hunt for it line by line.
 
 ## Errors and types
 
-- **S14. Errors are not swallowed.** A bare `except` and an `except ...: pass` are faults. A caught
-  error is handled, reported or raised again. Found by code.
+- **S14. Errors are not swallowed.** A bare `except`, and an `except Exception: pass` that ignores
+  every error, are faults. A caught error is handled, reported or raised again. Passing on one
+  named error that the code expects, such as `except FileNotFoundError: pass`, is not a fault.
+  Found by code.
 - **S16. Named shapes for data.** Data that moves between functions has a named type. Loose
   dictionaries and tuples whose keys or positions must be remembered are faults.
 

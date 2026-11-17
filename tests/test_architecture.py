@@ -415,7 +415,8 @@ def test_global_statements_and_mutable_defaults_are_standard_s11(tmp_path: Path)
 
 
 def test_bare_and_silent_except_are_standard_s14(tmp_path: Path) -> None:
-    """Proves bare excepts and handlers that only pass are cited, and handled errors are not."""
+    """Proves a bare except and a handler of Exception that only passes are cited, and that a
+    handled error and a pass on one named error are not."""
     project = make_project(tmp_path, {
         **package(),
         "src/app/a.py": (
@@ -426,12 +427,16 @@ def test_bare_and_silent_except_are_standard_s14(tmp_path: Path) -> None:
             "        handle()\n"
             "    try:\n"
             "        run()\n"
-            "    except ValueError:\n"
+            "    except (ValueError, Exception):\n"
             "        pass\n"
             "    try:\n"
             "        run()\n"
             "    except KeyError:\n"
             "        raise\n"
+            "    try:\n"
+            "        run()\n"
+            "    except FileNotFoundError:\n"
+            "        pass\n"
         ),
     })
 
@@ -443,5 +448,5 @@ def test_bare_and_silent_except_are_standard_s14(tmp_path: Path) -> None:
     assert [(item.line, item.quote.strip()) for item in bare.evidence] == [(4, "except:")]
     assert silent.breaks == "S14"
     assert [(item.line, item.quote.strip()) for item in silent.evidence] == [
-        (8, "except ValueError:")
+        (8, "except (ValueError, Exception):")
     ]
