@@ -56,7 +56,7 @@ def test_questions_skip_empty_and_dont_know():
     shown: list[str] = []
     ask = scripted(["yes it is deliberate", "", "Don't know"])
     assert ask_questions(questions, ask, shown.append) == {"Q1": "yes it is deliberate"}
-    assert "Q2. title 2" in shown
+    assert "Q2 of 3. title 2" in shown
 
 
 def test_summary_counts_and_notes():
@@ -67,6 +67,7 @@ def test_summary_counts_and_notes():
     assert "P1  new  stated  [L1, C1]  strip written twice" in text
     assert "- HEAD is clean" in text
     assert "- check this one" in text
+    assert "Found by: C ratchet's code checks, L the auditor, O the last list, under its old id" in text
 
 
 def test_editor_command_prefers_visual(monkeypatch):

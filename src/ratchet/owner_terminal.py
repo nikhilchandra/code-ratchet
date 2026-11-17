@@ -15,6 +15,7 @@ from collections.abc import Callable, Collection, Iterable
 from pathlib import Path
 from typing import TextIO
 
+from ratchet.audit.grouping import source_key
 from ratchet.audit.list_markdown import Draft, DraftQuestion, check_draft
 
 # The answers that leave a question unanswered.
@@ -55,7 +56,7 @@ def ask_questions(
     answers: dict[str, str] = {}
     for question in questions:
         show("")
-        show(f"{question.id}. {question.title}")
+        show(f"{question.id} of {len(questions)}. {question.title}")
         if question.text:
             show(question.text)
         answer = ask("Answer (empty to skip): ").strip()
@@ -72,7 +73,8 @@ def draft_summary(draft: Draft) -> str:
 
     Returns:
         The counts of problems by status and by grade, a line for each problem with its status,
-        grade and sources, and then the owner notes.
+        grade and sources, a line that says who each source letter stands for, and then the
+        owner notes.
     """
     lines = [
         f"{len(draft.problems)} problems, {len(draft.questions)} questions, "
@@ -86,6 +88,9 @@ def draft_summary(draft: Draft) -> str:
             f"{problem.id}  {problem.status}  {problem.grade}  "
             f"[{', '.join(problem.sources)}]  {problem.title}"
         )
+    key = source_key(source for problem in draft.problems for source in problem.sources)
+    if key:
+        lines += ["", key]
     notes = draft.notes + [note for problem in draft.problems for note in problem.notes]
     if notes:
         lines.append("")

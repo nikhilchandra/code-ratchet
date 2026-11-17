@@ -7,6 +7,7 @@ duplicate judge's, on the few pairs that its rules cannot settle.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 from ratchet import architecture
@@ -32,6 +33,17 @@ ADDED_B = "B"  # the findings that the standard reviewer added
 OLD = "O"
 NOTES = "R"
 BLIND_AUDITOR = "F"
+
+# what each source letter stands for, in the order that a key lists them
+SOURCE_NAMES = {
+    CODE: "ratchet's code checks",
+    LISTED: "the auditor",
+    ADDED_A: "the rules reviewer",
+    ADDED_B: "the standard reviewer",
+    BLIND_AUDITOR: "the blind auditor",
+    OLD: "the last list, under its old id",
+    NOTES: "the old list checker, from reviewers' notes",
+}
 
 # the order in which a source's text is chosen for a group
 TEXT_ORDER = (OLD, NOTES, LISTED, ADDED_A, ADDED_B, BLIND_AUDITOR, CODE)
@@ -171,6 +183,21 @@ class GroupingResult:
 
     groups: tuple[Group, ...]
     done: tuple[Group, ...]
+
+
+def source_key(labels: Iterable[str]) -> str:
+    """Returns the line that says who found the problems, for the source letters in 'labels'.
+
+    Args:
+        labels: Source labels such as "C1", "L3" or "O P7".
+
+    Returns:
+        A line such as "Found by: C ratchet's code checks, L the auditor", naming only the
+        letters that appear, or "" when there are none.
+    """
+    letters = {label[:1] for label in labels}
+    named = [f"{letter} {name}" for letter, name in SOURCE_NAMES.items() if letter in letters]
+    return "Found by: " + ", ".join(named) if named else ""
 
 
 def make_items(

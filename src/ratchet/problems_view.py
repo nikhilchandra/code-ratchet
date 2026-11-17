@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from ratchet.audit.grouping import source_key
 from ratchet.problem_history import problem_history, publish_time
 from ratchet.project import Project, ProjectError, read_markdown
 from ratchet.refactor.ledger import ProblemEvent, load_ledger
@@ -66,26 +67,35 @@ def _list_lines(project: Project, created: datetime, path: Path, heading: bool) 
         heading: Whether to start with a line naming the list and its publish time.
 
     Returns:
-        A line for each problem with its id, status, grade and title, then a last line that
-        counts the questions and the dropped entries.
+        A line for each problem with its id, status, grade, sources and title, then a line that
+        counts the questions and the dropped entries, and a line that says who each source
+        letter stands for.
     """
     entries = split_entries(read_markdown(project.folder, path.name))
+    problems = [entry for entry in entries if entry.is_problem]
+    sources = {entry.id: [source.strip() for source in entry.fields.get("Sources", "").split(",")
+                          if source.strip()] for entry in problems}
     rows = [
         (entry.id, _status_text(project, path.stem, entry.id),
-         entry.fields.get("Grade", "").split(" ")[0] or "-", entry.title)
-        for entry in entries if entry.is_problem
+         entry.fields.get("Grade", "").split(" ")[0] or "-",
+         f"[{', '.join(sources[entry.id])}]" if sources[entry.id] else "", entry.title)
+        for entry in problems
     ]
-    widths = [max((len(row[column]) for row in rows), default=0) for column in range(3)]
+    widths = [max((len(row[column]) for row in rows), default=0) for column in range(4)]
     lines = []
     if heading:
         lines.append(f"{path.stem}  {publish_time(project, path.stem, created)}")
-    for problem_id, status, grade, title in rows:
-        lines.append(f"{problem_id:<{widths[0]}}  {status:<{widths[1]}}  "
-                     f"{grade:<{widths[2]}}  {title}")
+    for row in rows:
+        # the sources column is left out when no problem names its sources
+        columns = [f"{text:<{width}}" for text, width in zip(row, widths) if width]
+        lines.append("  ".join([*columns, row[4]]))
     questions = sum(1 for entry in entries if entry.id.startswith("Q"))
     dropped = sum(1 for entry in entries if entry.id.startswith("D"))
     lines.append(f"{count_of(questions, 'question')}, "
                  f"{count_of(dropped, 'dropped entry', 'dropped entries')}")
+    key = source_key(label for labels in sources.values() for label in labels)
+    if key:
+        lines.append(key)
     return lines
 
 

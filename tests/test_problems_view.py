@@ -72,6 +72,20 @@ def event(when: str, kind: str, by: str = "audit", **fields: str) -> ProblemEven
     return ProblemEvent(when=when, kind=kind, by=by, **fields)
 
 
+def test_the_list_shows_who_found_each_problem_and_a_key(tmp_path: Path) -> None:
+    """Proves each problem's sources are shown after its grade, and a last line names the
+    letters that appear."""
+    text = FIRST_LIST.replace("Grade: stated", "Sources: L1, C2\nGrade: stated")
+    project = make_project(tmp_path, **{FIRST: text})
+
+    assert show_lists(project, every_list=False).splitlines() == [
+        "P7  open  stated    [L1, C2]  strip handling written twice",
+        "P8  open  standard            models imports cli",
+        "0 questions, 0 dropped entries",
+        "Found by: C ratchet's code checks, L the auditor",
+    ]
+
+
 def test_the_latest_list_shows_id_status_grade_and_title(tmp_path: Path) -> None:
     """Proves the newest list is shown with the ledger's status and the Grade line."""
     project = make_project(tmp_path, **{FIRST: FIRST_LIST})
